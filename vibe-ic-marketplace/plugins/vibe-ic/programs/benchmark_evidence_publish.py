@@ -158,9 +158,20 @@ cannot disagree about what "cites" means -- is resolved along the gate's own
 ladder (the citing document's directory, then each ancestor to the cell root).
 A rung that names a regular file in the RUN tree is STAGED at that same
 relative path: it is evidence by definition, the document's own proof, and the
-reader following the pointer finds it exactly where the document said. ONE
-reason not to: the commit ceiling, recorded OVER_CEILING. Two policies the
-closure defers to rather than overrides, because each already has a record of
+reader following the pointer finds it exactly where the document said.
+Citation copies are bounded UTF-8 text: at most 1,000,000 bytes per file and
+10,000,000 source bytes per cell, deduplicated by published path (#3315).
+Only public run logs and legitimate project proof inputs of the declared
+text types are eligible; private/reference/answer datasets, build residue,
+binary files and paths outside the source project are not pulled in.
+The caller supplies a sanitized public project, not private answer data.
+Each decision, copied byte count and sha256 ships in CITATION_ROUTING.txt
+as a `# text-evidence` JSON comment. Named refusals retain honest absence;
+an existing FAIL remains FAIL. The native formal consumer's .sby input
+extractor closes proof dependencies too, and missing dependencies invalidate
+their citing PASS. Project-absolute JSON references become cell-relative;
+unportable .sby/Markdown references are not silently rewritten.
+Two policies the closure defers to, because each already has a record of
 its own: a cited LAYOUT artefact (`.gds`/`.def`/`.spef`/`.oas`) stays under the
 size-and-scope routing in `LAYOUT_ROUTING.txt`, and a cited `steps/` path stays
 under `STEP_ROUTING.txt` (the view is symlinks and is recorded, not mirrored).
@@ -334,6 +345,16 @@ _LAYOUT_EXTS = (".gds", ".def", ".spef", ".oas")
 # actually blocks the commit. `_size_policy_drift_check` below fails if these
 # two, `.gitignore`, and this module's docstring ever stop agreeing.
 _SIZE_CEILING = 50 * 1000 * 1000
+# Citation closure is for small public logs and project proof inputs (#3315),
+# not an alternate bulk-data publication path. Count each cell path once.
+_CITED_TEXT_FILE_LIMIT = 1_000_000
+_CITED_TEXT_CELL_BUDGET = 10_000_000
+_CITED_TEXT_EXTS = frozenset({
+    ".log", ".rpt", ".json", ".txt", ".md", ".sby", ".v", ".sv", ".sdc", ".tcl",
+})
+_PRIVATE_EVIDENCE_PARTS = frozenset({
+    "private", "reference", "golden", "oracle", "answers", "datasets", "credentials",
+})
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _CONVERGED = ("PASS", "PASS_WITH_WAIVERS")
@@ -1163,7 +1184,8 @@ def collect_citation_records(dest: Path, *,
     # building this: the first version attributed citations to a directory that
     # is not in the published tree at all. Same defect this repo fixed in four
     # programs (#447) — reproduced here, in the fix for it.
-    docs = sorted(dest.rglob("*.json")) + sorted(dest.rglob("*.md"))
+    docs = (sorted(dest.rglob("*.json")) + sorted(dest.rglob("*.md"))
+            + sorted(dest.rglob("*.sby")))
     if not freshly_staged:
         docs = _published_tree.filter_to_published(dest, docs)
     for doc in docs:
@@ -1174,8 +1196,7 @@ def collect_citation_records(dest: Path, *,
         rel_doc = doc.relative_to(dest).as_posix()
         asserted = _citations_under_a_pass(text)
         absolute = _absolute_citation_values(text)
-        for cited in sorted(set(_CITED_RE.findall(text)) | absolute
-                            | _gate_citations(doc)):
+        for cited in sorted(_document_citations(doc) | absolute):
             key = (rel_doc, cited)
             if key in seen:
                 continue
@@ -1206,8 +1227,8 @@ def collect_citation_records(dest: Path, *,
                 # "the reader gets it", and "absent" is not the same fact as
                 # "the publisher's layout excludes it".
                 decision = None
-                if (dest / cited).exists():
-                    on_disk.add(cited)
+                on_disk.update(rung for rung in _closure_rungs(rel_doc, cited)
+                               if (dest / rung).is_file())
             pending.append({"doc": rel_doc, "cited": cited,
                             "decision": decision,
                             "asserted": cited in asserted})
@@ -1220,7 +1241,7 @@ def collect_citation_records(dest: Path, *,
         decision = row["decision"]
         if decision is None:
             cited = str(row["cited"])
-            if cited in carried:
+            if any(rung in carried for rung in _closure_rungs(str(row["doc"]), cited)):
                 decision = "RESOLVES"
             elif _layout_excludes(cited, carried_dirs):
                 decision = "OUT_OF_PUBLISHED_SCOPE"
@@ -1236,6 +1257,42 @@ def collect_citation_records(dest: Path, *,
         out.append({"doc": str(row["doc"]), "cited": str(row["cited"]),
                     "decision": str(decision)})
     return out
+
+
+def _document_citations(doc: Path) -> set:
+    """Use the native citation/proof readers, plus structured project paths.
+
+    A .sby is a proof-input manifest too: shipping it without its named RTL
+    leaves the native formal consumer unable to resolve the proof chain.
+    Descriptive strings are still handled by the existing gate extractor;
+    they are never guessed into filenames here.
+    """
+    text = doc.read_text(errors="replace")
+    if doc.suffix.lower() == ".sby":
+        from formal_proof_evidence_check import _sby_file_refs
+        return set(_sby_file_refs(text))
+    found = set(_CITED_RE.findall(text)) | _gate_citations(doc)
+    if doc.suffix.lower() != ".json":
+        return found
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return found
+
+    def walk(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                path_key = (key in _CITE_KEYS or key == "tool_state"
+                            or key.endswith(("_report", "_rpt", "_log", "_path", "_file")))
+                if (path_key and isinstance(item, str) and Path(item).suffix
+                        and not any(c.isspace() for c in item)):
+                    found.add(item)
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+    walk(data)
+    return found
 
 
 def _absolute_citation_values(text: str) -> set:
@@ -1333,10 +1390,17 @@ def _citations_under_a_pass(text: str) -> set:
 
 
 def write_citation_routing(dest: Path, records: List[Dict[str, str]],
-                           dry: bool = False) -> None:
+                           dry: bool = False, closure: Optional[dict] = None) -> None:
     body = _CITATION_HEADER + "".join(
         f"{r['doc']} :: {r['cited']} {r['decision']}\n"
         for r in sorted(records, key=lambda r: (r["doc"], r["cited"])))
+    if closure is not None:
+        # Comments preserve the routing consumer's existing row grammar.
+        # The cell itself retains hashes, sizes and named refusal reasons;
+        # stdout / the optional --json summary are not the deliverable.
+        body += "# Bounded cited text (#3315): UTF-8, file <= 1000000 B, cell <= 10000000 B\n"
+        body += "".join("# text-evidence " + json.dumps(r, sort_keys=True) + "\n"
+                        for r in closure["records"])
     if not dry:
         dest.mkdir(parents=True, exist_ok=True)
         (dest / _CITATION_ROUTING_FILENAME).write_text(body, encoding="utf-8")
@@ -1358,7 +1422,7 @@ _CLOSURE_ABOVE_CELL = "RESOLVES_ABOVE_CELL"
 #: The verdict an amended gate report carries. The gate's own word for a
 #: report whose evidence is disclosed absent (vibe-ic#381).
 _UNSUBSTANTIATED = "UNSUBSTANTIATED"
-_DOC_SUFFIXES = (".json", ".md")
+_DOC_SUFFIXES = (".json", ".md", ".sby")
 
 
 def _closure_rungs(rel_doc: str, cite: str) -> List[str]:
@@ -1379,42 +1443,84 @@ def _closure_rungs(rel_doc: str, cite: str) -> List[str]:
                 and cand not in out:
             out.append(cand)
         if not rel_dir:
+            # The formal consumer uses the .sby directory and project root,
+            # without the citation gate's intermediate ancestor fallbacks.
+            if rel_doc.endswith(".sby") and out:
+                return list(dict.fromkeys([out[0], out[-1]]))
             return out
         rel_dir = posixpath.dirname(rel_dir)
 
 
 def _close_one(run_dir: Path, dest: Path, dry: bool, rel_doc: str, cite: str,
-               cell_rels: set, above: List[Path]) -> Tuple[str, str]:
+               cell_rels: set, above: List[Path], text_state: dict) -> Tuple[str, str]:
     """Decide -- and, when the answer is STAGED, perform -- the closure of
     ONE citation. Returns `(decision, path)`.
 
-    The first rung that answers wins, in the gate's order. A rung the cell
-    already carries is ALREADY_IN_CELL (nothing to do; the routing row will
-    say RESOLVES). A rung that is a regular file in the RUN is the proof:
-    STAGED at that path unless it is over the commit ceiling, a layout
-    artefact (LAYOUT_ROUTING.txt's policy, not this one's), or under the
-    `steps/` view (STEP_ROUTING.txt's). A citation with no rung in the run is
+    The first rung that answers wins, in the gate's order. Existing copies
+    obey the same text policy and budget as newly discovered evidence. A
+    regular, allowed, bounded UTF-8 project file is staged with its digest.
+    Layout artefacts and the steps/ view retain their own routing policies.
+    A citation with no rung in the run is
     ABSENT_IN_RUN -- unless it resolves ABOVE the cell, where the gate's
     ladder still reaches (`ic/<IC>/…`, `ic/…`) and this program does not
     stage."""
-    for rung in _closure_rungs(rel_doc, cite):
-        if rung in cell_rels or (not dry and (dest / rung).is_file()):
-            return _CLOSURE_IN_CELL, rung
+    if Path(cite).is_absolute():
+        if not rel_doc.endswith(".json"):
+            return "UNALLOWED_TEXT", cite
+        try:
+            rungs = [Path(cite).resolve().relative_to(run_dir.resolve()).as_posix()]
+        except ValueError:
+            return "UNALLOWED_TEXT", cite
+    else:
+        rungs = _closure_rungs(rel_doc, cite)
+    for rung in rungs:
         src = run_dir / rung
         if not src.is_file():
+            if rung in cell_rels:
+                return _CLOSURE_IN_CELL, rung
             continue
         if rung.startswith(_STEPS_DIRNAME + "/"):
             return _CLOSURE_STEP_VIEW, rung
         if is_layout_artefact(src):
+            if rung in cell_rels:
+                return _CLOSURE_IN_CELL, rung
             return _CLOSURE_LAYOUT, rung
         if over_ceiling(src):
             return _CLOSURE_OVER_CEILING, rung
+        try:
+            resolved = src.resolve().relative_to(run_dir.resolve())
+        except ValueError:
+            return "UNALLOWED_TEXT", rung
+        if (src.suffix.lower() not in _CITED_TEXT_EXTS or is_build_residue(src)
+                or any(part.startswith(".") or part.lower() in _PRIVATE_EVIDENCE_PARTS
+                       for part in (*Path(rung).parts, *resolved.parts))):
+            return "UNALLOWED_TEXT", rung
+        if rung in text_state["files"]:
+            return _CLOSURE_IN_CELL, rung
+        if src.stat().st_size > _CITED_TEXT_FILE_LIMIT:
+            return "TEXT_FILE_LIMIT", rung
+        with src.open("rb") as stream:
+            payload = stream.read(_CITED_TEXT_FILE_LIMIT + 1)
+        if len(payload) > _CITED_TEXT_FILE_LIMIT:
+            return "TEXT_FILE_LIMIT", rung
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            return "NOT_TEXT", rung
+        if any(ord(c) < 32 and c not in "\n\r\t\f" for c in text):
+            return "NOT_TEXT", rung
+        if text_state["bytes"] + len(payload) > _CITED_TEXT_CELL_BUDGET:
+            return "TEXT_CELL_BUDGET", rung
+        text_state["bytes"] += len(payload)
+        text_state["files"][rung] = {
+            "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+        already = rung in cell_rels
         if not dry:
             target = dest / rung
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, target)
+            target.write_bytes(payload)
         cell_rels.add(rung)
-        return _CLOSURE_STAGED, rung
+        return (_CLOSURE_IN_CELL if already else _CLOSURE_STAGED), rung
     import posixpath
     norm = posixpath.normpath(cite)
     if not norm.startswith(".."):
@@ -1432,7 +1538,7 @@ def _disclose_absent_evidence(doc: Path, absent: Dict[str, str],
     and the kcite3 precedent (benchmark-data aa8a19b4) applied by hand.
 
     `absent` maps field -> cited path. The field is nulled and its path kept
-    under `evidence_absent`; `verdict` becomes UNSUBSTANTIATED with the run's
+    under `evidence_absent`; a non-FAIL `verdict` becomes UNSUBSTANTIATED with the run's
     word retained as `verdict_as_run`; every other field is left as the run
     wrote it, because which numbers are conclusions is not this program's to
     decide and erasing them would be a second fabrication. Returns a note on
@@ -1443,18 +1549,19 @@ def _disclose_absent_evidence(doc: Path, absent: Dict[str, str],
         return f"could not amend {doc.name}: {exc}"
     if not isinstance(data, dict):
         return f"could not amend {doc.name}: not a JSON object"
-    prior = data.get("verdict")
+    prior = data.get("verdict_as_run", data.get("verdict"))
     for field in absent:
         data[field] = None
-    data["verdict"] = _UNSUBSTANTIATED
+    data["verdict"] = _absent_verdict(data)
     data["verdict_as_run"] = prior
     data["evidence_present"] = False
-    data["evidence_absent"] = dict(sorted(absent.items()))
+    data["evidence_absent"] = dict(sorted({**data.get("evidence_absent", {}), **absent}.items()))
     data["null_because"] = (
         f"benchmark_evidence_publish (#2007) could not close this record's "
         f"citation(s): {', '.join(sorted(set(absent.values())))} do(es) not "
-        f"exist anywhere in the run tree at publish time, so the verdict "
-        f"{prior!r} the run recorded rests on evidence no reader can open. "
+        f"have a complete, allowed text-evidence package in this cell at publish time. "
+        f"The routing record states whether each was missing, refused by policy "
+        f"or had an unavailable proof input. The run recorded {prior!r}. "
         f"The run's other fields are retained as its assertion, not "
         f"claimed here; no replacement artefact was fabricated.")
     try:
@@ -1463,6 +1570,14 @@ def _disclose_absent_evidence(doc: Path, absent: Dict[str, str],
     except OSError as exc:
         return f"could not amend {doc.name}: {exc}"
     return None
+
+
+def _absent_verdict(data: dict):
+    """Absence cannot improve an existing failure, including a later FAIL."""
+    for value in (data.get("verdict"), data.get("verdict_as_run")):
+        if str(value).upper().startswith("FAIL"):
+            return value
+    return _UNSUBSTANTIATED
 
 
 def close_citations(run_dir: Path, dest: Path,
@@ -1490,12 +1605,10 @@ def close_citations(run_dir: Path, dest: Path,
         "n_documents": 0, "n_citations": 0, "already_in_cell": 0,
         "staged": [], "absent": [], "over_ceiling": [], "layout_policy": [],
         "step_view": [], "above_cell": [], "amended": [], "unamended": [],
-        "errors": [],
+        "errors": [], "records": [], "text_bytes": 0,
     }
-    try:
-        import evidence_citation_resolves_check as _g       # sibling program
-    except Exception:
-        _g = None
+    text_state = {"files": {}, "bytes": 0}
+    documents = {}
     seen: set = set()
     above = list(above or [])
     # A WORKLIST, NOT A PASS. A document the closure stages is a staged
@@ -1517,22 +1630,30 @@ def close_citations(run_dir: Path, dest: Path,
         except OSError:
             continue
         result["n_documents"] = int(result["n_documents"]) + 1
-        judged = _gate_citations(src_doc)
-        absent_fields: Dict[str, str] = {}
-        absent_prose: List[str] = []
-        for cite in sorted(set(_CITED_RE.findall(text)) | judged):
-            if cite.startswith("/"):
-                continue          # UNFOLLOWABLE_ABSOLUTE: the routing row says so
+        documents[rel_doc] = (src_doc, text)
+        for cite in sorted(_document_citations(src_doc)):
             if (rel_doc, cite) in seen:
                 continue
             seen.add((rel_doc, cite))
             result["n_citations"] = int(result["n_citations"]) + 1
             decision, path = _close_one(run_dir, dest, dry, rel_doc, cite,
-                                        cell_rels, above)
+                                        cell_rels, above, text_state)
             row = {"doc": rel_doc, "cited": cite, "path": path}
+            record = dict(row, decision=decision,
+                          destination="in-cell" if decision in (
+                              _CLOSURE_STAGED, _CLOSURE_IN_CELL) else "source-run-only")
+            if decision == _CLOSURE_ABSENT:
+                record["destination"] = "not-present"
+            candidate = run_dir / path
+            if (not Path(path).is_absolute()
+                    and candidate.resolve().is_relative_to(run_dir.resolve())
+                    and candidate.is_file()):
+                record["bytes"] = candidate.stat().st_size
+            if path in text_state["files"]:
+                record.update(text_state["files"][path])
+            result["records"].append(record)
             if decision == _CLOSURE_IN_CELL:
                 result["already_in_cell"] = int(result["already_in_cell"]) + 1
-                continue
             if decision in (_CLOSURE_STAGED, _CLOSURE_OVER_CEILING,
                             _CLOSURE_LAYOUT, _CLOSURE_STEP_VIEW):
                 try:
@@ -1543,27 +1664,98 @@ def close_citations(run_dir: Path, dest: Path,
                       _CLOSURE_OVER_CEILING: "over_ceiling",
                       _CLOSURE_LAYOUT: "layout_policy",
                       _CLOSURE_STEP_VIEW: "step_view",
-                      _CLOSURE_ABOVE_CELL: "above_cell"}[decision]
-            result[bucket].append(row)          # type: ignore[union-attr]
-            if (decision == _CLOSURE_STAGED
+                      _CLOSURE_ABOVE_CELL: "above_cell"}.get(decision)
+            if bucket:
+                result[bucket].append(row)
+            if (decision in (_CLOSURE_STAGED, _CLOSURE_IN_CELL)
                     and path.lower().endswith(_DOC_SUFFIXES)
                     and path not in queued):
                 queued.add(path)
                 worklist.append((run_dir / path, path))
-            if decision == _CLOSURE_ABSENT and cite in judged:
-                if src_doc.suffix.lower() == ".json" and _g is not None:
-                    for field, tok in _g._json_artifact_refs(src_doc):
-                        if tok == cite:
-                            absent_fields[str(field)] = cite
-                else:
-                    absent_prose.append(cite)
+
+            if decision not in (_CLOSURE_STAGED, _CLOSURE_IN_CELL,
+                                _CLOSURE_ABOVE_CELL, _CLOSURE_LAYOUT, _CLOSURE_STEP_VIEW):
+                # A copied subtree is not an escape from the citation budget.
+                # Remove only this cited target from this freshly staged cell.
+                if path in cell_rels:
+                    cell_rels.discard(path)
+                    if not dry and (dest / path).is_file():
+                        (dest / path).unlink()
+
+    accepted = {_CLOSURE_STAGED, _CLOSURE_IN_CELL, _CLOSURE_ABOVE_CELL,
+                _CLOSURE_LAYOUT, _CLOSURE_STEP_VIEW, "DESCRIPTION_REBOUND"}
+    rebound = {}
+    for rel_doc, (src_doc, text) in documents.items():
+        if src_doc.suffix.lower() != ".json":
+            continue
+        try:
+            data = json.loads(text)
+        except ValueError:
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get("evidence"), str):
+            continue
+        description = data["evidence"]
+        if " + " not in description:
+            continue
+        rows = {r["cited"]: r for r in result["records"] if r["doc"] == rel_doc}
+        named = [rows.get(data.get(key)) for key in ("source", "tool_state")
+                 if isinstance(data.get(key), str)]
+        prose = rows.get(description)
+        if (prose and prose["decision"] == _CLOSURE_ABSENT and len(named) == 2
+                and all(r and r["path"] in text_state["files"] for r in named)):
+            # A compound human description is not itself a filesystem path.
+            # Rebind only to BOTH explicitly named, packaged report/state
+            # files; never guess a basename or fabricate a missing state.
+            rebound[rel_doc] = [r["path"] for r in named]
+            prose.update(decision="DESCRIPTION_REBOUND", destination="in-cell",
+                         path=named[0]["path"], **text_state["files"][named[0]["path"]])
+            result["absent"] = [r for r in result["absent"]
+                                if (r["doc"], r["cited"]) != (rel_doc, description)]
+    unavailable = {r["doc"] for r in result["records"] if r["decision"] not in accepted}
+    # A readable .sby with an absent proof input does not substantiate PASS.
+    # Propagate through the bounded document worklist before amending claims.
+    changed = True
+    while changed:
+        changed = False
+        for row in result["records"]:
+            if row["decision"] in accepted and row["path"] in unavailable:
+                row["decision"] = "DEPENDENCY_UNAVAILABLE"
+                if row["doc"] not in unavailable:
+                    unavailable.add(row["doc"])
+                    changed = True
+
+    for rel_doc, (src_doc, text) in documents.items():
+        rows = [r for r in result["records"] if r["doc"] == rel_doc]
+        bad = {r["cited"] for r in rows if r["decision"] not in accepted}
+        try:
+            data = json.loads(text) if src_doc.suffix.lower() == ".json" else None
+        except ValueError:
+            data = None
+        absent_fields = ({key: value for key, value in data.items()
+                          if isinstance(value, str) and value in bad}
+                         if isinstance(data, dict) and "verdict" in data else {})
+        # Absolute project paths may be used to locate source evidence, but
+        # the published reference is always cell-relative. Never rebase a path
+        # outside this project or silently rewrite Markdown / .sby scripts.
+        rewrites = {r["cited"]: r["path"] for r in rows
+                    if r["cited"].startswith("/") and r["decision"] in accepted}
+        if (rewrites or rel_doc in rebound) and isinstance(data, dict) and not dry:
+            def portable(value):
+                if isinstance(value, dict):
+                    return {key: portable(item) for key, item in value.items()}
+                if isinstance(value, list):
+                    return [portable(item) for item in value]
+                return rewrites.get(value, value) if isinstance(value, str) else value
+            portable_data = portable(data)
+            if rel_doc in rebound:
+                portable_data["evidence_as_run"] = {"description": data["evidence"]}
+                portable_data["evidence"] = rebound[rel_doc]
+            (dest / rel_doc).write_text(json.dumps(portable_data, indent=2) + "\n")
         if absent_fields:
+            prior = data.get("verdict_as_run", data.get("verdict"))
             entry = {"doc": rel_doc, "fields": absent_fields,
-                     "verdict_as_run": None, "verdict": _UNSUBSTANTIATED}
-            try:
-                entry["verdict_as_run"] = json.loads(text).get("verdict")
-            except (ValueError, AttributeError):
-                pass
+                     "verdict_as_run": prior,
+                     "verdict": _absent_verdict(data)}
             if not dry:
                 note = _disclose_absent_evidence(dest / rel_doc, absent_fields,
                                                  run_dir)
@@ -1571,9 +1763,19 @@ def close_citations(run_dir: Path, dest: Path,
                     result["errors"].append(note)   # type: ignore[union-attr]
                     continue
             result["amended"].append(entry)         # type: ignore[union-attr]
-        if absent_prose:
+        if bad and not isinstance(data, dict):
             result["unamended"].append(               # type: ignore[union-attr]
-                {"doc": rel_doc, "cited": absent_prose})
+                {"doc": rel_doc, "cited": sorted(bad)})
+    # Citation documents can have been made portable or honestly amended.
+    # Bind the delivered bytes as well as their original source bytes.
+    for row in result["records"]:
+        if row["path"] in text_state["files"]:
+            row["source_sha256"] = row["sha256"]
+            target = dest / row["path"]
+            if not dry and target.is_file():
+                row["bytes"] = target.stat().st_size
+                row["sha256"] = _sha256(target)
+    result["text_bytes"] = text_state["bytes"]
     return result
 
 
@@ -2558,7 +2760,7 @@ def publish(args: argparse.Namespace) -> dict:
     # left to dangle. Read from the STAGED tree, so it answers the reader's
     # question — "can I follow this from what I received?" — not the run's.
     citation_records = collect_citation_records(dest, freshly_staged=True)
-    write_citation_routing(dest, citation_records, dry)
+    write_citation_routing(dest, citation_records, dry, closure=closure)
     staged.append(_ROUTING_FILENAME)
     staged.append(_CITATION_ROUTING_FILENAME)
     excluded_total = sum(1 for r in layout_records if r["decision"] == "ROUTED_AWAY")

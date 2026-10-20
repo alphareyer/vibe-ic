@@ -775,6 +775,261 @@ def test_a_closure_staged_document_is_itself_closed_and_recorded_on_a_restage(tm
     assert chk.returncode == 0, chk.stdout + chk.stderr
 
 
+# #3315: public transport fixtures, never a claim that these logs prove an IC.
+def _cited_text_cell(tmp_path, payloads, reports, *, dry=False):
+    import benchmark_evidence_publish as publisher
+    run = _make_run(tmp_path)
+    for rel, body in {**payloads, **reports}.items():
+        path = run / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body if isinstance(body, bytes) else body.encode())
+    dest = tmp_path / "published"
+    dest.mkdir()
+    # Start at the owner's citation boundary, with exactly the documents the
+    # subtree copier handed it. The end-to-end test below covers publish().
+    docs = []
+    rels = set()
+    for rel in reports:
+        target = dest / rel
+        if not dry:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((run / rel).read_bytes())
+        docs.append((run / rel, rel))
+        rels.add(rel)
+    summary = publisher.close_citations(run, dest, docs, rels, dry)
+    return run, dest, summary
+
+
+@pytest.mark.parametrize("case", ["binary", "large", "unallowed", "private", "missing"])
+def test_cited_text_refusal_preserves_honest_verdict(tmp_path, case):
+    rel = {"binary": "raw/tool.rpt", "large": "raw/tool.log",
+           "unallowed": "raw/model.bin", "private": "private/answers.txt",
+           "missing": "raw/missing.log"}[case]
+    body = {"binary": b"tool\x00binary\n", "large": b"x" * 1_000_001,
+            "unallowed": b"not an allowed evidence type\n",
+            "private": b"synthetic private answer fixture\n"}.get(case)
+    report = "reports/phase3/transport.json"
+    original = json.dumps({"verdict": "PASS", "evidence": rel, "value": 17})
+    run, cell, summary = _cited_text_cell(
+        tmp_path, {} if body is None else {rel: body}, {report: original})
+    data = json.loads((cell / report).read_text())
+    assert data["verdict"] == "UNSUBSTANTIATED", (case, data, summary)
+    assert data["evidence"] is None and data["verdict_as_run"] == "PASS"
+    assert data["value"] == 17
+    assert (cell / rel).is_file() is False
+    assert (run / report).read_text() == original
+    refusals = [r for r in summary["records"] if r["doc"] == report]
+    assert len(refusals) == 1
+    assert refusals[0]["decision"] == {
+        "binary": "NOT_TEXT", "large": "TEXT_FILE_LIMIT",
+        "unallowed": "UNALLOWED_TEXT", "private": "UNALLOWED_TEXT",
+        "missing": "ABSENT_IN_RUN"}[case]
+
+
+def test_cited_text_cell_budget_is_shared_and_deduplicated(tmp_path, monkeypatch):
+    import benchmark_evidence_publish as publisher
+    monkeypatch.setattr(publisher, "_CITED_TEXT_CELL_BUDGET", 12, raising=False)
+    reports = {f"reports/{key}.json": json.dumps({"verdict": "PASS", "source": rel})
+               for key, rel in (("a", "raw/one.log"), ("b", "raw/one.log"),
+                                ("c", "raw/two.log"))}
+    _, cell, summary = _cited_text_cell(
+        tmp_path, {"raw/one.log": "12345678", "raw/two.log": "abcdefgh"}, reports)
+    verdicts = {key: json.loads((cell / f"reports/{key}.json").read_text())["verdict"]
+                for key in "abc"}
+    assert verdicts == {"a": "PASS", "b": "PASS", "c": "UNSUBSTANTIATED"}, summary
+    assert summary["text_bytes"] == 8
+    assert [r["decision"] for r in summary["records"]] == [
+        "STAGED", "ALREADY_IN_CELL", "TEXT_CELL_BUDGET"]
+
+
+@pytest.mark.parametrize("prior", [None, "PASS"])
+def test_cited_text_missing_proof_does_not_replace_fail(tmp_path, prior):
+    rel = "reports/phase3/transport.json"
+    data = {"verdict": "FAIL", "evidence": "raw/missing.log"}
+    if prior is not None:
+        data["verdict_as_run"] = prior
+    _, cell, summary = _cited_text_cell(tmp_path, {}, {
+        rel: json.dumps(data)})
+    data = json.loads((cell / rel).read_text())
+    assert data["verdict"] == "FAIL", (data, summary)
+    assert data["evidence_present"] is False
+
+
+def test_cited_text_public_sby_inputs_reach_native_consumer(tmp_path):
+    import formal_proof_evidence_check as consumer
+    from _hostpaths import require_repo
+    root = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "programs")
+    sby = (root / "calibration/sby_prove_arms.sby").read_bytes()
+    fixture = root / "tests/fixtures/sby_prove_arms/pass"
+    report = "reports/phase2/transport.json"
+    run, cell, summary = _cited_text_cell(tmp_path, {
+        "proofs/check.sby": sby,
+        "proofs/ctr.v": (fixture / "ctr.v").read_bytes(),
+        "proofs/formal_ctr.sv": (fixture / "formal_ctr.sv").read_bytes(),
+    }, {report: json.dumps({"verdict": "PASS", "evidence": "proofs/check.sby"})})
+    published_sby = cell / "proofs/check.sby"
+    refs = consumer._sby_file_refs(published_sby.read_text())
+    resolved = [consumer._resolve(published_sby.parent, published_sby.parent, cell, ref)
+                for ref in refs]
+    # Exercise the real consumer's path resolution, not publisher fields.
+    assert sum(path is not None for path in resolved) == len(refs) == 2, summary
+    for path in [published_sby, *resolved]:
+        rel = path.relative_to(cell).as_posix()
+        assert path.read_bytes() == (run / rel).read_bytes()
+        entry = next(r for r in summary["records"] if r["path"] == rel)
+        assert entry["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_cited_text_missing_sby_input_is_not_a_substantiated_pass(tmp_path):
+    report = "reports/phase2/transport.json"
+    _, cell, summary = _cited_text_cell(tmp_path, {
+        "proofs/check.sby": "[files]\nmissing.sv\n",
+    }, {report: json.dumps({"verdict": "PASS", "evidence": "proofs/check.sby"})})
+    data = json.loads((cell / report).read_text())
+    assert data["verdict"] == "UNSUBSTANTIATED", (data, summary)
+    assert data["evidence"] is None
+    assert any(r["doc"] == "proofs/check.sby" and
+               r["decision"] == "ABSENT_IN_RUN" for r in summary["records"])
+
+
+def test_cited_text_publish_binds_bytes_and_relative_consumer_paths(tmp_path):
+    import evidence_citation_resolves_check as consumer
+    import citation_routing_is_true_check as routing_consumer
+    run = _make_run(tmp_path)
+    # A real record may cite a document-relative filename or a state path
+    # absolute on the producing host. The staged pointers must be portable.
+    report = "reports/phase3/transport.json"
+    log = "reports/phase3/transport.log"
+    state = "phase3/backend/irdrop/state_out.json"
+    (run / log).write_text("PUBLIC TRANSPORT FIXTURE ONLY\n")
+    (run / state).parent.mkdir(parents=True)
+    (run / state).write_text('{"metrics": {}}\n')
+    (run / report).write_text(json.dumps({
+        "verdict": "PASS", "evidence": "transport.log", "tool_state": str(run / state)}))
+    dest_root = tmp_path / "benchmark-data"
+    cp = _run(_base_args(run, dest_root))
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    cell = dest_root / "ic/widgetmul/v9.9.9_openpdkx"
+    data = json.loads((cell / report).read_text())
+    assert data["tool_state"] == state, data
+    for cite in (data["evidence"], data["tool_state"]):
+        resolved = consumer.resolve_citation(cell / report, cite, cell)
+        assert resolved is not None
+        assert resolved.read_bytes() == (run / resolved.relative_to(cell)).read_bytes()
+    rows = _routing_rows(cell)
+    assert rows[(report, "transport.log")] == "RESOLVES", rows
+    assert rows[(report, state)] == "RESOLVES", rows
+    assert routing_consumer.audit_cell(cell)["false_claims"] == []
+    text = (cell / "CITATION_ROUTING.txt").read_text()
+    for rel in (log, state):
+        assert hashlib.sha256((run / rel).read_bytes()).hexdigest() in text
+    # A fresh clone, with tracked-file resolution, is the reader's deliverable.
+    for args in (["init", "-q"], ["add", "-A"],
+                 ["-c", "user.name=Transport fixture", "-c", "user.email=fixture@localhost",
+                  "commit", "-qm", "Public transport fixture"]):
+        subprocess.run(["git", "-C", str(dest_root), *args], check=True, capture_output=True)
+    cloned = tmp_path / "reader"
+    subprocess.run(["git", "clone", "-q", str(dest_root), str(cloned)], check=True)
+    reader_cell = cloned / cell.relative_to(dest_root)
+    tracked = consumer.tracked_files(reader_cell)
+    assert tracked is not None
+    for cite in (data["evidence"], data["tool_state"]):
+        assert consumer.resolve_citation(reader_cell / report, cite, reader_cell, tracked) is not None
+    assert routing_consumer.audit_cell(reader_cell)["false_claims"] == []
+
+
+def test_cited_text_dry_run_uses_same_bytes_and_budget(tmp_path, monkeypatch):
+    import benchmark_evidence_publish as publisher
+    monkeypatch.setattr(publisher, "_CITED_TEXT_CELL_BUDGET", 7, raising=False)
+    payloads = {"raw/one.log": "12345678"}
+    reports = {"reports/transport.json": json.dumps({
+        "verdict": "PASS", "evidence": "raw/one.log"})}
+    _, cell, dry = _cited_text_cell(tmp_path / "dry", payloads, reports, dry=True)
+    _, _, real = _cited_text_cell(tmp_path / "real", payloads, reports)
+    assert dry["staged"] == real["staged"] == [], (dry, real)
+    assert dry["records"] == real["records"]
+    assert list(cell.rglob("*")) == []
+
+
+def test_cited_text_hash_binds_the_published_document_after_path_rewrite(tmp_path):
+    # A cited JSON can itself cite a host-absolute project log. Bind the
+    # portable published bytes, while retaining the source digest separately.
+    root = tmp_path / "run"
+    summary_path = "raw/summary.json"
+    source = json.dumps({"verdict": "PASS", "source": str(root / "raw/tool.log")})
+    _, cell, summary = _cited_text_cell(tmp_path, {
+        summary_path: source, "raw/tool.log": "PUBLIC TRANSPORT ONLY\n",
+    }, {"reports/transport.json": json.dumps({
+        "verdict": "PASS", "source": summary_path})})
+    row = next(r for r in summary["records"] if r["path"] == summary_path)
+    assert row["sha256"] == hashlib.sha256((cell / summary_path).read_bytes()).hexdigest()
+    assert row["source_sha256"] == hashlib.sha256(source.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("case", ["copied-binary", "outside-project", "absolute-sby"])
+def test_cited_text_cannot_bypass_packaging_through_existing_paths(tmp_path, case):
+    import benchmark_evidence_publish as publisher
+    run = _make_run(tmp_path)
+    cell = tmp_path / "published"
+    cell.mkdir()
+    report = "reports/transport.json"
+    rel = "raw/proof.log"
+    payload = run / rel
+    payload.parent.mkdir()
+    payload.write_text("PUBLIC TRANSPORT ONLY\n")
+    rels = {report}
+    if case == "outside-project":
+        outside = tmp_path / "outside.log"
+        outside.write_text("PUBLIC SYNTHETIC OUTSIDE PROJECT\n")
+        payload.unlink()
+        payload.symlink_to(outside)
+    elif case == "copied-binary":
+        payload.write_bytes(b"binary\x00payload")
+        (cell / rel).parent.mkdir()
+        (cell / rel).write_bytes(payload.read_bytes())
+        rels.add(rel)
+    else:
+        sby = run / "raw/check.sby"
+        sby.write_text(f"[files]\n{payload}\n")
+        rel = "raw/check.sby"
+    doc = run / report
+    doc.write_text(json.dumps({"verdict": "PASS", "evidence": rel}))
+    (cell / report).parent.mkdir()
+    (cell / report).write_bytes(doc.read_bytes())
+    summary = publisher.close_citations(run, cell, [(doc, report)], rels, False)
+    data = json.loads((cell / report).read_text())
+    assert data["verdict"] == "UNSUBSTANTIATED", (case, data, summary)
+    if case != "absolute-sby":
+        assert not (cell / rel).exists()
+
+
+@pytest.mark.parametrize("state_present", [True, False])
+def test_cited_text_composite_description_uses_packaged_report_and_state(tmp_path, state_present):
+    # Public IR report shape: the evidence string is a description, while
+    # source/tool_state name the actual files. Never invent the missing state.
+    import evidence_citation_resolves_check as consumer
+    report = "reports/phase3/transport.json"
+    state = "phase3/backend/state_out.json"
+    raw = "reports/phase3/power.rpt"
+    description = "native state metrics + power.rpt"
+    payloads = {raw: "PUBLIC TRANSPORT REPORT ONLY\n"}
+    if state_present:
+        payloads[state] = '{"metrics": {}}\n'
+    _, cell, summary = _cited_text_cell(tmp_path, payloads, {report: json.dumps({
+        "verdict": "PASS", "source": raw, "tool_state": state,
+        "evidence": description})})
+    data = json.loads((cell / report).read_text())
+    assert data["verdict"] == ("PASS" if state_present else "UNSUBSTANTIATED"), (data, summary)
+    if state_present:
+        assert data["evidence"] == [raw, state]
+        assert data["evidence_as_run"] == {"description": description}
+        assert consumer._json_artifact_refs(cell / report) == [("source", raw)]
+        for cite in data["evidence"]:
+            assert consumer.resolve_citation(cell / report, cite, cell) is not None
+    else:
+        assert data["evidence"] is None and data["tool_state"] is None
+
+
 # --------------------------------------------------------------------------
 # #2017 — the release documentation is REQUIRED, per DESIGN KIND
 #
