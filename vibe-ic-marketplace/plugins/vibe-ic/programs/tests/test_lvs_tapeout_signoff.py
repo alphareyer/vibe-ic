@@ -104,3 +104,52 @@ def test_consistency_with_lvs_verdict_tokens():
     assert lvt.classify(_POWER_PIN_ONLY) == "MISMATCH"
     assert lvt.mismatch_class(_POWER_PIN_ONLY) == "POWER_PIN_ONLY"
     assert lvt.mismatch_class(_SIGNAL_NET) == "SIGNAL_NET_MISMATCH"
+
+
+# A unique match reached only because the layout side carried EMPTY cell views:
+# netgen compares each such cell by its pin list alone (the gate-level LVS shape
+# a power-aware DEF-derived netlist against an abstract extraction produces).
+_PLACEHOLDER_MATCH = """\
+Warning: Equate pins:  cell gf180mcu_fd_sc_mcu7t5v0__dffq_1 is a placeholder, treated as a black box.
+Cell gf180mcu_fd_sc_mcu7t5v0__dffq_1 (0) disconnected node: D
+Warning: Equate pins:  cell gf180mcu_fd_sc_mcu7t5v0__nand2_1 is a placeholder, treated as a black box.
+Warning: Equate pins:  cell gf180mcu_fd_sc_mcu7t5v0__dffq_1 is a placeholder, treated as a black box.
+Subcircuit summary:
+Circuit 1: chip_top                     |Circuit 2: chip_top
+Cell pin lists are equivalent.
+Device classes chip_top and chip_top are equivalent.
+
+Final result: Circuits match uniquely.
+"""
+
+# A full-GDS device extraction: netgen names the PDK MOSFET subcircuits as black
+# boxes (device models), and every standard cell is compared device-by-device.
+_FULL_EXTRACTION_MATCH = """\
+Circuit 1 cell nfet_06v0 and Circuit 2 cell nfet_06v0 are black boxes.
+Circuit 1 cell pfet_06v0 and Circuit 2 cell pfet_06v0 are black boxes.
+Number of devices: 192                     |Number of devices: 192
+Device classes gf180mcu_fd_io__in_c and gf180mcu_fd_io__in_c[[0]] are equivalent.
+Device classes chip_top and chip_top are equivalent.
+
+Final result: Circuits match uniquely.
+"""
+
+
+def test_placeholder_blackbox_match_is_not_a_tapeout_pass():
+    res = G.evaluate(_PLACEHOLDER_MATCH)
+    assert res["base_verdict"] == "MATCH"
+    assert res["tapeout_verdict"] == "GATE_LEVEL_BLACKBOX"
+    assert res["passed"] is False
+    assert res["placeholder_cells"] == [
+        "gf180mcu_fd_sc_mcu7t5v0__dffq_1", "gf180mcu_fd_sc_mcu7t5v0__nand2_1"]
+
+
+def test_primitive_device_blackboxes_in_full_extraction_still_pass():
+    res = G.evaluate(_FULL_EXTRACTION_MATCH)
+    assert res["tapeout_verdict"] == "GENUINE_MATCH"
+    assert res["passed"] is True
+
+
+def test_placeholder_blackbox_main_exit_code(tmp_path):
+    (tmp_path / "lvs.rpt").write_text(_PLACEHOLDER_MATCH)
+    assert G.main([str(tmp_path)]) == 1

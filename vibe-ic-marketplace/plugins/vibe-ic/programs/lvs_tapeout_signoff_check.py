@@ -16,6 +16,14 @@ immediate follow-up).
 
 Tapeout verdicts (from `lvs_verdict_tokens.classify` + `.mismatch_class`):
   GENUINE_MATCH        — netgen "Circuits match uniquely" + Final result → PASS (rc 0)
+  GATE_LEVEL_BLACKBOX  — a unique match, but netgen reports one or more cells as
+                         "a placeholder, treated as a black box": the layout side
+                         carried EMPTY cell views, so only cell-to-cell wiring was
+                         compared and no transistor inside those cells was. NOT a
+                         tapeout pass — re-run LVS on a full-GDS device extraction.
+                         rc 1. (Primitive-device classes that netgen reports as
+                         "Circuit 1 cell X and Circuit 2 cell X are black boxes" in a
+                         full extraction are NOT this case and still pass.)
   WAIVED_PENDING_PWR   — MISMATCH whose evidence is EXCLUSIVELY power/tie nets
                          (POWER_PIN_ONLY). NOT a tapeout pass — a documented waiver
                          that requires a power-aware gate netlist to reach a genuine
@@ -40,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -78,10 +87,33 @@ def _find_report(target: Path) -> Optional[Path]:
     return None
 
 
+#: netgen's own wording when a cell has no contents on one side and is compared
+#: only by its pin list. Distinct from the full-extraction primitive line
+#: "Circuit 1 cell X and Circuit 2 cell X are black boxes", which names device
+#: models (e.g. a PDK MOSFET subcircuit), not an emptied standard/IO cell.
+_PLACEHOLDER_RE = re.compile(r"cell\s+(\S+)\s+is a placeholder,\s*treated as a black box")
+
+
+def placeholder_cells(blob: str) -> List[str]:
+    """Cells netgen compared as empty placeholders (sorted, de-duplicated)."""
+    return sorted(set(_PLACEHOLDER_RE.findall(blob)))
+
+
 def evaluate(blob: str) -> Dict[str, object]:
     """Pure evaluator over a netgen LVS transcript+report blob → tapeout verdict."""
     base = _lvt.classify(blob)          # MATCH / MISMATCH / INCOMPLETE
     if base == "MATCH":
+        blackboxed = placeholder_cells(blob)
+        if blackboxed:
+            return {
+                "tapeout_verdict": "GATE_LEVEL_BLACKBOX", "passed": False,
+                "base_verdict": base,
+                "detail": f"netgen matched only cell-to-cell wiring: {len(blackboxed)} "
+                          "cell(s) were empty placeholders treated as black boxes, so "
+                          "no transistor inside them was compared. Re-run LVS on a "
+                          "full-GDS device extraction before release.",
+                "placeholder_cells": blackboxed,
+            }
         return {"tapeout_verdict": "GENUINE_MATCH", "passed": True,
                 "base_verdict": base,
                 "detail": "netgen reports a unique match with a Final result line"}
