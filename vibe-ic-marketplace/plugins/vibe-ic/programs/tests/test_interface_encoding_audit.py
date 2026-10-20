@@ -732,8 +732,9 @@ def _population(report):
 
 
 def _counter_projection_design(kind):
-    width = 5 if kind == 'whole' else 3
-    projected = 'state' if kind == 'whole' else 'state[6:4]'
+    whole = kind in ('whole', 'literal_fsm', 'reset_spelling')
+    width = 5 if whole else 3
+    projected = 'state' if whole else 'state[6:4]'
     updates = "if (rst) state <= 5'd0; else state <= state + {4'd0, en};"
     if kind == 'xor':
         projected = 'state[6:4] ^ (state[6:4] >> 1)'
@@ -749,6 +750,24 @@ def _counter_projection_design(kind):
         projected = 'state[6-0:4]'
     elif kind == 'concat_write':
         updates += ' {state[6:4],state[3:2]} <= {state[6:4] ^ (state[6:4] >> 1),state[3:2]};'
+    elif kind == 'reset_spelling':
+        updates = ("if (rst && en) state <= 5'd0; else if (rst) state <= 5'h00; "
+                   "else state <= state + {4'd0,en};")
+    elif kind == 'literal_fsm':
+        # A Gray state table remains a table even with a numeric fallback.
+        updates = """if (rst) state <= 5'd0; else if (en) begin
+case(state)
+5'd0: state <= 5'd1;
+5'd1: state <= 5'd3;
+5'd3: state <= 5'd2;
+5'd2: state <= 5'd6;
+5'd6: state <= 5'd7;
+5'd7: state <= 5'd5;
+5'd5: state <= 5'd4;
+5'd4: state <= 5'd0;
+default: state <= state + 5'd1;
+endcase
+end"""
     return {'design.v': f'''
 module counter_source(input clk, rst, en, output [{width-1}:0] value);
 reg [6:2] state;
@@ -766,7 +785,7 @@ endmodule
 '''}
 
 
-@pytest.mark.parametrize('kind', ['whole', 'slice'])
+@pytest.mark.parametrize('kind', ['whole', 'slice', 'reset_spelling'])
 def test_binary_counter_alias_and_fixed_slice_keep_numeric_encoding(tmp_path, kind):
     res, report = run_cli(tmp_path, _counter_projection_design(kind), 'counter_projection')
     assert res.returncode == 0, res.stderr
@@ -775,7 +794,7 @@ def test_binary_counter_alias_and_fixed_slice_keep_numeric_encoding(tmp_path, ki
     assert report['discovery']['complete'] is True
 
 
-@pytest.mark.parametrize('kind', ['xor', 'masked', 'mixed', 'partial', 'constant', 'computed_slice', 'concat_write'])
+@pytest.mark.parametrize('kind', ['xor', 'masked', 'mixed', 'partial', 'constant', 'computed_slice', 'concat_write', 'literal_fsm'])
 def test_counter_projection_does_not_invent_encoding_for_other_dataflows(tmp_path, kind):
     res, report = run_cli(tmp_path, _counter_projection_design(kind), 'counter_projection')
     assert res.returncode == 0, res.stderr
@@ -783,13 +802,13 @@ def test_counter_projection_does_not_invent_encoding_for_other_dataflows(tmp_pat
     assert (row['producer_encoding'], row['status']) == ('UNKNOWN', 'UNKNOWN')
 
 
-@pytest.mark.parametrize('kind,rc', [('whole', 0), ('slice', 0), ('xor', 1)])
+@pytest.mark.parametrize('kind,rc', [('whole', 0), ('slice', 0), ('xor', 1), ('literal_fsm', 1)])
 def test_counter_projection_native_values_and_gray_transform_control(tmp_path, kind, rc):
     rtl = tmp_path / 'rtl'
     rtl.mkdir()
     source = rtl / 'design.v'
     source.write_text(_counter_projection_design(kind)['design.v'])
-    shift = 0 if kind == 'whole' else 2
+    shift = 0 if kind in ('whole', 'literal_fsm') else 2
     tb = tmp_path / 'probe.v'
     tb.write_text(f'''
 module probe;
@@ -819,9 +838,14 @@ endmodule
                                      str(executable), str(source), str(tb)], capture_output=True, text=True)
     assert compile_result.returncode == 0, compile_result.stderr
     actual = subprocess.run(['vvp', str(executable)], capture_output=True, text=True)
+    (tmp_path / 'native.stdout').write_text(actual.stdout)
+    (tmp_path / 'native.stderr').write_text(actual.stderr)
+    (tmp_path / 'native.receipt.json').write_text(json.dumps({
+        'compile_rc': compile_result.returncode, 'native_rc': actual.returncode,
+        'argv': ['vvp', str(executable)]}, indent=2))
     assert actual.returncode == rc, actual.stdout + actual.stderr
     assert ('PROJECTION_NATIVE_PASS 257' in actual.stdout) == (rc == 0)
-    assert ('PROJECTION_VALUE expected=2 observed=3' in actual.stdout) == (kind == 'xor')
+    assert ('PROJECTION_VALUE expected=2 observed=3' in actual.stdout) == (kind in ('xor', 'literal_fsm'))
 
 
 def test_nested_parameter_expression_keeps_complete_hierarchy_population(tmp_path):

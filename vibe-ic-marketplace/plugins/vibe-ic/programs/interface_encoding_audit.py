@@ -438,7 +438,8 @@ def _binary_counter_projection(body: str, signal_name: str) -> Optional[Encoding
     """Recognize one fixed projection of an explicitly numeric counter.
 
     This is deliberately a closed grammar: one continuous output driver,
-    literal state bounds, whole-state arithmetic updates and literal resets.
+    literal state bounds, whole-state arithmetic updates and one literal reset
+    value.
     Arbitrary aliases, transforms and partially written storage stay UNKNOWN.
     The caller supplies the native-selected module body.
     """
@@ -492,6 +493,8 @@ def _binary_counter_projection(body: str, signal_name: str) -> Optional[Encoding
     term = r'(?:' + atom + r'|\{\s*' + atom + r'(?:\s*,\s*' + atom + r')+\s*\})'
     update = re.compile(state_name + r'\s*[+\-]\s*' + term)
     arithmetic = []
+    reset_values = set()
+    state_width = abs(left - right) + 1
     for assignment in assignments:
         selected, operator, expression = assignment.groups()
         if selected is not None or operator != '<=':
@@ -501,6 +504,25 @@ def _binary_counter_projection(body: str, signal_name: str) -> Optional[Encoding
             arithmetic.append(assignment)
         elif not re.fullmatch(literal, expression):
             return None
+        else:
+            # Distinct literal transitions do not establish counter reset
+            # semantics. Compare effective state values, not spelling.
+            token = re.sub(r"[\s_]", "", expression)
+            if token in ("'0", "'1"):
+                value = 0 if token == "'0" else (1 << state_width) - 1
+            elif token.isdecimal():
+                value = int(token)
+            else:
+                parsed = parse_verilog_literal(re.sub(r"'[sS]", "'", token))
+                if parsed is None or parsed[0] <= 0:
+                    return None
+                bits, value = parsed
+                value %= 1 << bits
+                if re.search(r"'[sS]", token) and value & (1 << (bits - 1)):
+                    value -= 1 << bits
+            reset_values.add(value % (1 << state_width))
+            if len(reset_values) > 1:
+                return None
     if not arithmetic:
         return None
     line = clean.count('\n', 0, drivers[0].start()) + 1
