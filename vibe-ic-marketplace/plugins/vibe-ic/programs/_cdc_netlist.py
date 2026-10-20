@@ -875,8 +875,16 @@ def async_input_findings(nl: Netlist, is_candidate,
 
 
 def reset_dependency_findings(
-        nl: Netlist, lookup: Optional[_LookupSnapshot] = None) -> List[dict]:
-    """A reset net whose own fan-in contains a flop it resets (a cycle)."""
+        nl: Netlist, lookup: Optional[_LookupSnapshot] = None, *,
+        metadata: Optional[dict] = None) -> List[dict]:
+    """Complete reset-cycle detection; one ERROR witness per cyclic SCC.
+
+    Reset roles and graph edges retain their existing meaning. Iterative
+    Kosaraju visits the entire graph without a depth cap or simple-path
+    enumeration. Sorting fixes traversal/witness order; the two SCC passes
+    examine each node/edge exactly twice. Witness walks examine at most one
+    further graph's worth of edges, with no recursion limit.
+    """
     import instrument_calibration
     instrument_calibration.assert_calibrated("_cdc_netlist::reset_dependency_findings")
     lookup = lookup or _LookupSnapshot(nl)
@@ -896,29 +904,102 @@ def reset_dependency_findings(
         for qb in qbits:
             for r2 in reset_of.get(q_of[qb].name, ()):
                 edges.setdefault(r2, set()).add(r)
-    findings: List[dict] = []
-    reported: Set[frozenset] = set()
-    for start in sorted(edges, key=str):
-        stack = [(start, [start])]
+    nodes = sorted(edges, key=str)
+    graph = {node: tuple(sorted(edges[node], key=str)) for node in nodes}
+    reverse: Dict[object, List[object]] = {node: [] for node in nodes}
+    for node in nodes:
+        for child in graph[node]:
+            reverse[child].append(node)
+    seen, order = set(), []
+    node_visits = edge_visits = 0
+    for start in nodes:
+        if start in seen:
+            continue
+        seen.add(start)
+        node_visits += 1
+        stack = [(start, iter(graph[start]))]
         while stack:
-            node, path = stack.pop()
-            for nxt in edges.get(node, ()):
-                if nxt == start:
-                    cyc = frozenset(path)
-                    if cyc not in reported:
-                        reported.add(cyc)
-                        labels = [lookup.bit_label(b) for b in path]
-                        findings.append(_finding(
-                            "CIRCULAR_RESET_DEPENDENCY", "ERROR",
-                            "reset net(s) " + " -> ".join(labels + [labels[0]])
-                            + " feed back through flops they reset",
-                            cycle=labels))
-                elif nxt not in path and len(path) < 16:
-                    stack.append((nxt, path + [nxt]))
+            node, children = stack[-1]
+            try:
+                child = next(children)
+            except StopIteration:
+                stack.pop()
+                order.append(node)
+                continue
+            edge_visits += 1
+            if child not in seen:
+                seen.add(child)
+                node_visits += 1
+                stack.append((child, iter(graph[child])))
+    seen, components = set(), []
+    for start in reversed(order):
+        if start in seen:
+            continue
+        component, pending = [], [start]
+        seen.add(start)
+        while pending:
+            node = pending.pop()
+            node_visits += 1
+            component.append(node)
+            for parent in reverse[node]:
+                edge_visits += 1
+                if parent not in seen:
+                    seen.add(parent)
+                    pending.append(parent)
+        components.append(sorted(component, key=str))
+    components.sort(key=lambda component: str(component[0]))
+
+    findings: List[dict] = []
+    witness_edge_visits = cyclic_nodes = 0
+    for component in components:
+        if len(component) == 1 and component[0] not in edges[component[0]]:
+            continue
+        cyclic_nodes += len(component)
+        members = set(component)
+        # Every vertex of a cyclic SCC has an internal successor. Following
+        # the first sorted successor must repeat a vertex, yielding a real
+        # closed cycle (not merely the SCC's ordered membership).
+        positions, path = {}, []
+        node = component[0]
+        while node not in positions:
+            positions[node] = len(path)
+            path.append(node)
+            for child in graph[node]:
+                witness_edge_visits += 1
+                if child in members:
+                    node = child
+                    break
+        cycle = path[positions[node]:]
+        first = min(range(len(cycle)), key=lambda i: str(cycle[i]))
+        cycle = cycle[first:] + cycle[:first]
+        labels = [lookup.bit_label(bit) for bit in cycle]
+        findings.append(_finding(
+            "CIRCULAR_RESET_DEPENDENCY", "ERROR",
+            "reset net(s) " + " -> ".join(labels + [labels[0]])
+            + " feed back through flops they reset",
+            cycle=labels, cycle_bits=cycle))
+    if metadata is not None:
+        metadata.update({
+            "reporting_policy": "one_witness_per_cyclic_scc",
+            "cycle_detection_complete": True,
+            "all_cycles_enumerated": False,
+            "reset_nodes": len(nodes),
+            "reset_edges": sum(map(len, graph.values())),
+            "scc_count": len(components),
+            "cyclic_scc_count": len(findings),
+            "acyclic_scc_count": len(components) - len(findings),
+            "cyclic_scc_nodes": cyclic_nodes,
+            "largest_scc_nodes": max(map(len, components), default=0),
+            "witness_count": len(findings),
+            "scc_nodes_visited": node_visits,
+            "scc_edges_examined": edge_visits,
+            "witness_edges_examined": witness_edge_visits,
+        })
     return findings
 
 
-def judge(nl: Netlist, rule: str, is_candidate=None) -> List[dict]:
+def judge(nl: Netlist, rule: str, is_candidate=None, *,
+          metadata: Optional[dict] = None) -> List[dict]:
     """The one entry every gate uses to judge a netlist.
 
     Each rule carries its own `assert_calibrated` line: one pair per rule, so
@@ -931,7 +1012,7 @@ def judge(nl: Netlist, rule: str, is_candidate=None) -> List[dict]:
         return async_input_findings(
             nl, is_candidate or (lambda _n: False), lookup)
     if rule == "reset_dependency":
-        return reset_dependency_findings(nl, lookup)
+        return reset_dependency_findings(nl, lookup, metadata=metadata)
     raise ValueError(rule)
 
 
@@ -1003,7 +1084,8 @@ def apply_front_end(project: Path, mode: str, netlist_arg: Optional[str],
     try:
         nl = load(path)
         binding = require_binding(project, path, nl)
-        rows = judge(nl, rule, is_candidate)
+        analysis: dict = {}
+        rows = judge(nl, rule, is_candidate, metadata=analysis)
     except (Refusal, instrument_calibration.Uncalibrated) as exc:
         code = getattr(exc, "code", "NETLIST_RULE_UNCALIBRATED")
         return ([_finding(code, "ERROR", str(exc))],
@@ -1015,6 +1097,8 @@ def apply_front_end(project: Path, mode: str, netlist_arg: Optional[str],
         "netlist_top": nl.top, "netlist_flops": len(nl.flops),
         "netlist_clock_domains": clock_domains(nl),
         "netlist_input_fingerprint": binding["input"]["fingerprint"]}
+    if rule == "reset_dependency":
+        extra["reset_dependency_analysis"] = analysis
     if mode == "librelane":
         extra["front_end"] = "netlist"
         return rows, extra
