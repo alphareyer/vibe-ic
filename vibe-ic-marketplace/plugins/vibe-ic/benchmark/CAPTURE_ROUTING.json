@@ -166,6 +166,16 @@
       ],
       "bucket_B_skill_file": "skills/testbench-gen/SKILL.md"
     },
+    "phase2.l10_unit_tb.testbench_gen.run_unit_tbs": {
+      "description": "L10 named unit-testbench generation, native execution, per-case JUnit and current execution receipt. This is the existing unit-TB owner, distinct from the full-stack professional testbench producer.",
+      "bucket_A_program": "programs/testbench_gen.py",
+      "bucket_A_related": [
+        "programs/_l10_execution.py",
+        "programs/l10_tb_conformance_check.py"
+      ],
+      "bucket_B_skill_file": "skills/testbench-gen/SKILL.md",
+      "bucket_B_section_anchor": "L10 unit-oracle recovery"
+    },
     "phase2.full_stack_tb.cpu_datapath_program.build": {
       "description": "Capture subtype for the declared CPU data-path program and testbench producer; routing only, not a new flow step.",
       "bucket_A_program": "programs/cpu_datapath_program.py",
