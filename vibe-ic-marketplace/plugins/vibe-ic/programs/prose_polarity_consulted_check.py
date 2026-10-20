@@ -2736,6 +2736,7 @@ def _scan_populations(root: Path):
 
 def scan(root: Path) -> List[str]:
     """Polarity-blind prose publishers, excluding proven formal input origins."""
+    _instrument_calibration.assert_calibrated("prose_polarity_consulted_check::scan")
     return _scan_populations(root)[1]
 
 
