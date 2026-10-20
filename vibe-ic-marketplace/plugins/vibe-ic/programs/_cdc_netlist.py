@@ -564,12 +564,16 @@ class _LookupSnapshot:
             for f in nl.flops}
         self._direct_sources: Dict[Tuple[int, int], Optional[object]] = {}
         self._data_cones: Optional[List[Tuple[Flop, int, Set[object]]]] = None
-        self._consumers: Optional[
-            Dict[object, List[Tuple[Flop, int, bool]]]] = None
+        self._consumer_groups: Optional[
+            Dict[int, List[Tuple[int, Flop, int, Optional[object]]]]] = None
         self._direct_consumers: Optional[
             Dict[object, List[Tuple[Flop, int]]]] = None
         self._cone_inputs: Dict[str, Tuple[object, ...]] = {}
-        self._cone_reach: Dict[frozenset, Dict[str, Tuple[frozenset, frozenset]]] = {}
+        self._cone_reach: Dict[frozenset, Dict[str, int]] = {}
+        self._terminals = list(self.q_of) + [b for b in self.port_bits if b not in self.q_of]
+        self._q_count = len(self.q_of)
+        self._terminal_masks = {bit: 1 << index
+                                for index, bit in enumerate(self._terminals)}
 
     def domain(self, flop: Flop) -> str:
         return self.domains[id(flop)]
@@ -580,38 +584,34 @@ class _LookupSnapshot:
     def bit_label(self, bit) -> str:
         return self.nl.bit_label(bit, self.port_labels)
 
-    def cone(self, bits: Iterable, skip: Optional[Set[object]] = None
-             ) -> Tuple[Set[object], Set[object]]:
-        """Share whole-cell reachability within this analysis, including cycles.
+    def _cone_mask(self, bits: Iterable, skip: Optional[Set[object]] = None) -> int:
+        """Share complete cell frontiers without expanding terminal sets per D bit.
 
-        Every output of a combinational cell has the same conservative fan-in.
-        Collapse those outputs to one node; condense cycles before memoizing
-        frontiers, so a back edge never publishes a partial cone. Reset cuts
-        have separate closures, while raw cell adjacency is shared. Dense
-        frontier/consumer relations can still require quadratic storage.
+        Keep the existing whole-cell conservative graph and iterative SCC
+        closure. Only its frontier representation changes to integer masks;
+        reset cuts remain separate and adjacency remains analysis-local.
         """
         cut = frozenset(skip or ())
         cache = self._cone_reach.setdefault(cut, {})
 
-        def node(bit, qbits, pbits):
+        def node(bit):
             if self.nl.is_const(bit) or bit in cut:
-                return None
-            if bit in self.q_of:
-                qbits.add(bit)
-            elif bit in self.port_bits:
-                pbits.add(bit)
-            else:
-                driver = self.nl.drivers.get(bit)
-                if driver:
-                    name = driver[0]
-                    cell = self.nl.cells[name]
-                    if cell["type"] not in FLOP_TYPES | _MEMORY:
-                        return name
-            return None
+                return None, 0
+            if bit in self._terminal_masks:
+                return None, self._terminal_masks[bit]
+            driver = self.nl.drivers.get(bit)
+            if driver:
+                name = driver[0]
+                if self.nl.cells[name]["type"] not in FLOP_TYPES | _MEMORY:
+                    return name, 0
+            return None, 0
 
-        found_q, found_p = set(), set()
-        roots = {name for bit in bits
-                 if (name := node(bit, found_q, found_p)) is not None}
+        mask, roots = 0, set()
+        for bit in bits:
+            name, terminal = node(bit)
+            mask |= terminal
+            if name is not None:
+                roots.add(name)
         graph, frontiers = {}, {}
         pending = list(roots)
         while pending:
@@ -621,16 +621,19 @@ class _LookupSnapshot:
             if name not in self._cone_inputs:
                 cell = self.nl.cells[name]
                 directions = cell.get("port_directions", {})
-                self._cone_inputs[name] = tuple(
+                self._cone_inputs[name] = tuple(dict.fromkeys(
                     bit for pin, conn in cell["connections"].items()
                     if not (directions.get(pin) == "output" or
                             (not directions and pin in _OUTPUT_PORTS))
-                    for bit in conn if not self.nl.is_const(bit))
-            qbits, pbits = set(), set()
-            children = {child for bit in self._cone_inputs[name]
-                        if (child := node(bit, qbits, pbits)) is not None}
+                    for bit in conn if not self.nl.is_const(bit)))
+            children, frontier = set(), 0
+            for bit in self._cone_inputs[name]:
+                child, terminal = node(bit)
+                frontier |= terminal
+                if child is not None:
+                    children.add(child)
             graph[name] = children
-            frontiers[name] = (qbits, pbits)
+            frontiers[name] = frontier
             pending.extend(children)
 
         # Iterative Kosaraju avoids recursion limits on deep native logic.
@@ -669,19 +672,27 @@ class _LookupSnapshot:
             components.append(component)
         for component in reversed(components):
             members = set(component)
-            qbits, pbits = set(), set()
+            frontier = 0
             for name in component:
-                qbits.update(frontiers[name][0])
-                pbits.update(frontiers[name][1])
+                frontier |= frontiers[name]
                 for child in graph[name] - members:
-                    qbits.update(cache[child][0])
-                    pbits.update(cache[child][1])
-            result = (frozenset(qbits), frozenset(pbits))
+                    frontier |= cache[child]
             for name in component:
-                cache[name] = result
+                cache[name] = frontier
         for name in roots:
-            found_q.update(cache[name][0])
-            found_p.update(cache[name][1])
+            mask |= cache[name]
+        return mask
+
+    def cone(self, bits: Iterable, skip: Optional[Set[object]] = None
+             ) -> Tuple[Set[object], Set[object]]:
+        """Preserve the public Q/port sets over the shared masked frontier."""
+        mask = self._cone_mask(bits, skip)
+        found_q, found_p = set(), set()
+        while mask:
+            lowest = mask & -mask
+            index = lowest.bit_length() - 1
+            (found_q if index < self._q_count else found_p).add(self._terminals[index])
+            mask ^= lowest
         return found_q, found_p
 
     def direct_source(self, flop: Flop, index: int) -> Optional[object]:
@@ -702,15 +713,28 @@ class _LookupSnapshot:
                         (flop, index, q_bits | port_bits))
         return self._data_cones
 
-    def consumers(self, source_bit) -> List[Tuple[Flop, int, bool]]:
-        if self._consumers is None:
-            self._consumers = {}
-            for flop, index, cone in self.data_cones():
-                direct = self.direct_source(flop, index)
-                for bit in cone:
-                    self._consumers.setdefault(bit, []).append(
-                        (flop, index, direct == bit))
-        return self._consumers.get(source_bit, [])
+    def consumers(self, source_bit, exclude_domain=None) -> List[Tuple[Flop, int, bool]]:
+        # Store each destination once, grouped by its shared source mask.
+        # Expanding the full source x destination relation eagerly can exhaust
+        # memory even after cone traversal is fast. Ordinals retain the exact
+        # former flop/D-bit order when groups are expanded on demand.
+        if self._consumer_groups is None:
+            self._consumer_groups = {}
+            ordinal = 0
+            for flop in self.nl.flops:
+                skip = {flop.srst} if flop.srst is not None else None
+                for index, bit in enumerate(flop.d):
+                    mask = self._cone_mask([bit], skip)
+                    self._consumer_groups.setdefault(mask, []).append(
+                        (ordinal, flop, index, self.direct_source(flop, index)))
+                    ordinal += 1
+        source = self._terminal_masks.get(source_bit, 0)
+        rows = [row for mask, group in self._consumer_groups.items()
+                if mask & source for row in group
+                if exclude_domain is None or self.domain(row[1]) != exclude_domain]
+        rows.sort(key=lambda row: row[0])
+        return [(flop, index, direct == source_bit)
+                for _ordinal, flop, index, direct in rows]
 
     def sync_stage2(self, stage1: Flop, index: int, domain: str) -> bool:
         if self._direct_consumers is None:
@@ -751,10 +775,10 @@ def _data_cones(nl: Netlist, lookup: Optional[_LookupSnapshot] = None
 
 
 def _consumers(nl: Netlist, source_bit,
-               lookup: Optional[_LookupSnapshot] = None
+               lookup: Optional[_LookupSnapshot] = None, exclude_domain=None
                ) -> List[Tuple[Flop, int, bool]]:
     """(flop, D index, direct?) for every flop whose data cone reads the bit."""
-    return (lookup or _LookupSnapshot(nl)).consumers(source_bit)
+    return (lookup or _LookupSnapshot(nl)).consumers(source_bit, exclude_domain)
 
 
 def clock_domains(nl: Netlist, lookup: Optional[_LookupSnapshot] = None
@@ -778,7 +802,7 @@ def reg_crossing_findings(nl: Netlist,
         send = lookup.domain(src)
         synced_all: Dict[str, bool] = {}
         for idx, bit in enumerate(src.q):
-            for f, i, direct in _consumers(nl, bit, lookup):
+            for f, i, direct in _consumers(nl, bit, lookup, exclude_domain=send):
                 recv = lookup.domain(f)
                 if recv == send:
                     continue
