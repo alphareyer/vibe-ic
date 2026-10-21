@@ -81,11 +81,22 @@ def render(binding: dict) -> tuple[bytes | None, dict | None, list[str]]:
 
 def emit(project: Path, binding: dict) -> tuple[dict | None, list[str]]:
     text, receipt, problems = render(binding)
-    if problems or text is None or receipt is None:
+    if problems:
         return receipt, problems
     path = project / SCAN_MODE_SDC_REL
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(text)
+    try:
+        if text is None or receipt is None:
+            # This producer owns the canonical scan-mode constraint.  A
+            # successful fresh run with no declared frequency must not leave
+            # the preceding run's constraint looking current.
+            path.unlink(missing_ok=True)
+            return None, []
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_bytes(text)
+        temporary.replace(path)
+    except OSError as exc:
+        return None, [f"scan-mode SDC publication failed: {exc}"]
     return receipt, []
 
 

@@ -740,8 +740,8 @@ def run_chain(project: Path, netlist_rel: str, clock: str,
                 "error": "L20 topology is incompatible with this one-chain producer",
                 "published": False,
             }
-        scan_mode_constraint, constraint_problems = _smc.emit(
-            project, l20_contract)
+        _constraint_text, scan_mode_constraint, constraint_problems = (
+            _smc.render(l20_contract))
         if constraint_problems:
             return 1, {
                 "stage": "scan_mode_constraint", "netlist": netlist_rel,
@@ -1115,16 +1115,33 @@ def run_chain(project: Path, netlist_rel: str, clock: str,
         if not reconciliation["ok"]:
             report["problems"].extend(reconciliation["problems"])
             report["ok"] = False
-        current, reason = l20_binding_is_current(project, report)
-        if not current:
-            report["problems"].append(reason)
-            report["ok"] = False
     if not report["ok"]:
         # A chain that does not account for every flop is NOT published as the
         # implementation netlist — publishing it would put an untestable
         # design into PnR under a name that says it is testable.
         report["published"] = False
         return 1, report
+
+    if l20_contract is not None:
+        # Publish the producer-owned timing actuator only after the native
+        # chain and its reconciliation have passed. A failed run must not
+        # replace a prior valid canonical constraint.
+        emitted_constraint, constraint_problems = _smc.emit(
+            project, l20_contract)
+        if constraint_problems or emitted_constraint != scan_mode_constraint:
+            report["problems"].extend(
+                constraint_problems
+                or ["published scan-mode receipt differs from prepared receipt"])
+            report["ok"] = False
+            report["published"] = False
+            return 1, report
+        current, reason = l20_binding_is_current(project, report)
+        if not current:
+            (project / _smc.SCAN_MODE_SDC_REL).unlink(missing_ok=True)
+            report["problems"].append(reason)
+            report["ok"] = False
+            report["published"] = False
+            return 1, report
 
     (project / SCAN_NETLIST_REL).write_bytes(produced.read_bytes())
     report["published"] = True

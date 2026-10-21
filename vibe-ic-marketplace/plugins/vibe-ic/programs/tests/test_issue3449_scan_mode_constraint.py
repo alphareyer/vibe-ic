@@ -145,6 +145,68 @@ def test_no_declared_frequency_is_an_explicit_signoff_skip(tmp_path):
     assert SIGN.evaluate_scan_shift_timing(project)["status"] == "SKIP"
 
 
+def test_successful_no_frequency_publish_removes_stale_owned_sdc(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path, frequency=None)
+    netlist = project / "phase2/stage2/synth/mapped.v"
+    netlist.parent.mkdir(parents=True)
+    mapped = (
+        "module top(input clk_i, input d, output q);\n"
+        "sky130_fd_sc_hd__dfxtp_1 u0 (.CLK(clk_i), .D(d), .Q(q));\n"
+        "sky130_fd_sc_hd__dfxtp_1 u1 (.CLK(clk_i), .D(d), .Q(q));\n"
+        "endmodule\n")
+    netlist.write_text(mapped)
+    stale = project / MODE.SCAN_MODE_SDC_REL
+    stale.parent.mkdir(parents=True)
+    stale.write_text("stale preceding run\n")
+
+    def native(project_path, cmd, **kwargs):
+        meta = json.dumps({"sin": "sin", "sout": "sout", "shift": "shift",
+                           "internalCount": 2, "boundaryCount": 0,
+                           "order": []})
+        produced = project_path / "phase2/stage2/dft/scan_chain_work/chained.v"
+        produced.parent.mkdir(parents=True, exist_ok=True)
+        produced.write_text(
+            f"/* FAULT METADATA: '{meta}' END FAULT METADATA */\n" + mapped)
+        return 0, (
+            "Internal scan chain successfully constructed. Length: 2\n"
+            "Boundary scan cells successfully chained. Length: 0\n"
+            "Total scan-chain length: 2\n"), ""
+
+    monkeypatch.setattr(SCAN._fatpg, "_run_docker", native)
+    monkeypatch.setattr(SCAN._fatpg, "atpg_engine_identity",
+                        lambda: {"exec_route": "test", "image": None})
+    rc, report = SCAN.run_chain(
+        project, "phase2/stage2/synth/mapped.v", "clk_i", "sky130",
+        require_l20_contract=True)
+    assert rc == 0 and report["published"] is True
+    assert not stale.exists()
+
+
+def test_failed_chain_does_not_replace_prior_canonical_scan_sdc(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    netlist = project / "phase2/stage2/synth/mapped.v"
+    netlist.parent.mkdir(parents=True)
+    netlist.write_text(
+        "module top(input clk_i, input d, output q);\n"
+        "sky130_fd_sc_hd__dfxtp_1 u0 (.CLK(clk_i), .D(d), .Q(q));\n"
+        "sky130_fd_sc_hd__dfxtp_1 u1 (.CLK(clk_i), .D(d), .Q(q));\n"
+        "endmodule\n")
+    prior = project / MODE.SCAN_MODE_SDC_REL
+    prior.parent.mkdir(parents=True)
+    prior.write_bytes(b"prior successful canonical bytes\n")
+
+    monkeypatch.setattr(SCAN._fatpg, "_run_docker",
+                        lambda *args, **kwargs: (1, "", "native failed"))
+    rc, report = SCAN.run_chain(
+        project, "phase2/stage2/synth/mapped.v", "clk_i", "sky130",
+        require_l20_contract=True)
+    assert rc != 0
+    assert report.get("published") is not True
+    assert prior.read_bytes() == b"prior successful canonical bytes\n"
+
+
 def test_nonpositive_or_nonfinite_frequency_is_refused(tmp_path):
     for value in (0, -1, "nan", "inf"):
         project = _project(tmp_path / str(value), frequency=value)
