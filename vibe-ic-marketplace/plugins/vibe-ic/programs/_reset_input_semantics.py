@@ -12,6 +12,13 @@ _NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_$]*\Z')
 _PHASE_COLUMNS = ('clock', 'reset', 'polarity', 'assertion', 'release',
                   'release synchronizer stages')
 _GUARD_COLUMNS = ('deassertion guard ns', 'release guard ns')
+_NO_PHASE_LOCK = re.compile(
+    r'\b(?:no|without)\s+(?:external\s+)?(?:reset\s+)?phase\s+'
+    r'(?:lock|locking|relationship|guarantee)\b|'
+    r'\b(?:reset\s+)?deassert(?:ion|s)?\s+(?:is\s+)?(?:not\s+)?'
+    r'(?:phase[- ]locked|phase[- ]aligned)|'
+    r'\b(?:reset\s+)?deassert(?:ion|s)?\s+(?:may|can)\s+(?:occur|arrive)\s+'
+    r'(?:at|in)\s+any\s+(?:clock\s+)?phase\b', re.I)
 
 
 def _current_phase_authority(text):
@@ -112,6 +119,36 @@ def reset_domain_bindings(name, extracted):
                              'sha256': source_sha256}
                             for source, source_sha256, row in rows]
         result.append(binding)
+    # A source may deliberately state that reset deassertion has no external
+    # phase guarantee.  That is different from an omitted number: it requests
+    # the exact, structurally proven synchronizer exception path.  Keep the
+    # source line and full-file digest so a changed reset/clock statement
+    # invalidates the request before an SDC exception can be authored.
+    no_phase_basis = []
+    name_re = re.compile(r'(?<![\w])' + re.escape(name) + r'(?![\w])', re.I)
+    for source, text in extracted.items():
+        headings = []
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        for number, raw in enumerate(text.splitlines(), 1):
+            heading = re.match(r'^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$', raw)
+            if heading:
+                level = len(heading[1])
+                while headings and headings[-1][0] >= level:
+                    headings.pop()
+                headings.append((level, _current_phase_authority(heading[2])))
+            current = current_clause(raw)
+            if (current and all(authority for _, authority in headings)
+                    and name_re.search(current)
+                    and _NO_PHASE_LOCK.search(current)):
+                no_phase_basis.append({'file': source, 'line': number,
+                                       'quote': raw.strip(), 'sha256': digest})
+    if no_phase_basis:
+        for binding in result:
+            if ((binding.get('assertion'), binding.get('release')) ==
+                    ('asynchronous', 'synchronous')
+                    and binding.get('deassertion_guard_ns') == 'unknown'):
+                binding['deassertion_policy'] = 'structural_sync_release'
+                binding['deassertion_policy_basis'] = list(no_phase_basis)
     # A phase table is not allowed to overrule an independent declaration.
     # Compare assertion and release separately, including any explicit target
     # and depth. Unknown/conflicting values reach the existing admission refusal.
@@ -171,6 +208,10 @@ def admit_reset_phases(project, documents, surface=None):
     expected = {name: reset_domain_bindings(name, extracted) for name in selected}
     for name, bindings in expected.items():
         for b in bindings:
+            structural = (b.get('deassertion_policy') ==
+                          'structural_sync_release'
+                          and isinstance(b.get('deassertion_policy_basis'), list)
+                          and bool(b['deassertion_policy_basis']))
             if (name not in physical or b['clock'] not in physical or b['clock'] not in visible
                     or b['assertion'] not in ('asynchronous', 'synchronous')
                     or b['release'] not in ('asynchronous', 'synchronous')
@@ -179,6 +220,7 @@ def admit_reset_phases(project, documents, surface=None):
                     or type(b['release_stages']) is not int or b['release_stages'] <= 0
                     or (b['assertion'] == 'asynchronous'
                         and b['release'] == 'synchronous'
+                        and not structural
                         and (type(b['deassertion_guard_ns']) not in (int, float)
                              or not math.isfinite(b['deassertion_guard_ns'])
                              or b['deassertion_guard_ns'] <= 0))):
@@ -191,17 +233,28 @@ def admit_reset_phases(project, documents, surface=None):
         if len(by_clock) != len(actual):
             return False
         keys = ('clock', 'assertion', 'release', 'release_clock', 'release_stages',
-                'deassertion_guard_ns', 'polarity')
+                'deassertion_guard_ns', 'polarity', 'deassertion_policy')
         def basis(b):
             rows = b.get('basis')
             if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
                 return None
             return sorted((str(r.get('file')), str(r.get('line')), str(r.get('quote')),
                            str(r.get('sha256'))) for r in rows)
+        def policy_basis(b):
+            rows = b.get('deassertion_policy_basis')
+            if rows is None:
+                return None
+            if not isinstance(rows, list) or not rows or not all(
+                    isinstance(r, dict) for r in rows):
+                return ()
+            return sorted((str(r.get('file')), str(r.get('line')), str(r.get('quote')),
+                           str(r.get('sha256'))) for r in rows)
         for w in wanted:
             a = by_clock.get(w['clock'], {})
-            if (any(a.get(k) != w[k] for k in keys)
-                    or type(a.get('release_stages')) is not int or basis(a) != basis(w)):
+            if (any(a.get(k) != w.get(k) for k in keys)
+                    or type(a.get('release_stages')) is not int
+                    or basis(a) != basis(w)
+                    or policy_basis(a) != policy_basis(w)):
                 return False
         return True
 

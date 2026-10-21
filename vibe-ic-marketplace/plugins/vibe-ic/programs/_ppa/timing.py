@@ -1519,6 +1519,10 @@ def asic_sdc_input_digest(rt: Any, project: Path, top: str, pdk: Any
                 if f.is_file() and not (f.parent == rt._pl.constraints_dir(
                         project) and f.name in own):
                     _add(f)
+    mapped = rt._pl.mapped_synth_netlist(project)
+    if mapped is not None:
+        _add(mapped)
+        items["@mapped_synth_netlist"] = str(mapped.relative_to(project))
     # These are the exact config locations _resolve_clock_spec consults.
     for f in (project / "config.json",
               *sorted(project.glob("baseline/*/config.json")),
@@ -1565,7 +1569,9 @@ def asic_sdc_input_digest(rt: Any, project: Path, top: str, pdk: Any
         except OSError:
             items["@io_liberty:" + lib] = "IN_PINNED_IMAGE"
     import sdc_environment as _sdc_env
-    for code in (Path(__file__), Path(rt.__file__), Path(_sdc_env.__file__)):
+    import reset_sync_structural_exception as _reset_sync
+    for code in (Path(__file__), Path(rt.__file__), Path(_sdc_env.__file__),
+                 Path(_reset_sync.__file__)):
         try:
             items["@code:" + code.name] = hashlib.sha256(
                 code.read_bytes()).hexdigest()
@@ -1652,6 +1658,10 @@ def emit_step7_asic_sdc(rt: Any, project: Path, top: str, pdk: Any,
     pdk = _selected_sdc_pdk(rt, project, pdk)
     digest, inputs = asic_sdc_input_digest(rt, project, top, pdk)
     authored = author_asic_sdc(rt, project, top, pdk, container, supply_ports=())
+    import reset_sync_structural_exception as _reset_sync
+    authored["text"], structural_reset = _reset_sync.apply_current_project(
+        project, Path(str(pdk.liberty)), authored["text"])
+    authored["structural_reset_exception"] = structural_reset
     path = step7_asic_sdc_path(rt, project, top, authored["design_staged"])
     staged = rt._resolve_staged_silicon_sdc(project)
     if (staged is not None and staged.is_file()

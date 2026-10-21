@@ -159,6 +159,89 @@ def test_current_source_phase_admission_positive(tmp_path, depth):
     assert reset.body[-1].iter.args[0].value == depth
 
 
+def _structural_release_text():
+    return (FIXTURE.read_text()
+            .replace('| 2 | 0.7 |', '| 2 | unspecified |')
+            .replace('| 2 | 0.9 |', '| 2 | unspecified |')
+            + '\nCurrent contract: rst_n deassertion is not phase-locked to any '
+              'external clock; each declared domain uses its own release chain.\n')
+
+
+def test_no_phase_lock_is_a_typed_source_bound_structural_policy(tmp_path):
+    docs = _emit(tmp_path, _structural_release_text())
+    reset = docs['L9_INTEGRATION_SPEC.json']['reset_domains'][0]
+    bindings = reset['domain_bindings']
+    assert len(bindings) == 2
+    assert all(row['deassertion_guard_ns'] == 'unknown' for row in bindings)
+    assert all(row['deassertion_policy'] == 'structural_sync_release'
+               for row in bindings)
+    for row in bindings:
+        basis = row['deassertion_policy_basis']
+        assert len(basis) == 1
+        assert basis[0]['file'] == 'input/docs/reset.md'
+        assert 'not phase-locked' in basis[0]['quote']
+        assert len(basis[0]['sha256']) == 64
+    cr, cp = _consume(tmp_path, docs)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert all(row['deassertion_policy'] == 'structural_sync_release'
+               for row in cr['domain_bindings'])
+    deck = next((tmp_path / 'phase2/stage1/fpga').glob('*.sdc')).read_text()
+    assert 'timed until mapped endpoint proof at Step 7' in deck
+    assert 'set_false_path' not in deck
+    assert 'set_case_analysis' not in deck
+    assert 'set_input_delay -clock clk_i -min 0 [get_ports {rst_n}]' in deck
+    assert ('set_input_delay -clock clk_aux_i -min -add_delay 0 '
+            '[get_ports {rst_n}]') in deck
+
+
+def test_historical_no_phase_lock_cannot_authorize_structural_policy(tmp_path):
+    text = (_structural_release_text().replace(
+        'Current contract: rst_n deassertion is not phase-locked to any '
+        'external clock; each declared domain uses its own release chain.',
+        '## Historical comparison\n\nrst_n deassertion was not phase-locked to '
+        'any external clock.'))
+    docs = _emit(tmp_path, text)
+    reset = docs['L9_INTEGRATION_SPEC.json']['reset_domains'][0]
+    assert all('deassertion_policy' not in row
+               for row in reset['domain_bindings'])
+    import professional_tb_gen as T
+    with pytest.raises(ValueError, match='RESET_PHASE_SOURCE_ADMISSION_REFUSED'):
+        T._load_clock_reset(tmp_path, docs['L9_INTEGRATION_SPEC.json']['ports'])
+    cp = subprocess.run([sys.executable, str(PROGRAMS / 'sdc_gen.py'),
+                         str(tmp_path), '--force'], capture_output=True, text=True)
+    assert cp.returncode == 1, cp.stdout + cp.stderr
+    assert 'RESET_PHASE_SOURCE_ADMISSION_REFUSED' in cp.stdout + cp.stderr
+
+
+@pytest.mark.parametrize('mutation', ['source', 'policy', 'basis_sha'])
+def test_structural_release_policy_refuses_stale_or_changed_authority(
+        tmp_path, mutation):
+    docs = _emit(tmp_path, _structural_release_text())
+    if mutation == 'source':
+        source = tmp_path / 'input/docs/reset.md'
+        source.write_text(source.read_text().replace(
+            'not phase-locked', 'phase-locked'))
+    else:
+        def visit(value):
+            if isinstance(value, dict):
+                if mutation == 'policy' and value.get('deassertion_policy'):
+                    value['deassertion_policy'] = 'numeric_guard'
+                if mutation == 'basis_sha' and value.get('deassertion_policy_basis'):
+                    value['deassertion_policy_basis'][0]['sha256'] = '0' * 64
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+        for name, doc in docs.items():
+            visit(doc)
+            (tmp_path / 'phase1/generated_docs' / name).write_text(json.dumps(doc))
+    cp = subprocess.run([sys.executable, str(PROGRAMS / 'sdc_gen.py'),
+                         str(tmp_path), '--force'], capture_output=True, text=True)
+    assert cp.returncode == 1, cp.stdout + cp.stderr
+    assert 'RESET_PHASE_SOURCE_ADMISSION_REFUSED' in cp.stdout + cp.stderr
+
+
 @pytest.mark.parametrize('mutation', ['assertion', 'depth', 'guard', 'missing', 'source',
                                      'release_clock', 'float_depth', 'projection_empty',
                                      'basis', 'basis_sha', 'direction_and_missing'])

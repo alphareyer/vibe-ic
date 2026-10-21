@@ -779,9 +779,12 @@ def _bind_reset_deassertion_guards(
             if (binding.get("assertion"), binding.get("release")) != (
                     "asynchronous", "synchronous"):
                 continue
+            structural = (binding.get("deassertion_policy") ==
+                          "structural_sync_release")
             guard = binding.get("deassertion_guard_ns")
-            if (type(guard) not in (int, float) or not math.isfinite(guard)
-                    or guard <= 0):
+            if (not structural and
+                    (type(guard) not in (int, float) or not math.isfinite(guard)
+                     or guard <= 0)):
                 raise ValueError(
                     f"SDC_RESET_DEASSERTION_GUARD_NOT_MEASURED: {reset}/"
                     f"{binding.get('clock')}: current source must declare a "
@@ -977,14 +980,25 @@ def _render_sdc(top: str, clock_port: str, period_ns: float,
                        if (binding.get("assertion"), binding.get("release")) ==
                        ("asynchronous", "synchronous")]
             if guarded:
-                lines.append(f"# {sig}: source-authorized deassertion guard per release domain")
+                if all(binding.get("deassertion_policy") ==
+                       "structural_sync_release" for binding in guarded):
+                    # This early deck is authored before technology mapping,
+                    # so it cannot name or exempt any synchronizer endpoint.
+                    # Keep the reset timed here.  Step 7 may replace only the
+                    # recovery/removal arcs to exact, proven mapped pins.
+                    lines.append(f"# {sig}: structural synchronous-release policy; "
+                                 "timed until mapped endpoint proof at Step 7")
+                else:
+                    lines.append(f"# {sig}: source-authorized deassertion guard per release domain")
                 for index, binding in enumerate(guarded):
                     clock = binding["sdc_clock"]
                     add = " -add_delay" if index else ""
+                    structural = (binding.get("deassertion_policy") ==
+                                  "structural_sync_release")
                     lines.append(f"set_input_delay -clock {clock} -max{add} {io_max} "
                                  f"[get_ports {{{sig}}}]")
                     lines.append(f"set_input_delay -clock {clock} -min{add} "
-                                 f"{float(binding['deassertion_guard_ns']):g} "
+                                 f"{(0.0 if structural else float(binding['deassertion_guard_ns'])):g} "
                                  f"[get_ports {{{sig}}}]")
                 continue
             lines.append(f"set_input_delay  -clock {clock_label} -max {io_max} "
