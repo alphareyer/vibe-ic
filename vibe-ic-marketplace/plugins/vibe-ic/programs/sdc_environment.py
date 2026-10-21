@@ -544,6 +544,9 @@ def _pad_analysis_boundary(project: Path, analysis_top: str
         return classified("UNSPECIFIED" if not analysis_top else "UNRECORDED")
     if not analysis_top:
         return classified("UNSPECIFIED")
+    if not isinstance(record, dict) or record.get("verdict") != "WROTE":
+        basis["why"] = "pad producer record is not a successful current publication"
+        return classified("UNRECORDED")
     core = record.get("core_module") if isinstance(record, dict) else None
     chip = record.get("chip_top_module") if isinstance(record, dict) else None
     if not core and not chip:

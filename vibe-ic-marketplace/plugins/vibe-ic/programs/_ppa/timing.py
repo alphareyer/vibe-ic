@@ -1745,6 +1745,98 @@ def publish_pnr_sdc(record: Dict[str, Any], out_dir: Path) -> Path:
     return sdc
 
 
+def _pnr_physical_analysis_top(project: Path, logical_top: str) -> str:
+    """Return the producer-bound physical top, or keep the logical top.
+
+    Step 7 is authored against the synthesis/core top.  Once the canonical
+    pad producer has published a successful wrapper, PnR analyzes that wrapper
+    instead.  Only the exact recorded core -> chip mapping can move this
+    boundary; malformed, failed, or mismatched records remain on the logical
+    name and are refused by ``_pad_analysis_boundary`` rather than guessed.
+    """
+    record_path = Path(project) / "reports" / "phase3" / "io_pad_chip_top.json"
+    try:
+        record = json.loads(record_path.read_text(errors="replace"))
+    except (OSError, ValueError, TypeError):
+        return logical_top
+    if not isinstance(record, dict) or record.get("verdict") != "WROTE":
+        return logical_top
+    core = record.get("core_module")
+    chip = record.get("chip_top_module")
+    if (core != logical_top or not isinstance(chip, str) or not chip
+            or chip == logical_top):
+        return logical_top
+    return chip
+
+
+def _derive_pnr_pad_input_drive(rt: Any, project: Path, logical_top: str,
+                                pdk: Any, container: str,
+                                record: Dict[str, Any]) -> Dict[str, object]:
+    """Replace Step 7's core drive only when PnR crosses to a chip wrapper.
+
+    The Step-7 file remains the immutable design-intent input.  This function
+    derives the working PnR deck from it after the pad producer establishes
+    the physical boundary.  Generated PDK core drivers are removed; a design
+    declared driver is retained; the existing IO-tier/NOT_MEASURED ladder
+    supplies the physical replacement and its ordinary report.
+    """
+    import sdc_environment as environment
+
+    physical_top = _pnr_physical_analysis_top(project, logical_top)
+    if physical_top == logical_top:
+        return {"applied": False, "logical_top": logical_top,
+                "analysis_top": physical_top,
+                "reason": "no successful distinct pad-wrapper publication"}
+
+    text = str(record["text"])
+    if record.get("design_staged"):
+        text, pad_record = environment.staged_sdc_pad_input_drive(
+            project, text, str(record.get("staged_sdc") or record.get("path") or ""),
+            container, getattr(rt, "_to_container_path", None),
+            environment.liberty_time_scale(str(pdk.liberty)),
+            analysis_top=physical_top)
+    else:
+        values, _unread = environment._sdc_environment_values(
+            project, str(pdk.liberty), container, None, None,
+            getattr(rt, "_to_container_path", None))
+        resolved, pad_record = environment._pad_input_drive(
+            project, values, container, getattr(rt, "_to_container_path", None),
+            analysis_top=physical_top)
+        base_drive = values.get("set_driving_cell")
+        if base_drive is not None and "set_driving_cell" not in resolved:
+            try:
+                cell, pin = str(base_drive[0]).split("/", 1)
+            except ValueError:
+                cell = pin = ""
+            line = (f"set_driving_cell -lib_cell {cell} -pin {pin} [all_inputs]"
+                    if cell and pin else "")
+            if line:
+                kept = [item for item in text.splitlines() if item.strip() != line]
+                text = "\n".join(kept) + ("\n" if text.endswith("\n") else "")
+        new_lines = environment.render_pad_input_drive(
+            pad_record, environment.liberty_time_scale(str(pdk.liberty)))
+        if new_lines and not (pad_record.get("model") == "set_driving_cell"
+                              and all(item in text.splitlines()
+                                      for item in new_lines if not item.startswith("#"))):
+            text = text.rstrip("\n") + "\n" + "\n".join(new_lines) + "\n"
+
+    pad_record["sdc_lines"] = environment.pad_drive_sdc_lines(
+        pad_record, environment.liberty_time_scale(str(pdk.liberty)))
+    pad_report = environment.write_pad_input_drive_record(project, pad_record)
+    record["text"] = text
+    record["pad_input_drive"] = pad_record.get("verdict")
+    record["pad_input_drive_record"] = pad_record
+    boundary = pad_record.get("boundary")
+    return {"applied": True, "logical_top": logical_top,
+            "analysis_top": physical_top,
+            "verdict": pad_record.get("verdict"),
+            "record": environment.PAD_INPUT_DRIVE_REPORT,
+            "record_sha256": hashlib.sha256(pad_report.read_bytes()).hexdigest(),
+            "producer_record_sha256": (
+                boundary.get("record_sha256")
+                if isinstance(boundary, dict) else None)}
+
+
 def asic_sdc_for_pnr(rt: Any, project: Path, top: str, pdk: Any,
                      container: str) -> Dict[str, Any]:
     """The SDC `step_pnr` loads: step 7's file, plus the named PnR-time
@@ -1845,6 +1937,15 @@ def asic_sdc_for_pnr(rt: Any, project: Path, top: str, pdk: Any,
         if out["derivation"] is not None:
             out["derivation"]["deck_sha256"] = _sha256_text(out["text"])
             out["derivation"]["static_pad_mode"] = "actual netlist constant-disabled conditional edges"
+    pad_drive = _derive_pnr_pad_input_drive(
+        rt, project, top, pdk, container, out)
+    if pad_drive.get("applied"):
+        if out["derivation"] is None:
+            out["derivation"] = {
+                "name": ASIC_SDC_DERIVATION,
+                "base_deck_sha256": rec["deck_sha256"]}
+        out["derivation"]["pad_input_drive"] = pad_drive
+        out["derivation"]["deck_sha256"] = _sha256_text(out["text"])
     return out
 
 if __name__ == "__main__":                                   # pragma: no cover

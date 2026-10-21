@@ -272,10 +272,11 @@ _IO_LIB = """library ("quartz_io__%(corner)s") {
 
 
 def _io_record(project: Path, libs, *, core_module: str = "",
-               chip_top_module: str = "") -> None:
+               chip_top_module: str = "", verdict: str = "WROTE") -> None:
     rec = project / "reports" / "phase3" / "io_pad_chip_top.json"
     rec.parent.mkdir(parents=True, exist_ok=True)
-    doc = {"io_library_liberty": [str(x) for x in libs]}
+    doc = {"verdict": verdict,
+           "io_library_liberty": [str(x) for x in libs]}
     if core_module:
         doc["core_module"] = core_module
     if chip_top_module:
@@ -621,6 +622,118 @@ def test_a_fresh_die_run_carries_the_io_bracket_into_the_pnr_deck(tmp_path, monk
     # and the regenerated deck is now current: a second read reuses it
     again = T.asic_sdc_for_pnr(p3, proj, S7.TOP, pdk, "some-container")
     assert again["regenerated"] is None and again["text"] == got["text"]
+
+
+def _issue3389_project(tmp_path, monkeypatch, *, libs, source):
+    """A neutral ordinary Step7 core -> Step15 chip-boundary fixture."""
+    S7 = _step7_fixtures()
+    from _ppa import timing as T
+    import sdc_environment as SE
+    proj = S7._project(tmp_path)
+    marker = proj / TD.SELF_TAPEOUT_REL
+    marker.parent.mkdir(parents=True)
+    marker.write_text(TD.SELF_TAPEOUT_MARKER + "\n")
+    _io_record(proj, libs, core_module=S7.TOP,
+               chip_top_module="neutral_physical_chip")
+    values = {"set_driving_cell": ("quartz_sc__inv_1/ZN", source)}
+    resolver = lambda *_a, **_k: (dict(values), [])
+    monkeypatch.setattr(p3, "_sdc_environment_values", resolver)
+    monkeypatch.setattr(SE, "_sdc_environment_values", resolver)
+    pdk = S7._pdk(monkeypatch)
+    core_liberty = tmp_path / "neutral_core.lib"
+    core_liberty.write_text('library(neutral) { time_unit : "1ns"; }\n')
+    pdk.liberty = str(core_liberty)
+    T.emit_step7_asic_sdc(p3, proj, S7.TOP, pdk, "some-container")
+    return S7, T, SE, proj, pdk
+
+
+def test_issue3389_pnr_replaces_the_generated_core_driver_at_chip_boundary(
+        tmp_path, monkeypatch):
+    io_lib = _io_lib(tmp_path, "tt")
+    S7, T, SE, proj, pdk = _issue3389_project(
+        tmp_path, monkeypatch, libs=[io_lib],
+        source="pinned PDK default /pdk/config.tcl:SYNTH_DRIVING_CELL")
+    step7 = (proj / S7._record(proj)["path"]).read_text()
+    assert _commands(step7, "set_driving_cell") == [
+        "set_driving_cell -lib_cell quartz_sc__inv_1 -pin ZN [all_inputs]"]
+
+    got = T.asic_sdc_for_pnr(p3, proj, S7.TOP, pdk, "some-container")
+    assert _commands(got["text"], "set_driving_cell") == []
+    assert _commands(got["text"], "set_input_transition") == [
+        "set_input_transition -max $_vibeic_pad_max [all_inputs]",
+        "set_input_transition -min $_vibeic_pad_min [all_inputs]",
+    ]
+    record = json.loads((proj / _REPORT).read_text())
+    assert record["verdict"] == "PDK_IO_TIER"
+    assert record["analysis_top"] == "neutral_physical_chip"
+    assert record["refused_core_driving_cell"]["value"] == "quartz_sc__inv_1/ZN"
+    derived = got["derivation"]["pad_input_drive"]
+    assert derived["applied"] is True
+    assert derived["logical_top"] == S7.TOP
+    assert derived["analysis_top"] == "neutral_physical_chip"
+    assert derived["verdict"] == "PDK_IO_TIER"
+    assert derived["record"] == SE.PAD_INPUT_DRIVE_REPORT
+    assert derived["record_sha256"] == T._sha256_text(
+        (proj / _REPORT).read_text())
+    assert derived["producer_record_sha256"] == record["boundary"]["record_sha256"]
+
+
+def test_issue3389_pnr_preserves_a_design_declared_external_driver(
+        tmp_path, monkeypatch):
+    io_lib = _io_lib(tmp_path, "tt")
+    S7, T, _SE, proj, pdk = _issue3389_project(
+        tmp_path, monkeypatch, libs=[io_lib],
+        source="design doc input/docs/L9_constraints.md:3")
+    line = "set_driving_cell -lib_cell quartz_sc__inv_1 -pin ZN [all_inputs]"
+    got = T.asic_sdc_for_pnr(p3, proj, S7.TOP, pdk, "some-container")
+    assert got["text"].splitlines().count(line) == 1
+    record = json.loads((proj / _REPORT).read_text())
+    assert record["verdict"] == "DECLARED"
+    assert record["source"] == "design doc input/docs/L9_constraints.md:3"
+    assert record["analysis_top"] == "neutral_physical_chip"
+
+
+def test_issue3389_missing_io_authority_removes_core_drive_and_refuses(
+        tmp_path, monkeypatch):
+    S7, T, _SE, proj, pdk = _issue3389_project(
+        tmp_path, monkeypatch, libs=[],
+        source="pinned PDK default /pdk/config.tcl:SYNTH_DRIVING_CELL")
+    got = T.asic_sdc_for_pnr(p3, proj, S7.TOP, pdk, "some-container")
+    assert _commands(got["text"], "set_driving_cell") == []
+    assert "NOT_MEASURED: OFFCHIP_INPUT_DRIVE" in got["text"]
+    record = json.loads((proj / _REPORT).read_text())
+    assert record["verdict"] == "NOT_MEASURED"
+    assert record["analysis_top"] == "neutral_physical_chip"
+
+
+def test_issue3389_failed_pad_publication_cannot_authorize_a_boundary(
+        tmp_path, monkeypatch):
+    S7 = _step7_fixtures()
+    from _ppa import timing as T
+    import sdc_environment as SE
+    proj = S7._project(tmp_path)
+    marker = proj / TD.SELF_TAPEOUT_REL
+    marker.parent.mkdir(parents=True)
+    marker.write_text(TD.SELF_TAPEOUT_MARKER + "\n")
+    _io_record(proj, [_io_lib(tmp_path, "tt")], core_module=S7.TOP,
+               chip_top_module="neutral_physical_chip", verdict="FAIL")
+    values = {"set_driving_cell": (
+        "quartz_sc__inv_1/ZN",
+        "pinned PDK default /pdk/config.tcl:SYNTH_DRIVING_CELL")}
+    resolver = lambda *_a, **_k: (dict(values), [])
+    monkeypatch.setattr(p3, "_sdc_environment_values", resolver)
+    monkeypatch.setattr(SE, "_sdc_environment_values", resolver)
+    pdk = S7._pdk(monkeypatch)
+    core_liberty = tmp_path / "neutral_core.lib"
+    core_liberty.write_text('library(neutral) { time_unit : "1ns"; }\n')
+    pdk.liberty = str(core_liberty)
+    T.emit_step7_asic_sdc(p3, proj, S7.TOP, pdk, "some-container")
+    got = T.asic_sdc_for_pnr(p3, proj, S7.TOP, pdk, "some-container")
+    assert _commands(got["text"], "set_driving_cell") == []
+    assert got["derivation"] is None
+    record = json.loads((proj / _REPORT).read_text())
+    assert record["verdict"] == "NOT_MEASURED"
+    assert "not a successful current publication" in record["reason"]
 
 
 # -- the runner wiring of the STA fold (review_wave58 MINOR) ----------------

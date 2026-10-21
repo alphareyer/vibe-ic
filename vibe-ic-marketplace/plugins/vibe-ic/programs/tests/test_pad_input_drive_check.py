@@ -99,7 +99,8 @@ def _stage_drive(project: Path, analysis_top: str, *, record_state: str = "full"
     else:
         pad = json.loads(pad_record.read_text())
         if record_state in ("full", "stale"):
-            pad.update(core_module="neutral_core", chip_top_module="neutral_chip")
+            pad.update(verdict="WROTE", core_module="neutral_core",
+                       chip_top_module="neutral_chip")
         elif record_state != "sparse":
             raise AssertionError(f"unknown pad record state {record_state}")
         pad_record.write_text(json.dumps(pad))
