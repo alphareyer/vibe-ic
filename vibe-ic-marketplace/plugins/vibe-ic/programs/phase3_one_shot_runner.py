@@ -143,6 +143,34 @@ _adopt_current_power_report = _ppa_power.adopt_current_power_report
 
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
+_RUNTIME_PROGRAM_TREE = None
+
+
+def _verify_runtime_command(command) -> None:
+    if _RUNTIME_PROGRAM_TREE is not None:
+        _RUNTIME_PROGRAM_TREE.verify_command(command)
+
+
+def _activate_runtime_program_tree(project: Path) -> None:
+    global PROGRAMS_DIR, _RUNTIME_PROGRAM_TREE
+    import runtime_program_tree as _rpt
+    tree = _rpt.activate(project, PROGRAMS_DIR, Path(__file__))
+    _RUNTIME_PROGRAM_TREE = tree
+    PROGRAMS_DIR = tree.programs_dir
+    globals()["__file__"] = str(PROGRAMS_DIR / "phase3_one_shot_runner.py")
+    for name in ("run", "run_best_effort"):
+        original = getattr(_pr, name, None)
+        if original is None or getattr(original, "_vibeic_runtime_bound", False):
+            continue
+
+        def retained_progress_run(command, *args, _original=original, **kwargs):
+            _verify_runtime_command(command)
+            return _original(command, *args, **kwargs)
+
+        retained_progress_run._vibeic_runtime_bound = True
+        setattr(_pr, name, retained_progress_run)
+
+
 TOOLS_IN_CONTAINER = "/foss/tools"
 PDKS_IN_CONTAINER = "/foss/pdks"
 
@@ -17426,6 +17454,11 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
                                   folder / "stat_binding_gate.json")
         area_report = folder / "area_budget_gate.json"
         area_report.unlink(missing_ok=True)
+        _verify_runtime_command(
+            [sys.executable,
+             str(PROGRAMS_DIR / "area_total_vs_budget_check.py"),
+             str(project), "--json", str(area_report),
+             *_area_receipt_flags(area_receipt, area_run_manifest)])
         gate = subprocess.run([sys.executable,
                                str(PROGRAMS_DIR / "area_total_vs_budget_check.py"),
                                str(project), "--json", str(area_report),
@@ -17450,6 +17483,8 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
                 raise _ll.Refusal("LL_SYNTH_AREA_REPORT_INVALID", str(exc)) from exc
             if not isinstance(area_result, dict) or area_result.get("verdict") != "INCOMPLETE":
                 raise _ll.Refusal("LL_SYNTH_AREA_REPORT_INVALID", str(area_result))
+        _verify_runtime_command(
+            [sys.executable, str(PROGRAMS_DIR / "synth_netlist_check.py")])
         netlist_gate = subprocess.run(
             [sys.executable, str(PROGRAMS_DIR / "synth_netlist_check.py"),
              "--netlist", str(netlist), "--tool-netlist", str(source),
@@ -17461,6 +17496,8 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
         if not Path(str(pdk.liberty)).is_file():
             raise _ll.Refusal("LL_PDK_LIB_MISSING",
                               f"no liberty file at {pdk.liberty}")
+        _verify_runtime_command(
+            [sys.executable, str(PROGRAMS_DIR / "pdk_consistency_check.py")])
         pdk_gate = subprocess.run(
             [sys.executable, str(PROGRAMS_DIR / "pdk_consistency_check.py"),
              "--netlist", str(netlist), "--pdk-lib", str(pdk.liberty),
@@ -17492,6 +17529,8 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
                     f"{provenance_report.suffix}")
                 shutil.copy2(provenance_report, retained)
         provenance_report.unlink(missing_ok=True)
+        _verify_runtime_command(
+            [sys.executable, str(PROGRAMS_DIR / "provenance_check.py")])
         provenance_gate = subprocess.run(
             [sys.executable, str(PROGRAMS_DIR / "provenance_check.py"),
              str(project), "--output", str(source.relative_to(project)),
@@ -17529,6 +17568,9 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
                 "parent was admitted, so handoff/post-map publication did not run",
                 [str(netlist), str(stat), str(stats), str(provenance_report)],
                 reason_class="uncalibrated" if status == "NOT_MEASURED" else "inconclusive")
+        _verify_runtime_command(
+            [sys.executable,
+             str(PROGRAMS_DIR / "synth_handoff_netlist_check.py")])
         handoff_gate = subprocess.run(
             [sys.executable, str(PROGRAMS_DIR / "synth_handoff_netlist_check.py"),
              "--netlist", str(source), "--resolved", str(folder / "config.json"),
@@ -18519,6 +18561,8 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         if _area_pdk:
             _area_flags += ["--pdk", _area_pdk]
         try:
+            _verify_runtime_command(
+                [sys.executable, str(_area_prog), str(project)] + _area_flags)
             _acp = subprocess.run(
                 [sys.executable, str(_area_prog), str(project)] + _area_flags,
                 capture_output=True, text=True, timeout=120)
@@ -24113,6 +24157,9 @@ def _emit_spare_cell_coverage(project: Path, spare_json: Path) -> str:
         return (" | spare_coverage: NOT RUN - no spare_cells.json to grade, "
                 "so step 18's graded output is legitimately absent")
     try:
+        _verify_runtime_command(
+            [sys.executable,
+             str(PROGRAMS_DIR / "spare_cell_coverage_check.py")])
         r = subprocess.run(
             [sys.executable,
              str(PROGRAMS_DIR / "spare_cell_coverage_check.py"),
@@ -56106,6 +56153,7 @@ def _run_illegal_overlap_gate(project: Path, out_json: Path
         return 2, f"NOT CHECKED — cannot create {out_json.parent}: {exc}"
     cmd = [sys.executable, str(prog), str(project), "--json", str(out_json)]
     try:
+        _verify_runtime_command(cmd)
         cp = subprocess.run(cmd, timeout=_ILLEGAL_OVERLAP_GATE_TIMEOUT,
                             check=False, capture_output=True, text=True)
     except Exception as exc:                                   # noqa: BLE001
@@ -56125,6 +56173,7 @@ def _run_illegal_overlap_gate(project: Path, out_json: Path
     validate_cmd = [sys.executable, str(validator), str(validator_root),
                     "--record", record_rel]
     try:
+        _verify_runtime_command(validate_cmd)
         checked = subprocess.run(
             validate_cmd, timeout=_ILLEGAL_OVERLAP_GATE_TIMEOUT, check=False,
             capture_output=True, text=True)
@@ -61255,6 +61304,7 @@ def _publish_prelayout_summary(project: Path) -> Path:
                "--under", "phase3/stage3/sta/prelayout_per_corner",
                "--json", str(summary)]
     try:
+        _verify_runtime_command(command)
         completed = subprocess.run(command, capture_output=True, text=True,
                                    timeout=60)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -62554,6 +62604,7 @@ def step_tapeout_docs_gen(project: Path) -> StepResult:
     cmd = [sys.executable, str(prog), "--project", str(project),
            "--out-dir", str(out_dir)]
     try:
+        _verify_runtime_command(cmd)
         cp = subprocess.run(cmd, capture_output=True, text=True,
                             errors="replace", timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -63383,6 +63434,8 @@ def _canonicalize_postpnr_prerequisites(project: Path, top: str, pdk: PdkConfig,
                     or prior.get("sdc_sha256") != sdc_sha):
         sdc_report.unlink(missing_ok=True)
         try:
+            _verify_runtime_command(
+                [sys.executable, str(PROGRAMS_DIR / "sdc_syntax_check.py")])
             check = subprocess.run(
                 [sys.executable, str(PROGRAMS_DIR / "sdc_syntax_check.py"),
                  str(project), "--json", str(sdc_report)],
@@ -63912,6 +63965,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     if (canon_sdc.is_file() or runner_sdc.is_file()) and not sdc_check_json.is_file():
         sdc_check_json.parent.mkdir(parents=True, exist_ok=True)
         try:
+            _verify_runtime_command(
+                [sys.executable, str(PROGRAMS_DIR / "sdc_syntax_check.py")])
             r = subprocess.run(
                 [sys.executable,
                  str(PROGRAMS_DIR / "sdc_syntax_check.py"),
@@ -78173,6 +78228,7 @@ def _run_derived_artefact_generator(project: Path, effective_top: Optional[str],
     if gen == "foundry_handoff_pack_gen.py" and effective_top:
         cmd += ["--top", str(effective_top)]
     try:
+        _verify_runtime_command(cmd)
         cp = subprocess.run(
             cmd,
             timeout=120, check=False,
@@ -78811,6 +78867,7 @@ def _phase3_enclosing_supervised(project: Path, isolated: Path,
         # The enclosing runner consumes the same live request as this process.
         # The watchdog's default Popen closes inherited FDs, so keep the
         # canonical issuer capability on this existing supervised child edge.
+        _verify_runtime_command(command)
         return subprocess.Popen(command, start_new_session=True,
                                 pass_fds=capability_fds, **kwargs)
 
@@ -80206,6 +80263,11 @@ def main() -> int:
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
+    try:
+        _activate_runtime_program_tree(project)
+    except Exception as exc:
+        print(f"REFUSED: runtime program tree: {exc}", file=sys.stderr)
+        return 2
 
     # ORGANIC #588 — single-driver lock honored by the standalone phase3
     # runner: this is the LONGEST-running, most-re-dispatched step, so it
@@ -81383,6 +81445,8 @@ def main() -> int:
             # 55s: `ci_harness_timeout_ceiling_check` caps an inner bound at 60
             # because the harness dies at 180 and a longer bound kills the
             # SESSION rather than the call.
+            _verify_runtime_command(
+                [sys.executable, str(prog_path), str(project)])
             r = subprocess.run(
                 [sys.executable, str(prog_path), str(project),
                  "--json", str(out_json)],

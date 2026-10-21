@@ -81,6 +81,23 @@ import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
+_RUNTIME_PROGRAM_TREE = None
+
+
+def _verify_runtime_command(command) -> None:
+    if _RUNTIME_PROGRAM_TREE is not None:
+        _RUNTIME_PROGRAM_TREE.verify_command(command)
+
+
+def _activate_runtime_program_tree(project: Path) -> None:
+    global PROGRAMS_DIR, _RUNTIME_PROGRAM_TREE
+    import runtime_program_tree as _rpt
+    tree = _rpt.activate(project, PROGRAMS_DIR, Path(__file__))
+    _RUNTIME_PROGRAM_TREE = tree
+    PROGRAMS_DIR = tree.programs_dir
+    globals()["__file__"] = str(PROGRAMS_DIR / "vibe_ic_one_shot_runner.py")
+
+
 def _configure_execution_policy(args, **_rejected_mint_arguments):
     """Consume a launcher-issued policy; imported calls cannot issue it."""
     import execution_policy
@@ -359,6 +376,7 @@ def _launch_dashboard(project: Path, host: str, port: int,
                "--port", str(port), "--host", host]
         if full:
             cmd.append("--full")
+        _verify_runtime_command(cmd)
         proc = subprocess.Popen(
             cmd, stdout=fh, stderr=fh, stdin=subprocess.DEVNULL,
             start_new_session=True,
@@ -402,8 +420,10 @@ def _cli_snapshot(project: Path) -> str:
     if not dash.is_file():
         return ""
     try:
+        command = [sys.executable, str(dash), str(project), "--once", "--no-color"]
+        _verify_runtime_command(command)
         cp = subprocess.run(
-            [sys.executable, str(dash), str(project), "--once", "--no-color"],
+            command,
             capture_output=True, text=True, timeout=45)
         return cp.stdout or ""
     except Exception:
@@ -1144,7 +1164,9 @@ def _run_phase(label: str, runner: Path, args: List[str],
     args = _execution.child_arguments(
         args, supports_execution_policy=supports_execution_policy)
     try:
-        cp = subprocess.run([sys.executable, str(runner), *args], env=env,
+        command = [sys.executable, str(runner), *args]
+        _verify_runtime_command(command)
+        cp = subprocess.run(command, env=env,
                             pass_fds=(_execution.child_pass_fds()
                                        if supports_execution_policy else ()))
         return cp.returncode
@@ -2496,6 +2518,12 @@ def _main() -> int:
     project = args.project.resolve()
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
+        return 2
+
+    try:
+        _activate_runtime_program_tree(project)
+    except Exception as exc:
+        print(f"REFUSED: runtime program tree: {exc}", file=sys.stderr)
         return 2
 
     # ---------------- Single-driver project lock (ORGANIC #498) ----------

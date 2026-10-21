@@ -263,6 +263,36 @@ def _find_devices_root() -> Path:
 
 PROTOCOL_TB = _find_protocol_tb()
 DEVICES_ROOT = _find_devices_root()
+_RUNTIME_PROGRAM_TREE = None
+
+
+def _verify_runtime_command(command) -> None:
+    if _RUNTIME_PROGRAM_TREE is not None:
+        _RUNTIME_PROGRAM_TREE.verify_command(command)
+
+
+def _activate_runtime_program_tree(project: Path) -> None:
+    """Pin every later Phase-2 child to this invocation's retained bytes."""
+    global PROGRAMS_DIR, PROTOCOL_TB, DEVICES_ROOT, SKILLS_DIR
+    global _RUNTIME_PROGRAM_TREE
+    import runtime_program_tree as _rpt
+    original = PROGRAMS_DIR
+    tree = _rpt.activate(project, original, Path(__file__))
+    _RUNTIME_PROGRAM_TREE = tree
+    PROGRAMS_DIR = tree.programs_dir
+    globals()["__file__"] = str(PROGRAMS_DIR / "design_one_shot_runner.py")
+    PROTOCOL_TB = _find_protocol_tb()
+    DEVICES_ROOT = _find_devices_root()
+    SKILLS_DIR = PROGRAMS_DIR.parent / "skills"
+    if not getattr(_pr.run, "_vibeic_runtime_bound", False):
+        original_progress_run = _pr.run
+
+        def retained_progress_run(command, *args, **kwargs):
+            _verify_runtime_command(command)
+            return original_progress_run(command, *args, **kwargs)
+
+        retained_progress_run._vibeic_runtime_bound = True
+        _pr.run = retained_progress_run
 
 
 
@@ -765,6 +795,7 @@ def _run(cmd: List[str], cwd: Optional[Path] = None,
     backstop (`_docker_exec_argv_with_deadline`), pinned to the hard ceiling:
     killing the host `docker exec` CLIENT does not reach the tool inside the
     container, so without it a killed job leaves an ORPHAN."""
+    _verify_runtime_command(cmd)
     import _watchdog as _wd
     # The container-side backstop stays — it is what stops an ORPHAN (measured
     # 2026-07-22: yosys+abc still running 18 min after a 300 s cap fired, free
@@ -19473,14 +19504,16 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
         # threshold is universal (any non-trivial chip RTL produces
         # ≥10 cells after `synth -flatten`).
         try:
-            snc = subprocess.run(
-                [sys.executable,
-                 str(PROGRAMS_DIR / "synth_netlist_check.py"),
-                 "--netlist", str(_audited_v),
+            _snc_cmd = [sys.executable,
+                        str(PROGRAMS_DIR / "synth_netlist_check.py"),
+                        "--netlist", str(_audited_v),
                  # #426/#427: hand the RTL over so the checker can refuse a
                  # stale netlist and let the structure-aware floor vouch for
                  # legitimately tiny designs (register-bit cover).
-                 "--rtl", *_rtl_file_strs],
+                        "--rtl", *_rtl_file_strs]
+            _verify_runtime_command(_snc_cmd)
+            snc = subprocess.run(
+                _snc_cmd,
                 capture_output=True, text=True, timeout=60,
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
@@ -20135,6 +20168,7 @@ def step_sdc_validation_post_prelayout(project: Path, top: str,
                                     str(project), '--l8', str(l8), '--json', str(folder / 'validator.json')]),
         )
         for name, argv in commands:
+            _verify_runtime_command(argv)
             cp = subprocess.run(argv, capture_output=True, text=True, timeout=30)
             target = Path(argv[-1])
             records.append({'program': name, 'argv': argv, 'rc': cp.returncode,
@@ -22748,6 +22782,7 @@ def _step_dft_insertion(project: Path, top_name: str, container: str,
             # still advancing, then let ATPG overlap the orphaned writer.
             # Wait for the producer normally.  It cannot return until its
             # inner supervisor has completed or reaped the engine.
+            _verify_runtime_command(_scan_cmd)
             _sc = subprocess.run(_scan_cmd, capture_output=True, text=True)
             _scan_rc = _sc.returncode
             _scan_tail = (_sc.stderr or _sc.stdout or "")[-300:]
@@ -23480,6 +23515,7 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
         # intentionally not given a second, competing clock.
         _lec_started = time.time()
         try:
+            _verify_runtime_command(cmd)
             r = subprocess.run(cmd, capture_output=True, text=True)
             lec_json = reports_dir / "lec.json"
             if lec_json.is_file():
@@ -24098,8 +24134,10 @@ def declaration_before_step4(project: Path) -> Dict[str, Any]:
         rec["reason"] = "the contract-driven producer is not shipped"
         return rec
     try:
-        cp = subprocess.run([sys.executable, str(prog), str(project),
-                             *_declaration_top_args(project)],
+        command = [sys.executable, str(prog), str(project),
+                   *_declaration_top_args(project)]
+        _verify_runtime_command(command)
+        cp = subprocess.run(command,
                             capture_output=True, text=True, timeout=120)
     except Exception as exc:  # noqa: BLE001 — named in the record
         rec["reason"] = f"could not run: {type(exc).__name__}: {exc}"
@@ -24247,8 +24285,10 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
         if not prog.is_file():
             return None
         try:
-            return subprocess.run([sys.executable, str(prog), str(project)]
-                                  + list(extra or []),
+            command = ([sys.executable, str(prog), str(project)]
+                       + list(extra or []))
+            _verify_runtime_command(command)
+            return subprocess.run(command,
                                   capture_output=True, text=True, timeout=120)
         except Exception:
             return None
@@ -26220,9 +26260,12 @@ def _audit_after_declared_producers(project: Path, skip_analog: bool) -> StepRes
     run's actual documents and report the gap itself.
     """
     try:
+        _command = [sys.executable,
+                    str(PROGRAMS_DIR / "flow_declared_producer_run.py"),
+                    str(project)]
+        _verify_runtime_command(_command)
         _dp = subprocess.run(
-            [sys.executable,
-             str(PROGRAMS_DIR / "flow_declared_producer_run.py"), str(project)],
+            _command,
             timeout=_pl.audit_timeout_s(project) + 120,
             check=False, capture_output=True, text=True)
         for _ln in (_dp.stdout or "").strip().splitlines():
@@ -26305,9 +26348,12 @@ def _run_refresh_only(project: Path, args) -> int:
     # same reason, as the finalize tail's pre-audit emission.
     _pl.emit_final_summary(project, PROGRAMS_DIR)
     try:
+        _command = [sys.executable,
+                    str(PROGRAMS_DIR / "flow_declared_producer_run.py"),
+                    str(project)]
+        _verify_runtime_command(_command)
         _dp = subprocess.run(
-            [sys.executable,
-             str(PROGRAMS_DIR / "flow_declared_producer_run.py"), str(project)],
+            _command,
             timeout=_pl.audit_timeout_s(project) + 120,
             check=False, capture_output=True, text=True)
         for _ln in (_dp.stdout or "").strip().splitlines():
@@ -26463,6 +26509,11 @@ def main() -> int:
     project = args.project.resolve()
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
+        return 2
+    try:
+        _activate_runtime_program_tree(project)
+    except Exception as exc:
+        print(f"REFUSED: runtime program tree: {exc}", file=sys.stderr)
         return 2
     _bootstrap_execution_policy(
         _execution, project, top=args.top_name, container=args.container,
