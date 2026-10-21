@@ -710,6 +710,50 @@ def test_first_fullstack_run_refuses_duplicate_canonical_tb_variants_before_disp
     assert calls == []
 
 
+def test_fullstack_denominator_runs_real_case_and_reports_103_process_milestones(
+        tmp_path):
+    project = _binding_project(tmp_path)
+    fs = _fsf()
+    rows = [{
+        'name': 'tb', 'kind': 'functional_vector',
+        'stimulus': 'drive a=0 then a=1', 'expected': 'compare y=a',
+    }]
+    rows.extend({
+        'name': f'process_item_{index}',
+        'kind': 'verification_checklist',
+        'status': 'Done',
+        'stimulus': f'DV checklist item ITEM_{index} — Done',
+        'expected': 'DV checklist item satisfied (Done)',
+    } for index in range(103))
+    l10 = project / 'phase1/generated_docs/L10_TEST_CASES.json'
+    l10.write_text(json.dumps({'test_cases': rows}))
+    calls = []
+
+    def transport(argv, wd, container, simulator, timeout):
+        calls.append(argv)
+        return ((0, '[TB tb] PASS\n') if argv[0] == 'vvp' else (0, ''))
+
+    result = fs.generate(
+        project, route='DIE', dispatch=transport,
+        model_resolver=lambda *args: ({'/neutral/unused.v':
+                                       'module unused; endmodule\n'},
+                                      'neutral source model'))
+
+    assert result['verdict'] == 'PASS', result
+    assert result['counts'] == {
+        'passed': 1, 'failed': 0, 'errored': 0, 'no_oracle': 0,
+        'excluded': 103, 'short_population': 0, 'rows': 104, 'executed': 1,
+    }
+    process = [row for row in result['cases']
+               if row.get('step5_disposition', {}).get('disposition')
+               == fs.DISP_PROCESS_MILESTONE]
+    assert len(process) == 103
+    assert all(row['state'] == 'excluded'
+               and row['step5_disposition']['source_status'] == 'done'
+               and not row['step5_disposition']['blocking'] for row in process)
+    assert len(calls) == 2
+
+
 def _binding_native(project):
     launched = []
     real_popen = subprocess.Popen
