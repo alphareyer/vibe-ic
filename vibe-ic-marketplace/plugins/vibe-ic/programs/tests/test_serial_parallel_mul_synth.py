@@ -409,10 +409,35 @@ def test_serial_native_commit_publishes_current_provenance(tmp_path):
         env={**__import__('os').environ, "PYTHONPATH": str(PROGRAMS)},
         capture_output=True, text=True, timeout=120)
     assert second.returncode == 0, second.stderr
-    # This class has rtl_gen=null; the serial branch preserves an existing
-    # tree, then the existing class handoff reports PASS_WITH_WAIVERS.
-    assert second.stdout.strip().splitlines()[-2:] == ["PASS_WITH_WAIVERS", provenance.GENERATED]
+    # A retained byte-identical producer output refreshes its declaration
+    # contract through the same deterministic producer without replacing RTL.
+    assert second.stdout.strip().splitlines()[-2:] == ["PASS", provenance.GENERATED]
     assert source.read_bytes() == original
+
+
+def test_contract_refresh_requires_byte_identical_retained_rtl(tmp_path):
+    proj = _mk_project(tmp_path, ports=_SPM_PORTS, top="neutral_serial",
+                       l2_text="serial-parallel multiplier: p = (x * y) mod 2^N")
+    assert spm.main([str(proj), "--emit"]) == 0
+    rtl = proj / "phase2/stage1/rtl/neutral_serial.v"
+    original = rtl.read_text()
+    declaration = proj / "plugin_output/declaration.json"
+    declaration.unlink()
+
+    assert spm.main([str(proj), "--refresh-contract"]) == 0
+    assert rtl.read_text() == original
+    assert json.loads(declaration.read_text())["transaction_rearm"] == "clocked_reset"
+
+    rtl.write_text(original + "\n// authored change\n")
+    declaration.unlink()
+    assert spm.main([str(proj), "--refresh-contract"]) == 2
+    assert not declaration.exists()
+
+    # Text-mode newline translation must not turn a byte-different retained
+    # source into a false identity proof.
+    rtl.write_bytes(original.replace("\n", "\r\n").encode())
+    assert spm.main([str(proj), "--refresh-contract"]) == 2
+    assert not declaration.exists()
 
 
 _DECLARATION_CONTRACT = """# L7

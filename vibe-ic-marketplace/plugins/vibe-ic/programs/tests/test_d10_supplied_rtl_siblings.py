@@ -400,26 +400,24 @@ def test_d_a_stale_generated_tree_is_reclaimed_for_the_supplied_design(
     assert _sha(p / "phase2/stage1/rtl/chip_top.v") == _sha(own)
 
 
-def test_d_an_unprovable_tree_is_kept_and_both_steps_say_so(tmp_path, _session):
-    """The serial-parallel generator writes no provenance ledger, so its tree
-    is `unknown` and is NEVER moved; rtl_gen and consume both say the supplied
-    RTL was not staged."""
+def test_d_a_serial_generated_tree_is_reclaimed_for_supplied_rtl(tmp_path, _session):
+    """The serial producer's GENERATED ledger authorizes the same safe reclaim
+    path as registry generators; consume then stages the supplied design."""
     p = D6._spm_project(tmp_path)
     R.step_rtl_gen(p, ARITH)
     assert _rtl_files(p) == ["spm.v"]
+    generated = _sha(p / "phase2/stage1/rtl/spm.v")
     R._RTL_SESSION_OWNED = False
     D6._supply(p, "input/rtl", "spm.v", D6.SUPPLIED_SPM)
+    supplied = _sha(p / "input/rtl/spm.v")
     res = R.step_rtl_gen(p, ARITH)
-    assert "reclaimed_generated_rtl" not in res.extras
-    assert res.extras["supplied_rtl_blocked_by"] == {
-        "rtl_files": ["spm.v"], "provenance": "unknown",
-        "supplied_not_in_rtl": ["input/rtl/spm.v"]}
-    assert "will NOT be staged" in res.detail
+    assert res.extras["reclaimed_generated_rtl"] == {
+        "backup": "rtl.pre_gen_backup", "published": True}
+    assert _rtl_files(p) == []
+    assert _sha(p / "phase2/stage1/rtl.pre_gen_backup/spm.v") == generated
     out = C.consume_reused_ip_rtl(p)
-    assert out["supplied_rtl_not_staged"] == ["input/rtl/spm.v"]
-
-    assert "already holds 1 RTL file(s)" in out["reason"]
-    assert "were NOT staged" in out["reason"]
+    assert out["staged"] == ["spm.v"]
+    assert _sha(p / "phase2/stage1/rtl/spm.v") == supplied
 
 
 

@@ -2906,10 +2906,11 @@ def _try_serial_parallel_mul_rtl(project: Path, ic_class: str,
     CLOSED-FORM and its functional golden is ALREADY self-calibrated by
     ``arith_oracle_tb_gen``. A function the flow can already CHECK is Bucket A:
     emit it with NO LLM. Returns a PASS StepResult when the solver emits; None
-    (fall through to the class/AI path) when it DEFERs, when the class is not
-    arithmetic, or when RTL already exists (author guard) — so every
-    non-matching design keeps today's behaviour byte-for-byte. None also when
-    the design supplies its own build RTL (`_design_supplied_build_rtl`).
+    (fall through to the class/AI path) when it DEFERs or when the class is not
+    arithmetic. Retained RTL is accepted only when it is byte-identical to the
+    current deterministic producer output; otherwise it DEFERs without writing.
+    None also when the design supplies its own build RTL
+    (`_design_supplied_build_rtl`).
     """
     _phase1_project_checkpoint(project)
     arith = {"digital_arithmetic_primitive", "digital_datapath",
@@ -2920,15 +2921,15 @@ def _try_serial_parallel_mul_rtl(project: Path, ic_class: str,
     if not solver.is_file():
         return None
     rtl_dir = _pl.rtl_dir(project)
-    if rtl_dir.is_dir() and any(
+    retained_rtl = rtl_dir.is_dir() and any(
             path.is_file() and path.suffix.lower() in _rtl_prov.RTL_SUFFIXES
-            for path in rtl_dir.rglob("*")):
-        return None  # author/generator guard — never overwrite existing RTL
+            for path in rtl_dir.rglob("*"))
     if _defer_to_supplied("serial_parallel_mul_synth", project):
         return None  # D6 — consume stages the design's own RTL instead
     try:
         _phase1_project_checkpoint(project)
-        r = _pr.run([sys.executable, str(solver), str(project), "--emit"],
+        action = "--refresh-contract" if retained_rtl else "--emit"
+        r = _pr.run([sys.executable, str(solver), str(project), action],
                            capture_output=True, text=True)
         _phase1_project_checkpoint(project)
     except Exception as e:
@@ -2940,7 +2941,7 @@ def _try_serial_parallel_mul_rtl(project: Path, ic_class: str,
         out = json.loads(r.stdout.strip().splitlines()[-1])
     except Exception:
         return None
-    written = out.get("written")
+    written = out.get("written") or out.get("validated_rtl")
     if not written:
         return None
     declared = out.get("declaration_written")
@@ -2950,12 +2951,14 @@ def _try_serial_parallel_mul_rtl(project: Path, ic_class: str,
     result = StepResult(
         "rtl_gen", "PASS", time.time() - t0,
         f"deterministic serial-parallel multiplier RTL (program-first; no LLM) "
-        f"-> {Path(written).relative_to(project)}"
+        f"{'validated at' if retained_rtl else '->'} "
+        f"{Path(written).relative_to(project)}"
         + (f"; L7 declaration -> {Path(declared).relative_to(project)}"
            if declared else ""),
         output_files=[written] + ([declared] if declared else []),
         extras={"deterministic_generator": "serial_parallel_mul_synth",
                 "program_first": True, "topology": "serial_parallel",
+                "contract_refreshed_from_retained_rtl": retained_rtl,
                 "spec": out.get("spec"),
                 "declaration_before_simulation": declaration,
                 "rtl_provenance": _rtl_prov.GENERATED})

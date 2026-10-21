@@ -489,8 +489,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("project")
     ap.add_argument("--ic-class", default="digital_arithmetic_primitive")
-    ap.add_argument("--emit", action="store_true",
-                    help="write phase2/stage1/rtl/<top>.v when the shape matches")
+    action = ap.add_mutually_exclusive_group()
+    action.add_argument("--emit", action="store_true",
+                        help="write phase2/stage1/rtl/<top>.v when the shape matches")
+    action.add_argument(
+        "--refresh-contract", action="store_true",
+        help=("refresh plugin_output/declaration.json only when the retained "
+              "RTL is byte-identical to this producer's current output"))
     a = ap.parse_args(argv)
     proj = Path(a.project).resolve()
     spec, reason = extract_serial_parallel_mul_spec(proj, a.ic_class)
@@ -500,7 +505,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     rtl = emit_rtl(spec)
     out = {"verdict": "EMIT", "reason": reason, "top": spec["top"],
            "spec": spec}
-    if a.emit:
+    if a.emit or a.refresh_contract:
+        rtl_dir = proj / "phase2" / "stage1" / "rtl"
+        rtl_path = rtl_dir / f"{spec['top']}.v"
+        if a.refresh_contract:
+            try:
+                retained = rtl_path.read_bytes()
+            except OSError as exc:
+                print(json.dumps({"verdict": "DEFER", "reason":
+                                  f"retained RTL is unavailable: {exc}"}))
+                return 2
+            if retained != rtl.encode("utf-8"):
+                print(json.dumps({"verdict": "DEFER", "reason":
+                                  "retained RTL differs from current deterministic output"}))
+                return 2
         decl_path = proj / "plugin_output" / "declaration.json"
         declaration = plugin_declaration(spec)
         populations = _declared_scenario_populations(proj, spec)
@@ -549,11 +567,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             declaration = dict(prior, **declaration)
         elif populations:
             declaration.update(populations)
-        rtl_dir = proj / "phase2" / "stage1" / "rtl"
-        rtl_dir.mkdir(parents=True, exist_ok=True)
-        rtl_path = rtl_dir / f"{spec['top']}.v"
-        rtl_path.write_text(rtl)
-        out["written"] = str(rtl_path)
+        if a.emit:
+            rtl_dir.mkdir(parents=True, exist_ok=True)
+            rtl_path.write_text(rtl)
+            out["written"] = str(rtl_path)
+        else:
+            out["validated_rtl"] = str(rtl_path)
         # L7 ## 7.0 requires this declaration BEFORE RTL design starts; written
         # alongside the RTL here because this solver is a single atomic step,
         # not two — a run that crashed between them would leave the design in
