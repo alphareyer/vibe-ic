@@ -473,21 +473,6 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
                         {name: 'NOT_MEASURED' for name in _gate_names},
                         artifacts,
                         detail='Step-6 board capability absent; typed exclusion remains unmeasured')
-            if _row == '7':
-                # Step 7's producer is the canonical ASIC SDC/PVT emitter.  Its
-                # mandatory consumers (stage compliance, syntax, PVT and
-                # integration checks) are not generic Step-8 validator rows;
-                # the normal Phase-2 runner executes this producer directly
-                # when a source-bound frontend arm is only NOT_MEASURED.
-                # Keep the Controller evidence explicitly unmeasured rather
-                # than reading Step-8 reports and accidentally qualifying a
-                # different step.
-                return Evidence(
-                    facts, 'NOT_MEASURED',
-                    {name: 'NOT_MEASURED' for name in _gate_names},
-                    artifacts,
-                    detail='Step-7 producer emitted source-bound artifacts; '
-                           'canonical consumer qualification remains unmeasured')
             gate_result=flow_compliance_check.check_step(root, contract, {}, strict_step_binding=True)
             if _row != '8':
                 # Step 8 owns the SDC syntax/validator reports below.  They
@@ -498,8 +483,13 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
                 names = _gate_names
                 gates = {name: ('PASS' if gate == 'PASS' else gate)
                          for name in names}
+                complete = all(
+                    any(fnmatch.fnmatch(rel, alternative.strip())
+                        for rel in artifacts
+                        for alternative in str(spec).split(' OR '))
+                    for spec in required)
                 verdict = ('FAIL' if gate == 'FAIL' else
-                           'PASS' if gate == 'PASS' and artifacts else
+                           'PASS' if gate == 'PASS' and complete else
                            'NOT_MEASURED')
                 return Evidence(facts, verdict, gates, artifacts,
                                 metrics={'source_boundary': 1.0},
@@ -546,6 +536,7 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
             closure += tuple(source_path.with_name(name) for name in (
                 'execution_step4.py', 'execution_step4_icarus.py',
                 'execution_step4_verilator.py'))
+        if row in ('4', '7'):
             closure += tuple(source_path.with_name(name + '.py') for name in portfolio_gates)
         if row == '8':
             closure += tuple(source_path.with_name(name) for name in ('sdc_syntax_check.py','sdc_validator_check.py','sdc_exception_correlation_check.py','derived_clock_sdc_required_check.py'))
@@ -568,7 +559,7 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
         worker_budget = {'timeout_s': 120} if row in ('D1', '0.5ic') else {}
         components = [Component('frontend_worker', ('python3',worker,'--step',row,'--inputs','{inputs}','--outputs','{outputs}',
                        *(('--manifest','{inputs}/issued_manifest.json') if row == '8' else ())), **worker_budget)]
-        if row in ('0.5ic', '8'):
+        if row in ('0.5ic', '7', '8'):
             def commands(node):
                 if isinstance(node, dict):
                     for key, value in node.items():

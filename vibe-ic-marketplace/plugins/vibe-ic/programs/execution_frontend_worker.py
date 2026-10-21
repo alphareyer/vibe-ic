@@ -190,7 +190,11 @@ def _write_step_binding(root, step, paths):
     contract = _flow_contract(step)
     if not contract:
         raise ValueError(f'{step}: canonical flow row is unavailable')
-    folder = 'phase1/stage_phase1/0.5ic_submission_template_ingest'
+    folders = {
+        '0.5ic': 'phase1/stage_phase1/0.5ic_submission_template_ingest',
+        '7': 'phase2/stage2/7_asic_sdc',
+    }
+    folder = folders.get(str(step), f'frontend/{step}')
     step_root = root / 'steps' / folder
     step_root.mkdir(parents=True, exist_ok=True)
     produced = []
@@ -203,7 +207,7 @@ def _write_step_binding(root, step, paths):
            'n_produced': len(produced), 'produced': produced, 'findings': []}
     (step_root / 'written.json').write_text(json.dumps(row, sort_keys=True) + '\n')
     (root / 'steps' / 'index.json').write_text(json.dumps(
-        {'steps': [{'id': str(step), 'name': 'submission template and tapeout declaration',
+        {'steps': [{'id': str(step), 'name': contract.get('name', ''),
                     'folder': folder}]}, sort_keys=True) + '\n')
 
 
@@ -485,19 +489,22 @@ def produce_7(project, output, top=None, pdk=None, container=None, **k):
     # frontend row could recurse into its own Step-7 provider.
     result = d.step_asic_sdc(output, top, container, pdk_config=pdk_obj,
                              _use_controller=False)
-    index = output / 'steps' / 'index.json'
-    index.parent.mkdir(parents=True, exist_ok=True)
-    index.write_text(json.dumps({'steps': [{'id': '7',
-        'folder': 'phase2/stage2/7_asic_sdc'}]}) + '\n')
-    (output / 'steps/phase2/stage2/7_asic_sdc').mkdir(parents=True, exist_ok=True)
-    return _write('7', output, 'emit_step7_asic_sdc+stamp_pvt_corner_coverage',
-                  reason=result.detail, verdict=result.status,
-                  producer_result={"name": result.name,
-                                   "status": result.status,
-                                   "detail": result.detail,
-                                   "output_files": result.output_files},
-                  parameters={'top': top, 'container': container,
-                              'pdk': pdk})
+    canonical = _write(
+        '7', output, 'emit_step7_asic_sdc+stamp_pvt_corner_coverage',
+        reason=result.detail, verdict=result.status,
+        producer_result={"name": result.name,
+                         "status": result.status,
+                         "detail": result.detail,
+                         "output_files": result.output_files},
+        parameters={'top': top, 'container': container, 'pdk': pdk})
+    contract = _flow_contract('7')
+    paths = _output_paths(output, contract.get('required_outputs') or ())
+    expected = {str(spec) for spec in contract.get('required_outputs') or ()}
+    if set(paths.values()) != expected:
+        missing = sorted(expected - set(paths.values()))
+        raise RuntimeError(f'7: canonical producer outputs incomplete: {missing}')
+    _write_step_binding(output, '7', paths)
+    return canonical
 def produce_8(project,output,**k):
     """Run the complete Step-8 contract against the staged project."""
     if not _STEP8_DISPATCH.get():

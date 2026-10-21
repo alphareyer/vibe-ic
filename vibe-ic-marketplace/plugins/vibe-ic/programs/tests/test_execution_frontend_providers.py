@@ -662,6 +662,120 @@ def test_rows_2_to_5_spy_order_and_argv(tmp_path, monkeypatch):
     calls.clear(); w.produce_5(tmp_path,tmp_path/'o5',top='chip_top',container='img')
     assert [x[0] for x in calls] == ['formal_harness_gen.generate','formal_property_run.run','step_full_stack_functional_tb','write']
 
+
+def test_step7_worker_publishes_a_step_bound_complete_output_set(tmp_path, monkeypatch):
+    """The Ultra arm exposes the canonical Step-7 bytes to its own consumers."""
+    from types import SimpleNamespace
+    import execution_frontend_worker as worker
+    import design_one_shot_runner as design
+
+    source = tmp_path / 'source'
+    issued = source / 'phase1/generated_docs/L8_TIMING_WAVEFORM.json'
+    issued.parent.mkdir(parents=True)
+    issued.write_text('{"clocks": {}}\n')
+    output = tmp_path / 'output'
+    monkeypatch.setattr(worker, '_verify_manifest', lambda root, step: {
+        'step_id': step,
+        'files': {str(issued.relative_to(source)): __import__('hashlib').sha256(
+            issued.read_bytes()).hexdigest()},
+        'parameters': {},
+    })
+    monkeypatch.setattr(worker, '_step7_pdk', lambda *args: object())
+
+    def emit(project, top, container, pdk_config=None, _use_controller=None):
+        constraints = project / 'phase2/stage2/constraints'
+        constraints.mkdir(parents=True)
+        sdc = constraints / f'{top}.sdc'
+        matrix = constraints / 'pvt_matrix.json'
+        stance = project / 'reports/phase3/single_corner_stance.json'
+        stance.parent.mkdir(parents=True)
+        sdc.write_text('create_clock -period 10 [get_ports clk]\n')
+        matrix.write_text('{"corners": [{"label": "TT"}]}\n')
+        stance.write_text('{"verdict": "PASS"}\n')
+        return SimpleNamespace(name='asic_sdc', status='PASS', detail='emitted',
+                               output_files=[str(sdc), str(matrix), str(stance)])
+
+    monkeypatch.setattr(design, 'step_asic_sdc', emit)
+    canonical = worker.produce_7(
+        source, output, top='neutral', pdk={'name': 'neutral'}, container='eda')
+    assert canonical == output / 'canonical.json'
+    index = json.loads((output / 'steps/index.json').read_text())
+    assert index['steps'] == [{
+        'id': '7', 'name': 'Constraint setup (SDC + PVT matrix)',
+        'folder': 'phase2/stage2/7_asic_sdc'}]
+    written = json.loads((output /
+        'steps/phase2/stage2/7_asic_sdc/written.json').read_text())
+    assert written['n_required_outputs'] == 3
+    assert {row['spec'] for row in written['produced']} == {
+        'phase2/stage2/constraints/*.sdc',
+        'phase2/stage2/constraints/pvt_matrix.json',
+        'reports/phase3/single_corner_stance.json'}
+
+
+def test_step7_worker_refuses_an_incomplete_canonical_output_set(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import execution_frontend_worker as worker
+    import design_one_shot_runner as design
+
+    source = tmp_path / 'source'
+    source.mkdir()
+    output = tmp_path / 'output'
+    monkeypatch.setattr(worker, '_verify_manifest', lambda root, step: {
+        'step_id': step, 'files': {}, 'parameters': {}})
+    monkeypatch.setattr(worker, '_step7_pdk', lambda *args: object())
+
+    def incomplete(project, top, container, pdk_config=None, _use_controller=None):
+        constraints = project / 'phase2/stage2/constraints'
+        constraints.mkdir(parents=True)
+        (constraints / f'{top}.sdc').write_text('create_clock -period 10\n')
+        return SimpleNamespace(name='asic_sdc', status='PASS', detail='partial',
+                               output_files=[])
+
+    monkeypatch.setattr(design, 'step_asic_sdc', incomplete)
+    with __import__('pytest').raises(RuntimeError, match='canonical producer outputs incomplete'):
+        worker.produce_7(
+            source, output, top='neutral', pdk={'name': 'neutral'}, container='eda')
+
+
+def test_step7_provider_runs_declared_consumers_and_requires_every_output(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import execution_frontend_worker as worker
+    import flow_compliance_check
+
+    registry = em.Registry()
+    p.register_factories(registry, step_ids=('7',))
+    adapter, = registry.adapters('7')
+    assert [component.name for component in adapter.components] == [
+        'frontend_worker', 'stage1_compliance', 'stage_on_pass_review',
+        'sdc_syntax_check', 'pvt_matrix_check', 'l21_to_upf_emit',
+        'macro_non_seq_arc_contract_check']
+
+    constraints = tmp_path / 'phase2/stage2/constraints'
+    constraints.mkdir(parents=True)
+    (constraints / 'neutral.sdc').write_text(
+        'create_clock -period 10 [get_ports clk]\n')
+    matrix = constraints / 'pvt_matrix.json'
+    matrix.write_text('{"corners": [{"label": "TT"}]}\n')
+    stance = tmp_path / 'reports/phase3/single_corner_stance.json'
+    stance.parent.mkdir(parents=True)
+    stance.write_text('{"verdict": "PASS"}\n')
+    contract = worker._flow_contract('7')
+    paths = worker._output_paths(tmp_path, contract['required_outputs'])
+    worker._write_step_binding(tmp_path, '7', paths)
+    monkeypatch.setattr(
+        flow_compliance_check, 'check_step',
+        lambda *args, **kwargs: SimpleNamespace(status='PASS'))
+    facts = {'step_id': '7', 'source': 'test'}
+    accepted = adapter.validate(tmp_path, facts)
+    assert accepted.verdict == 'PASS'
+    assert set(accepted.gates) == set(component.name for component in adapter.components[1:])
+    assert set(accepted.gates.values()) == {'PASS'}
+
+    matrix.unlink()
+    refused = adapter.validate(tmp_path, facts)
+    assert refused.verdict == 'NOT_MEASURED'
+
 def test_step8_nonzero_and_manifest_mutation_refuse(tmp_path, monkeypatch):
     import hashlib
     project=tmp_path/'p'; sdc=project/'phase2/stage2/constraints/top.sdc'; sdc.parent.mkdir(parents=True)
