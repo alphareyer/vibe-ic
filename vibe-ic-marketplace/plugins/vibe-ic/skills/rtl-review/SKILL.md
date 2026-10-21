@@ -60,10 +60,13 @@ not a second full synthesis run or Ultra candidate comparison.
 
 Exit codes: 0 = PASS or WARN; 1 = FAIL (with `--strict`); 2 = bad input.
 
-The program runs three sub-programs:
+The program runs six sub-programs when `--top` selects the configured design:
 - `rtl_hygiene_lint.py` — § 1 synthesis hazards + § 3 style + § 5 width
 - `reset_discipline_check.py` — § 2 reset/clock hygiene
 - `rtl_precheck_gate.py` — § 4 correctness smells + § 6 port fidelity
+- `interface_encoding_audit.py` — interface encoding consistency receipt
+- `crc_bitorder_check.py` — data layout / CRC loading receipt
+- `phy_counter_audit.py` — counter implementation receipt
 
 It aggregates findings into 6 categories, computes the score (rubric in
 `compute_score()`), and emits the same Markdown template the skill
@@ -177,6 +180,7 @@ prose + the gate's structural flag.
 ```bash
 python3 plugins/vibe-ic/_shared/skill_compliance_check.py \
     --requirements plugins/vibe-ic/skills/rtl-review/compliance.yaml \
+    --evidence-dir <project-root>/reports/phase2/lint/rtl_review \
     --rtl-source-root <complete-rtl-source-directory> \
     <project-root>/reports/phase2/lint/rtl_review.md
 ```

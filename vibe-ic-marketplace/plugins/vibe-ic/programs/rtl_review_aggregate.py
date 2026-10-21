@@ -629,6 +629,11 @@ class ReviewReport:
     #: Populated from exactly the records the score no longer counts, so the
     #: number can never be quoted without its coverage.
     auditors_not_run: List[Dict[str, str]] = field(default_factory=list)
+    #: Receipts required by rtl-review/compliance.yaml.  These are separate
+    #: from the six-category score, but their state is never hidden: a measured
+    #: FAIL contributes an ERROR finding and NOT_MEASURED is carried in
+    #: auditors_not_run.
+    compliance_audits: List[Dict[str, Any]] = field(default_factory=list)
 
     def coverage_note(self) -> str:
         """The clause that must travel with the score, or "" if fully covered."""
@@ -658,6 +663,7 @@ class ReviewReport:
             "total_warns": self.total_warns,
             "total_infos": self.total_infos,
             "auditors_not_run": [dict(a) for a in self.auditors_not_run],
+            "compliance_audits": [dict(a) for a in self.compliance_audits],
             "coverage_note": self.coverage_note(),
             "emitted_by": _pmd.emitted_by("rtl_review_aggregate"),
         }
@@ -668,6 +674,7 @@ def aggregate(
     rtl_dir: str = "",
     files_reviewed: Optional[List[str]] = None,
     is_synthesizable: bool = True,
+    compliance_audits: Optional[List[Dict[str, Any]]] = None,
 ) -> ReviewReport:
     """Pure-function aggregator over a Finding list. Useful for unit tests
     and for callers that already ran the sub-programs themselves.
@@ -703,7 +710,107 @@ def aggregate(
         total_warns=total_warns,
         total_infos=total_infos,
         auditors_not_run=auditors_not_run,
+        compliance_audits=list(compliance_audits or []),
     )
+
+
+_COMPLIANCE_RECEIPTS = {
+    "interface_encoding_audit": "encoding_audit_report.json",
+    "crc_bitorder_check": "crc_bitorder_report.json",
+    "phy_counter_audit": "phy_counter_audit_report.json",
+}
+
+
+def _compliance_receipt_state(program: str, payload: Any, rc: int) -> str:
+    """Read the producing program's own three-state result without upgrading it."""
+    if not isinstance(payload, dict):
+        return "NOT_MEASURED"
+    if program == "interface_encoding_audit":
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        if rc == 1 or (summary.get("mismatches") or 0) > 0:
+            return "FAIL"
+        verdict = summary.get("verdict")
+    elif program == "crc_bitorder_check":
+        verdict = payload.get("summary_status")
+        if rc == 1 or verdict == "WARN":
+            return "FAIL"
+    else:
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        verdict = summary.get("verdict")
+        if rc == 1 or verdict == "FAIL":
+            return "FAIL"
+    if rc == 0 and verdict in ("PASS", "NOT_APPLICABLE"):
+        return verdict
+    return "NOT_MEASURED"
+
+
+def _run_compliance_audits(
+        rtl_dir: Path, files: List[Path], tmp_dir: Path, *, top: str,
+        defines=(), parameters=(), include_dirs=()
+) -> Tuple[List[Dict[str, Any]], List[Finding]]:
+    """Produce every receipt the mandatory rtl-review consumer reads.
+
+    A producer that cannot reach a verdict is recorded as NOT_MEASURED.  It is
+    not omitted and is never converted into a clean audit.
+    """
+    common_interface = ["--rtl-dir", str(rtl_dir), "--top-module", str(top),
+                        "--out-dir", str(tmp_dir)]
+    for flag, values in (("--define", defines), ("--parameter", parameters),
+                         ("--include-dir", include_dirs)):
+        for value in values:
+            common_interface += [flag, str(value)]
+    file_args = [str(path) for path in files]
+    commands = {
+        "interface_encoding_audit": common_interface,
+        "crc_bitorder_check": ["--rtl-files", *file_args,
+                               "--out-dir", str(tmp_dir)],
+        "phy_counter_audit": ["--rtl-files", *file_args,
+                              "--out-dir", str(tmp_dir)],
+    }
+    rows: List[Dict[str, Any]] = []
+    findings: List[Finding] = []
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    for program, args in commands.items():
+        receipt = tmp_dir / _COMPLIANCE_RECEIPTS[program]
+        if not files:
+            rc, stdout, stderr = 2, "", "no RTL files selected"
+        else:
+            try:
+                proc = subprocess.run(
+                    [sys.executable, str(PROGRAMS_DIR / f"{program}.py"), *args],
+                    capture_output=True, text=True, timeout=300, check=False)
+                rc, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
+            except subprocess.TimeoutExpired:
+                rc, stdout, stderr = 124, "", f"timeout running {program}"
+            except OSError as exc:
+                rc, stdout, stderr = 127, "", f"{type(exc).__name__}: {exc}"
+        try:
+            payload = json.loads(receipt.read_text())
+        except (OSError, ValueError):
+            payload = None
+        state = _compliance_receipt_state(program, payload, rc)
+        reason = ""
+        if state == "NOT_MEASURED":
+            tail = (stderr or stdout).strip().splitlines()
+            reason = tail[-1] if tail else (
+                f"{program} did not leave a usable {receipt.name} receipt")
+            findings.append(Finding(
+                category="correctness_smells", severity="INFO",
+                rule_id=program, file=str(receipt), line=0,
+                message=f"auditor did not reach a verdict (NOT_MEASURED): {reason}",
+                source=program, not_measured_reason=reason))
+        elif state == "FAIL":
+            findings.append(Finding(
+                category="correctness_smells", severity="ERROR",
+                rule_id=program, file=str(receipt), line=0,
+                message=f"mandatory rtl-review audit reported {state}",
+                source=program))
+        rows.append({
+            "auditor": program, "state": state, "returncode": rc,
+            "receipt": str(receipt) if receipt.is_file() else None,
+            "reason": reason,
+        })
+    return rows, findings
 
 
 def review_rtl_dir(rtl_dir: Path, tmp_dir: Path, *, top=None,
@@ -751,10 +858,18 @@ def review_rtl_dir(rtl_dir: Path, tmp_dir: Path, *, top=None,
         precheck_json)
     findings.extend(_load_precheck_findings(precheck_json, rc, err))
 
+    compliance_audits: List[Dict[str, Any]] = []
+    if top:
+        compliance_audits, compliance_findings = _run_compliance_audits(
+            rtl_dir, files, tmp_dir, top=top, defines=defines,
+            parameters=parameters, include_dirs=include_dirs)
+        findings.extend(compliance_findings)
+
     return aggregate(
         findings,
         rtl_dir=str(rtl_dir),
         files_reviewed=[str(f.relative_to(rtl_dir)) for f in files],
+        compliance_audits=compliance_audits,
     )
 
 
@@ -810,6 +925,24 @@ def report_to_markdown(rep: ReviewReport) -> str:
             out.append(f"- **{a['auditor']}** — {a['why']}  (via {a['source']})")
         out.append("")
 
+    # § Mandatory semantic receipts.  The prose requirements and the receipt
+    # cross-checks now describe the same three producer results.
+    out.append("## Interface, data path, and counter audits")
+    out.append("")
+    by_name = {row.get("auditor"): row for row in rep.compliance_audits}
+    audit_lines = (
+        ("interface_encoding_audit", "Interface encoding consistency"),
+        ("crc_bitorder_check", "TX data content, byte layout, bit fields and CRC load"),
+        ("phy_counter_audit", "Counter approach: time-based versus bus-sampling and counter hold"),
+    )
+    for name, label in audit_lines:
+        row = by_name.get(name)
+        state = row.get("state") if row else "NOT_MEASURED"
+        receipt = row.get("receipt") if row else None
+        suffix = f"; receipt `{receipt}`" if receipt else "; no receipt produced"
+        out.append(f"- **{label}**: {state}{suffix}")
+    out.append("")
+
     # § Per-category
     out.append("## Per-category")
     out.append("")
@@ -846,11 +979,14 @@ def report_to_markdown(rep: ReviewReport) -> str:
     out.append("")
     if rep.verdict == "PASS":
         out.append("Proceed to synthesis / next phase. No blocking issues.")
+        out.append("Next: run /checkpoint-gate")
     elif rep.verdict == "WARN":
         out.append("Address warnings before tapeout, but Phase 2 can continue.")
+        out.append("Next: run /rtl-repair, then repeat /rtl-review")
     else:
         out.append("Fix errors and re-run rtl_review_aggregate before "
                    "advancing. Errors block downstream gates.")
+        out.append("Next: run /rtl-repair, then repeat /rtl-review")
     out.append("")
     return "\n".join(out)
 

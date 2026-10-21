@@ -421,6 +421,12 @@ class TestEndToEndOnANeutralModule:
         assert r.returncode == 0, r.stderr
         assert out_md.is_file() and out_json.is_file()
         assert json.loads(out_json.read_text())["score"] >= 7
+        markdown = out_md.read_text()
+        assert "## Interface, data path, and counter audits" in markdown
+        assert "Interface encoding consistency" in markdown
+        assert "TX data content, byte layout" in markdown
+        assert "Counter approach: time-based versus bus-sampling" in markdown
+        assert "Next: run /" in markdown
 
     def test_cli_refuses_loudly_and_writes_nothing_when_a_producer_is_unreadable(
             self, tmp_path):
@@ -675,14 +681,26 @@ def test_actual_review_reports_preserve_complete_authored_catalog_inventory(tmp_
               'expected_report_dir': str(work),
               'child_reports': {str(p.relative_to(project)): hashlib.sha256(p.read_bytes()).hexdigest()
                                 for p in project.rglob('*.json')
-                                if p.name in ('hygiene.json', 'reset.json', 'precheck.json')},
+                                if p.name in ('hygiene.json', 'reset.json', 'precheck.json',
+                                              'encoding_audit_report.json',
+                                              'crc_bitorder_report.json',
+                                              'phy_counter_audit_report.json')},
               'native_evidence_dirs': [str(p.relative_to(project)) for p in project.rglob('native-elaboration-*') if p.is_dir()],
               'native_contexts': [json.loads(p.read_text()) for p in project.rglob('native-elaboration-*/context.json')]}
     (project / 'report-placement-values.json').write_text(json.dumps(actual, indent=2) + '\n')
     assert observed.returncode == 0, actual
     assert admitted_after.status == 'PASS_WITH_WAIVERS', actual
     assert pull._local_inventory(rtl) == before, actual
-    assert all((work / name).is_file() for name in ('hygiene.json', 'reset.json', 'precheck.json')), actual
+    expected_children = ('hygiene.json', 'reset.json', 'precheck.json',
+                         'encoding_audit_report.json', 'crc_bitorder_report.json',
+                         'phy_counter_audit_report.json')
+    assert all((work / name).is_file() for name in expected_children), actual
+    review = json.loads((reports / 'review.json').read_text())
+    audit_rows = {row['auditor']: row for row in review['compliance_audits']}
+    assert set(audit_rows) == {
+        'interface_encoding_audit', 'crc_bitorder_check', 'phy_counter_audit'}
+    assert all(row['state'] in {'PASS', 'FAIL', 'NOT_APPLICABLE', 'NOT_MEASURED'}
+               for row in audit_rows.values())
     assert actual['native_evidence_dirs'], actual
     assert actual['native_contexts'] and all(context['status'] == 'MEASURED'
             and context['native_returncode'] == 0 for context in actual['native_contexts']), actual
