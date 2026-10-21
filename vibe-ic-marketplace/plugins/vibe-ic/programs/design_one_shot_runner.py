@@ -21618,6 +21618,11 @@ def lec_inconclusive_reason_class(doc: dict) -> str:
     """
     if not isinstance(doc, dict):
         return _V.ReasonClass.EXECUTION_ERROR.value
+    _execution_environment = doc.get("execution_environment")
+    if (doc.get("reason_class") == _V.ReasonClass.EXECUTION_ERROR.value
+            or isinstance(_execution_environment, dict)
+            and _execution_environment.get("state") == "NOT_MEASURED"):
+        return _V.ReasonClass.EXECUTION_ERROR.value
     if lec_exhausted_resource_note(doc):
         return _V.ReasonClass.BUDGET_EXHAUSTED.value
     # R-0915-85 — `SKIPPED-CONDITION` reaches here too (see
@@ -21698,6 +21703,15 @@ def lec_inconclusive_disposition(doc: dict) -> Tuple[str, str]:
         "design_one_shot_runner::lec_inconclusive_disposition")  # R-0915-86(3)
     if not isinstance(doc, dict):
         return NOT_EXECUTED_STATUS, "record unreadable — nothing measured"
+    _execution_environment = doc.get("execution_environment")
+    if (isinstance(_execution_environment, dict)
+            and _execution_environment.get("state") == "NOT_MEASURED"):
+        _missing = _execution_environment.get("missing_paths") or []
+        return (NOT_EXECUTED_STATUS,
+                "NOT_MEASURED: LEC execution input(s) were unreachable inside "
+                f"container '{_execution_environment.get('container', '')}': "
+                + (", ".join(str(p) for p in _missing)
+                   if _missing else "the tool did not launch"))
     stopped_by = lec_exhausted_resource_note(doc)
     if stopped_by:
         # R-0915-85: `budget_exhausted` is the reason_class for exactly this —
@@ -23425,11 +23439,9 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
         # THIS STEP HAS NO HOST-OBSERVABLE PROGRESS SIGNAL OF ITS OWN, and
         # that is said rather than papered over: from here the producer is a
         # quiet Python process whose real work is inside a container. So the
-        # honest treatment is the one this lane applies wherever a signal is
-        # missing — NO CEILING, REPORT ELAPSED. The declared budget is carried
-        # into the step record beside the measured elapsed time, so a reader
-        # can see a run that went long WITHOUT a run that went long being
-        # destroyed to tell them.
+        # producer enforces the remaining StepBudget inside the same container
+        # invocation that launches each Yosys leg. The outer Python process is
+        # intentionally not given a second, competing clock.
         _lec_started = time.time()
         try:
             r = subprocess.run(cmd, capture_output=True, text=True)
@@ -23485,9 +23497,9 @@ def step_lec_equivalence(project: Path, top_name: str, container: str,
                                time.time() - t0,
                                f"yosys equiv: verdict={_verdict or 'UNKNOWN'} "
                                f"(RTL vs {Path(gate_netlist).name}, rc={r.returncode}"
-                               f", elapsed={_lec_elapsed:.0f}s, declared step "
-                               f"budget={_LEC_PRODUCER_TIMEOUT_S}s — RECORDED, "
-                               f"not enforced: a progressing proof is never cut off)"
+                               f", elapsed={_lec_elapsed:.0f}s, finite step "
+                               f"budget={_LEC_PRODUCER_TIMEOUT_S}s — enforced "
+                               f"inside each Yosys invocation)"
                                + (f"; {_lec_reuse}" if _lec_reuse else "")
                                + (f"; {_lec_reason}" if _lec_reason else "")
                                + f"; subject: {_lec_subject_note}"

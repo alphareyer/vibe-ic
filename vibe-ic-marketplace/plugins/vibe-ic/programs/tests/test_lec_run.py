@@ -2291,7 +2291,15 @@ def test_lec_cache_second_identical_invocation_launches_no_yosys(monkeypatch,
 
     monkeypatch.setattr(lec_run, "run_yosys_equiv", fake_yosys)
     monkeypatch.setattr(lec_run, "_container_available", lambda _c: True)
-    monkeypatch.setattr(lec_run, "_container_file_exists", lambda *_a: False)
+    # This test owns cache reuse, so give it a visible, fingerprinted Liberty.
+    # Missing-container-input behavior is covered independently by #3420.
+    monkeypatch.setattr(
+        lec_run, "_container_file_exists",
+        lambda _container, path: path == "/missing")
+    monkeypatch.setattr(
+        lec_run, "_container_file_sha256",
+        lambda _container, path: "sha256:" + "a" * 64
+        if path == "/missing" else None)
     monkeypatch.setattr(lec_run, "_yosys_version", lambda _c: "Yosys 0.68")
     monkeypatch.setattr(lec_run, "_container_image_digest",
                         lambda _c: "sha256:image-id")

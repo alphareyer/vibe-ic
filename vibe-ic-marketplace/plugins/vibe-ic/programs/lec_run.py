@@ -107,47 +107,6 @@ def _env_yosys_timeout_default() -> int:
     return 7200
 
 
-#: R-0915-48 — an OPT-IN hard bound on the equiv proof, and it is deliberately
-#: NOT `DEFAULT_YOSYS_TIMEOUT_S`.
-#:
-#: This file has removed a bound on this leg TWICE, each time with a
-#: measurement, and both are recorded above:
-#:   * 2026-09-06 — pinning `wrap_with_container_timeout` to the budget
-#:     SIGKILLed a proof at budget-5s that was emitting output at a full core
-#:     (5360 s of 7195 s, 1374 points proved, 0 failed, still advancing), and
-#:     "a bigger number would be the same defect with a later date";
-#:   * earlier — a host-side SILENCE window "killed two healthy RTLLM LEC jobs
-#:     ... while each Yosys process was still advancing at one full core".
-#: So neither a wall clock nor a quiet-window may become the DEFAULT here.
-#:
-#: What is also true, MEASURED on sha256 run12: a proof stuck on ONE hard point
-#: holds 99.9% CPU for ever, `_watchdog` counts CPU as progress (its signals are
-#: an OR), and the run therefore never ends. Both facts are real, and the only
-#: form that serves both is a bound the operator ASKS FOR.
-#:
-#: Set VIBEIC_LEC_YOSYS_TIMEOUT_S to a positive number of seconds and this leg
-#: carries a container-side backstop at it; leave it unset (or 0) and the leg
-#: behaves exactly as it does today, unbounded, and SAYS so. An expiry lands on
-#: the container-timeout path that already exists: `_TIMEOUT_MARKER`, parsed as
-#: INCONCLUSIVE / SKIPPED-CONDITION with the proof state reached, never a FAIL
-#: and never a PASS.
-def _env_lec_hard_bound_s() -> Optional[int]:
-    """Seconds for the opt-in equiv backstop, or None when not asked for.
-
-    PURE. Only an EXPLICIT positive value arms it: an unset variable is not a
-    request for a bound, and `DEFAULT_YOSYS_TIMEOUT_S`'s 7200 is the attempt-
-    admission budget, which `_docker`'s own docstring says is "not a fresh
-    retry budget" and not a runtime deadline."""
-    raw = os.environ.get("VIBEIC_LEC_YOSYS_TIMEOUT_S", "")
-    if not str(raw).strip():
-        return None
-    try:
-        v = int(raw)
-    except ValueError:
-        return None
-    return v if v > 0 else None
-
-
 DEFAULT_YOSYS_TIMEOUT_S = _env_yosys_timeout_default()
 DEFAULT_JSON_REL = "reports/lec.json"
 DEFAULT_RPT_REL = "reports/lec.rpt"
@@ -174,6 +133,7 @@ DEFAULT_CACHE_REL = "reports/lec_pass_cache"
 DEFAULT_CHECKPOINT_REL = "reports/lec_checkpoints"
 CONTROLLED_LIMIT_RECEIPT_PREFIX = "lec_controlled_limit"
 CONTROLLED_LIMIT_RECEIPT_SCHEMA_VERSION = "vibeic.lec.controlled-limit.v1"
+_EXECUTION_INPUT_UNREACHABLE_PREFIX = "LEC_EXECUTION_INPUT_UNREACHABLE:"
 
 # THE PROOF LADDER, in the order `build_equiv_script` emits it: (rung name,
 # the yosys command(s) that constitute the rung). The rung NAMES are
@@ -1184,10 +1144,8 @@ def rung_projection_abort_probe(live_log_path: Path, offset: int,
                                 clock=time.monotonic):
     """The `abort_probe` a LEC rung runs under (FX_AES_LEC_SCALE).
 
-    THE STEP BUDGET STILL STOPS NOTHING BY ITSELF (#2051, R-0915-48): a proof
-    whose rate would finish inside the budget, or one that has decided nothing
-    yet, is never touched, however long it runs. What stops a rung is the
-    PROOF'S OWN EVIDENCE that it cannot finish in the declared budget: once
+    This probe can stop a rung EARLIER than its finite wall budget when the
+    PROOF'S OWN EVIDENCE shows it cannot finish in the declared budget: once
     `equiv_induct` is deciding points one at a time, the measured decision
     rate projects the time the remaining workset needs, and when that exceeds
     what is left of the step budget the rung is going nowhere within it. It is
@@ -3233,34 +3191,13 @@ def _docker(container: str, cmd: str, timeout: int = 120,
             # The caller's domain predicate (`rung_projection_abort_probe`):
             # the proof's own evidence, never the clock, may end a rung.
             abort_probe=abort_probe,
-            # THE ATTEMPT BUDGET IS NOT A CEILING, and handing it to
-            # `hard_ceiling_s` was a wall-clock deadline wearing the watchdog's
-            # clothes. `_watchdog` says what that parameter is for in one line:
-            # "a pathological-infinite-loop backstop ONLY ... NOT the primary
-            # control". Pinned to the budget it also became the container-side
-            # GNU `timeout` (`wrap_with_container_timeout`), so a Yosys proof
-            # that was emitting output and holding a full core was SIGKILLed at
-            # budget-5s with no verdict -- and the flow then recorded a design
-            # it never compared. MEASURED 2026-09-06 on an open benchmark IC: a
-            # post-layout LEC at 5360 s of a 7195 s budget, 1374 points proved,
-            # 0 failed, 99.9 % CPU, still advancing.
-            #
-            # WHAT STILL BOUNDS THE STEP. `timeout` keeps its ORIGINAL job --
-            # `StepBudget.next_attempt_budget()` returns 0 once the step
-            # deadline has passed and the next attempt is NOT LAUNCHED. That is
-            # the anti-re-arm property the budget was written for on
-            # 2026-08-27 (three attempts x 7200 s against a nominal "7200 s
-            # budget"), and it is a decision taken BETWEEN attempts, so it
-            # stops nothing that is running. A RUNNING attempt is now bounded
-            # by FORWARD PROGRESS alone: still moving -> runs to completion,
-            # however long that legitimately takes; stopped moving -> killed
-            # and recorded as STALLED (`_STALL_MARKER`, rc RC_STALLED), which
-            # this file already keeps distinct from `_TIMEOUT_MARKER`.
-            #
-            # A BIGGER NUMBER WOULD BE THE SAME DEFECT WITH A LATER DATE, so
-            # there is no number here at all: the ceiling falls back to the
-            # primitive's own pathological backstop, exactly as
-            # `design_one_shot_runner._run` already does after the same repair.
+            # `run_yosys_equiv` wraps the exact command with the remaining
+            # StepBudget before it reaches this supervisor. Do not also feed
+            # the same number to `hard_ceiling_s`: two independent timers make
+            # ownership and the retained exit evidence ambiguous. The shared
+            # supervisor continues to own exact process identity, progress
+            # telemetry, stall detection and reaping; the inner wrapper owns
+            # the one finite wall budget.
         )
         return subprocess.CompletedProcess(
             (["bash", "-lc", cmd] if container in ("", "host") else
@@ -4584,13 +4521,10 @@ def annotate_step_budget(report: Dict, budget: "StepBudget", *,
         else any(a.get("killed_by_budget") for a in budget.attempts
                  if a.get("launched")))
     if budget.exhausted():
-        # THE BUDGET NO LONGER STOPS A RUNNING PROOF, so "exhausted" no longer
-        # implies "produced nothing". It governs ATTEMPT ADMISSION: past the
-        # deadline no FURTHER attempt is launched. A proof that legitimately ran
-        # long and then DECIDED is the case this branch could not previously
-        # reach, and appending "neither proven equivalent nor proven different"
-        # to a PASS would be a contradiction inside one report -- introduced by
-        # the very change that made the long run possible.
+        # "Exhausted" does not by itself imply "produced nothing": a proof can
+        # finish at the deadline and carry a measured PASS/FAIL. The stop marker
+        # below separates a completed verdict from a proof the finite budget
+        # interrupted, while the admission check prevents a fresh retry.
         #
         # The machine-readable fields above are unchanged and still true (the
         # budget IS spent). Only the sentence splits, and only on whether the
@@ -4679,6 +4613,8 @@ def annotate_step_budget(report: Dict, budget: "StepBudget", *,
 def run_yosys_equiv(container: str, ys_path_in_container: str,
                     timeout: int = DEFAULT_YOSYS_TIMEOUT_S,
                     workdir: Optional[str] = None, *,
+                    required_paths: Optional[List[str]] = None,
+                    required_dirs: Optional[List[str]] = None,
                     live_log_path: Optional[Path] = None,
                     telemetry_path: Optional[Path] = None,
                     telemetry_context: Optional[Dict] = None,
@@ -4724,21 +4660,34 @@ def run_yosys_equiv(container: str, ys_path_in_container: str,
                + shlex.quote(str(Path(live_log_path).resolve())))
     if workdir:
         cmd = f"cd {shlex.quote(workdir)} && " + cmd
-    # R-0915-48 — the opt-in backstop, armed ONLY when asked for. See
-    # `_env_lec_hard_bound_s` for why this is not the default and must not
-    # become one.
-    _hard_bound_s = _env_lec_hard_bound_s()
-    if _hard_bound_s is not None and _dw_mod() is not None:
-        cmd = _dw_mod().wrap_with_container_timeout(cmd, _hard_bound_s)
-        _note_bound = (f"[lec_run] equiv proof carries an OPT-IN container "
-                       f"backstop at {_hard_bound_s}s "
-                       f"(VIBEIC_LEC_YOSYS_TIMEOUT_S)")
-    else:
-        _note_bound = ("[lec_run] equiv proof is UNBOUNDED: "
-                       "VIBEIC_LEC_YOSYS_TIMEOUT_S is unset, so this leg runs "
-                       "to completion however long it takes, which is the "
-                       "2026-09-06 behaviour and not an oversight")
-    print(_note_bound, file=sys.stderr)
+    # Prove reachability in the SAME container invocation that launches Yosys.
+    # A host `Path.is_file()` check cannot establish that a bind mount exists.
+    # The marker deliberately contains neither "Yosys" nor "ERROR:" so the
+    # launch classifier cannot mistake an environment refusal for a design run.
+    _preflight: List[str] = []
+    for _path in dict.fromkeys(required_paths or []):
+        _q = shlex.quote(str(_path))
+        _preflight.append(
+            f"test -r {_q} || {{ printf '%s\\n' "
+            f"{shlex.quote(_EXECUTION_INPUT_UNREACHABLE_PREFIX + str(_path))}; "
+            "exit 125; }")
+    for _path in dict.fromkeys(required_dirs or []):
+        _q = shlex.quote(str(_path))
+        _preflight.append(
+            f"test -d {_q} || {{ printf '%s\\n' "
+            f"{shlex.quote(_EXECUTION_INPUT_UNREACHABLE_PREFIX + str(_path))}; "
+            "exit 125; }")
+    if _preflight:
+        cmd = "; ".join(_preflight) + "; " + cmd
+
+    # The attempt receives exactly the time left in StepBudget. Enforce that
+    # same number inside the container so a CPU-active SAT proof cannot outlive
+    # the recorded total budget. Expiry keeps the existing INCONCLUSIVE path;
+    # a mismatch already present in the log retains FAIL.
+    if _dw_mod() is not None:
+        cmd = _dw_mod().wrap_with_container_timeout(cmd, max(1, int(timeout)))
+    print(f"[lec_run] equiv proof carries the remaining finite step budget: "
+          f"{max(1, int(timeout))}s", file=sys.stderr)
     # BEFORE-sample. Taken even when the attempt goes on to succeed: a probe
     # that only runs on failure cannot produce a delta, and a delta is the only
     # form of this counter that says anything about THIS attempt.
@@ -4810,14 +4759,11 @@ def run_yosys_equiv(container: str, ys_path_in_container: str,
     # real mismatch (proven on opentitan_aes × sky130A and covered by the tests).
     if launched and getattr(r, "returncode", 0) in _CONTAINER_TIMEOUT_RCS:
         # THE DURATION WAS NEVER MEASURED, so it is no longer stated. `timeout`
-        # is the step's ATTEMPT-ADMISSION budget and no kind of deadline, so
-        # "after {timeout}s" would name a wall this run did not hit. And rc 137
-        # is AMBIGUOUS by construction -- the comment on
+        # is the remaining total step deadline. rc 137 is still AMBIGUOUS by
+        # construction -- the comment on
         # `_CONTAINER_TIMEOUT_RCS` says so itself: it is GNU `timeout`'s SIGKILL
-        # escalation AND a container OOM-kill. An OOM at ten minutes used to be
-        # recorded as "exceeded its time budget after 7200s"; with the ceiling
-        # back at the pathological backstop the same sentence would read
-        # 86400s, which is the same lie with a bigger number.
+        # escalation AND a container OOM-kill. The cgroup counter sampled around
+        # this invocation is what distinguishes those causes when available.
         #
         # The MARKER itself is kept verbatim: `_TIMEOUT_RE`,
         # `_EXECUTION_STOP_RE` and `budget_kill_blocks_frontend_retry` key on
@@ -4827,9 +4773,8 @@ def run_yosys_equiv(container: str, ys_path_in_container: str,
             "\n" + _TIMEOUT_MARKER
             + f" (rc={getattr(r, 'returncode', 0)}: the container-side "
             f"backstop, or an OOM kill -- rc 137 does not distinguish them). "
-            f"No equivalence verdict was reached. The {timeout}s step budget "
-            f"governs ATTEMPT ADMISSION, not runtime, so no wall-clock "
-            f"duration is claimed here.")
+            f"No equivalence verdict was reached within this attempt's "
+            f"remaining {timeout}s total step budget.")
     elif launched and getattr(r, "returncode", 0) == _RC_ABORTED:
         # THE RUNG'S OWN EVIDENCE ENDED IT (`rung_projection_abort_probe`): it
         # was deciding points, at a rate that cannot finish inside the step
@@ -4853,6 +4798,15 @@ def run_yosys_equiv(container: str, ys_path_in_container: str,
                if _pts.get("unproven") is not None else "")
             if _pts else " — no proved-point count had been emitted yet")
     return launched, out
+
+
+def execution_input_missing_paths(raw: str) -> List[str]:
+    """Container-visible paths refused by the same-invocation preflight."""
+    return list(dict.fromkeys(
+        line.split(_EXECUTION_INPUT_UNREACHABLE_PREFIX, 1)[1].strip()
+        for line in (raw or "").splitlines()
+        if _EXECUTION_INPUT_UNREACHABLE_PREFIX in line
+        and line.split(_EXECUTION_INPUT_UNREACHABLE_PREFIX, 1)[1].strip()))
 
 
 # ---------------------------------------------------------------------------
@@ -5562,8 +5516,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     liberty_present = bool(liberty) and _container_file_exists(container, liberty)
     if liberty and not liberty_present:
         print(f"[lec_run] WARN: Liberty not found in-container: {liberty} "
-              "— proceeding without it.", file=sys.stderr)
-        liberty = None
+              "— a mapped gate will be refused by the same-invocation input "
+              "preflight; a generic $_ gate will omit Liberty as usual.",
+              file=sys.stderr)
 
     # Defense-in-depth: make sure the top actually exists on BOTH sides. A
     # wrong top (default 'chip_top' on a standalone 'spm') builds 0 $equiv cells
@@ -5658,6 +5613,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"[lec_run] gold+gate read cwd = {equiv_workdir} "
               "(mirrors the synth cwd so relative $readmemh/`include resolve)",
               file=sys.stderr)
+
+    def _execution_inputs(script_path: str, *,
+                          resume: Optional[Dict] = None,
+                          extras: Optional[List[str]] = None) -> List[str]:
+        """Files the emitted recipe consumes, checked inside its container."""
+        paths: List[str] = [script_path, *gold_files, gate_abs]
+        paths.extend(p for p in (liberty, gate_wrapper_v, gold_wrapper_v)
+                     if p)
+        if _scan_fsm_restore and _scan_fsm_restore.get("encoding_path"):
+            paths.append(str(_scan_fsm_restore["encoding_path"]))
+        if resume is not None and resume.get("il_path"):
+            paths.append(str(resume["il_path"]))
+        paths.extend(extras or [])
+        return list(dict.fromkeys(str(p) for p in paths if p))
     gold_frontend = "verilog"
     gold_defines = "-DSIMULATION -DYOSYS"   # synth PRIMARY define set (mirrored)
 
@@ -5917,7 +5886,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                                  encoding="utf-8")
                 launched, _raw = run_yosys_equiv(
                     container, str(probe.resolve()),
-                    timeout=_MEM_PROBE_TIMEOUT_S, workdir=equiv_workdir)
+                    timeout=_MEM_PROBE_TIMEOUT_S, workdir=equiv_workdir,
+                    required_paths=_execution_inputs(str(probe.resolve())),
+                    required_dirs=([equiv_workdir] if equiv_workdir else []))
                 if launched and tee.is_file():
                     plan, findings = memory_word_alias_plan(
                         gold_memory_words(tee.read_text(errors="replace")),
@@ -6289,6 +6260,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 abort_probe=_leg_probe,
                 timeout=_attempt_budget,
                 workdir=equiv_workdir,
+                required_paths=_execution_inputs(
+                    ys_in_container, resume=resume_from),
+                required_dirs=([equiv_workdir, str(ckpt_dir)]
+                               if equiv_workdir and ckpt_dir is not None else
+                               [p for p in (equiv_workdir,
+                                            str(ckpt_dir) if ckpt_dir else None)
+                                if p]),
                 live_log_path=live_log_path,
                 telemetry_path=telemetry_path,
                 telemetry_context={
@@ -6535,7 +6513,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             _bl_launched, _bl_raw = run_yosys_equiv(
                 container, str(_bl_ys.resolve()),
                 timeout=max(1, budget.next_attempt_budget()),
-                workdir=equiv_workdir)
+                workdir=equiv_workdir,
+                required_paths=_execution_inputs(
+                    str(_bl_ys.resolve()), extras=[str(_bl_path.resolve())]),
+                required_dirs=([equiv_workdir] if equiv_workdir else []))
             _p1 = final_status_counts(_raw) or {}
             _p2 = final_status_counts(_bl_raw) or {}
             for c in _bl_cands:
@@ -6849,19 +6830,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     stopped_this_run = run_was_stopped(raw)
 
     if not launched:
-        print(f"[lec_run] ERROR: yosys did not run in '{container}' "
-              "— runner should disclosed-skip. Raw log at reports/lec.rpt.",
+        _missing_paths = execution_input_missing_paths(raw)
+        _where = (f"; missing/unreachable: {_missing_paths}"
+                  if _missing_paths else "")
+        print(f"[lec_run] NOT_MEASURED: yosys did not run in '{container}'"
+              f"{_where}. Raw log at reports/lec.rpt.",
               file=sys.stderr)
-        # Still emit a truthful diagnostic JSON (equivalent:false, no fake data).
+        # Still emit a truthful blocking diagnostic JSON. This is an execution
+        # environment refusal, never evidence that the two designs differ.
         diag = build_report(
             {"proven": None, "unproven": None, "total": None,
              "sat_model_unsupported_cells": [], "unproven_cells": [],
              "success_line": False, "parse_error": True, "equivalent": False,
-             "verdict": "FAIL",
+             "verdict": "INCONCLUSIVE",
              "verdict_explanation": (
-                 "Yosys/Docker could not run — no equivalence evidence "
-                 "produced. See reports/lec.rpt.")},
+                 f"LEC execution inputs were not reachable inside container "
+                 f"'{container}' ({', '.join(_missing_paths) if _missing_paths else 'tool did not launch'}) "
+                 "— no equivalence evidence was produced. See reports/lec.rpt.")},
             resolved_top, gate_abs, liberty, liberty_source)
+        diag["reason_class"] = "execution_error"
+        diag["execution_environment"] = {
+            "state": "NOT_MEASURED",
+            "reason_class": "execution_error",
+            "container": container,
+            "missing_paths": _missing_paths,
+        }
         diag = annotate_step_budget(diag, budget, stopped=stopped_this_run)
         diag["lec_resume"] = resume_record
         diag["lec_ladder"] = ladder_record
@@ -6870,7 +6863,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                           current_pass=lec_stage_from_output(raw))
         diag = attach_telemetry(diag, telemetry_path, project)
         _atomic_write_json(json_out, diag)
-        return 1
+        return 2
 
     parsed = parse_equiv_output(
         raw, ladder_complete=ladder_record.get("complete"))
