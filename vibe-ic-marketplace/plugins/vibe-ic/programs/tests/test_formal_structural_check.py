@@ -915,7 +915,8 @@ def test_raw_pmux_unreachable_default_undef_does_not_replace_reset_proof(tmp_pat
     assert proof["queries"]["zero1"] == "PROVED"
     progress = mapping["query_progress"]
     assert progress["planned"] == progress["started"] == progress["completed"] == 30
-    assert mapping["native_row_cone"]["eligible"] is False
+    assert mapping["native_row_cone"] == {
+        "eligible": True, "reason": "single-driver-total-boolean-dag"}
 
 
 def test_raw_arithmetic_constant_force_cannot_be_reclassified_as_retention(tmp_path):

@@ -1434,6 +1434,7 @@ def _reset_row_cone_eligibility(model: dict) -> dict:
              "$eqx", "$nex", "$logic_not", "$logic_and", "$logic_or",
              "$reduce_and", "$reduce_or", "$reduce_xor", "$reduce_xnor",
              "$reduce_bool", "$add", "$sub", "$mul", "$shiftx"}
+    shaped_total = {"$ge", "$le", "$pmux"}
     # Native add/sub/mul are finite-width total functions. shiftx is total in
     # Yosys's undef-aware value domain (out-of-range bits remain undef).
     # Cone selection never defines those bits: the existing undef queries
@@ -1445,11 +1446,33 @@ def _reset_row_cone_eligibility(model: dict) -> dict:
               for b in p["bits"] if isinstance(b, int)}
     drivers = {}
     for name, cell in cells.items():
-        if cell["type"] not in total:
+        kind = cell["type"]
+        if kind not in total | shaped_total:
             return {"eligible": False, "reason": "non-total-or-unsupported-cell"}
         if any(cell.get("port_directions", {}).get(pin) not in {"input", "output"}
                for pin in cell["connections"]):
             return {"eligible": False, "reason": "unknown-native-pin-direction"}
+        if kind in shaped_total:
+            connections = cell.get("connections") or {}
+            params = cell.get("parameters") or {}
+            if kind in {"$ge", "$le"}:
+                legal = (set(connections) == {"A", "B", "Y"}
+                         and _param_bit(params.get("A_WIDTH")) == len(connections.get("A", []))
+                         and _param_bit(params.get("B_WIDTH")) == len(connections.get("B", []))
+                         and _param_bit(params.get("Y_WIDTH")) == len(connections.get("Y", [])) == 1
+                         and _param_bit(params.get("A_SIGNED")) in {0, 1}
+                         and _param_bit(params.get("B_SIGNED")) in {0, 1})
+            else:
+                width = _param_bit(params.get("WIDTH"))
+                select_width = _param_bit(params.get("S_WIDTH"))
+                legal = (set(connections) == {"A", "B", "S", "Y"}
+                         and isinstance(width, int) and width > 0
+                         and isinstance(select_width, int) and select_width > 0
+                         and len(connections.get("A", [])) == len(connections.get("Y", [])) == width
+                         and len(connections.get("S", [])) == select_width
+                         and len(connections.get("B", [])) == width * select_width)
+            if not legal:
+                return {"eligible": False, "reason": "malformed-total-cell-shape"}
         for pin, bits in cell["connections"].items():
             if cell["port_directions"][pin] == "output":
                 for bit in bits:
