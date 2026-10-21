@@ -408,7 +408,81 @@ def plugin_declaration(spec: Dict[str, Any]) -> Dict[str, Any]:
             emit_rtl(spec), spec["serial_in"], spec["serial_out"]),
         "latency_cycles_origin": "pre_nba_sample_offset",
         "integer_encoding": "unsigned",
+        # Fixed properties of emit_rtl(): every independent operation is
+        # re-armed by the synchronous reset branch, one asserted edge clears
+        # all state, and x is consumed on every product cycle.
+        "transaction_rearm": "clocked_reset",
+        "rearm_reset_cycles": 1,
+        "parallel_hold": "through_final_product_bit",
     }
+
+
+def _declared_scenario_populations(project: Path, spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Producer-owned populations for L10 consecutive arithmetic scenarios.
+
+    The case identifier is read from the current L10 document and the scenario
+    family is classified by the same chip-agnostic parser used by the Step-4
+    consumer.  A row saying only "multiple/consecutive transactions" therefore
+    gets the smallest real population (two); an explicitly stated larger
+    population is preserved.  No case name or benchmark identity is special.
+    """
+    l10 = project / "phase1" / "generated_docs" / "L10_TEST_CASES.json"
+    try:
+        document = json.loads(l10.read_text())
+    except (OSError, ValueError):
+        return {}
+    cases = document.get("test_cases") if isinstance(document, dict) else None
+    if not isinstance(cases, list):
+        return {}
+    from arith_oracle_tb_gen import (_arithmetic_scenario_intent,
+                                     declared_vector_population,
+                                     MAX_CASE_VECTORS)
+    scenarios: Dict[str, Any] = {}
+    operands = (spec["parallel"], spec["serial_in"])
+    for case in cases:
+        if not isinstance(case, dict):
+            continue
+        intent = _arithmetic_scenario_intent(case, operands)
+        if not intent["consecutive_transactions"]:
+            continue
+        case_id = case.get("name") or case.get("id")
+        if not isinstance(case_id, str) or not case_id:
+            continue
+        count = declared_vector_population(intent["case"]) or 2
+        if type(count) is int and 2 <= count <= MAX_CASE_VECTORS:
+            scenarios[case_id] = {"transaction_count": count}
+    return ({"verification_stimuli": {"arithmetic_scenarios": scenarios}}
+            if scenarios else {})
+
+
+def _merge_scenario_populations(prior: Dict[str, Any],
+                                produced: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    """Fill producer populations without overwriting compatible author input."""
+    if not produced:
+        return prior, []
+    merged = dict(prior)
+    prior_stimuli = prior.get("verification_stimuli", {})
+    if not isinstance(prior_stimuli, dict):
+        return merged, ["verification_stimuli"]
+    stimuli = dict(prior_stimuli)
+    prior_scenarios = stimuli.get("arithmetic_scenarios", {})
+    if not isinstance(prior_scenarios, dict):
+        return merged, ["verification_stimuli.arithmetic_scenarios"]
+    scenarios = dict(prior_scenarios)
+    conflicts: List[str] = []
+    generated = produced["verification_stimuli"]["arithmetic_scenarios"]
+    for case_id, choice in generated.items():
+        existing = scenarios.get(case_id)
+        if existing is None:
+            scenarios[case_id] = choice
+            continue
+        count = existing.get("transaction_count") if isinstance(existing, dict) else None
+        if type(count) is not int or count < choice["transaction_count"]:
+            conflicts.append(
+                f"verification_stimuli.arithmetic_scenarios.{case_id}.transaction_count")
+    stimuli["arithmetic_scenarios"] = scenarios
+    merged["verification_stimuli"] = stimuli
+    return merged, conflicts
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -429,6 +503,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.emit:
         decl_path = proj / "plugin_output" / "declaration.json"
         declaration = plugin_declaration(spec)
+        populations = _declared_scenario_populations(proj, spec)
         if decl_path.exists():
             try:
                 prior = json.loads(decl_path.read_text())
@@ -461,6 +536,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     declaration["latency_cycles_origin"] = prior["latency_cycles_origin"]
                 else:
                     declaration.pop("latency_cycles_origin", None)
+            prior, population_conflicts = _merge_scenario_populations(
+                prior, populations)
+            conflicts.extend(population_conflicts)
             if conflicts:
                 print(json.dumps({"verdict": "DEFER", "reason":
                                   "existing declaration conflicts with serial RTL: "
@@ -469,6 +547,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             # Compatible author choices outside this solver's four fields
             # remain available to the contract producer and its consumers.
             declaration = dict(prior, **declaration)
+        elif populations:
+            declaration.update(populations)
         rtl_dir = proj / "phase2" / "stage1" / "rtl"
         rtl_dir.mkdir(parents=True, exist_ok=True)
         rtl_path = rtl_dir / f"{spec['top']}.v"

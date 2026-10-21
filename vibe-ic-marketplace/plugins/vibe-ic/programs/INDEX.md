@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1451
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1451)
+- **Total programs (excluding helpers / shims):** 1455
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1455)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1442 |
+| `any` | 1446 |
 
 ## Alphabetical listing
 
@@ -698,6 +698,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `l1_pin_bus_width_actionable_check` | any | — | VERDICT SEMANTICS: **BLOCKS** (exit 1 on FAIL). |
 | `l1_pin_table_aliases_typed_check` | any | Wave 38 | Audit-driven typed sub-field depth gate. Vendor docs commonly use |
 | `l20_dft_scan_topology_actionable_check` | any | — | SEMANTIC gate for L20_DFT_SCAN_TOPOLOGY (batch layergate-7). |
+| `l20_dft_scan_topology_extract` | any | — | Extract an explicit, typed scan topology from design-owned input docs. |
 | `l21_doc_supply_rail_synth` | any | — | Derive the power-intent rail set from a supply table the design's OWN docs STATE. |
 | `l21_hard_macro_supply_bind` | any | — | Bind each analog/hard-macro supply PIN to the rail the design's own documents say feeds it — the Phase-1 PRODUCER of `L21.fields.hard_mac... |
 | `l21_macro_supply_rail_declared_check` | any | — | L21 SEMANTIC completeness gate. |
@@ -1146,6 +1147,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `reset_dependency_check` | any | — | deterministic compliance check derived from <chip-class> v040 debug. |
 | `reset_discipline_check` | any | — | deterministic reset-discipline lint. |
 | `reset_invariant_oracle_tb_gen` | any | — | RESET-INVARIANT oracle TBs — the family beside the boot-latency one. |
+| `reset_sync_structural_exception` | any | — | Exact mapped-netlist proof for asynchronous reset release synchronizers. |
 | `residual_combinational_synth` | any | — | deterministic spec->RTL for the RESIDUAL "other" cluster of tiny combinational VerilogEval problems: the grab-bag left after the named st... |
 | `residual_recognizer` | any | — | routing recognizers for the genuinely-PROSE and VISION element types (the ones with no clean deterministic extractor). Each detects that ... |
 | `response_latency_observability_check` | any | — | LL-5. |
@@ -1180,6 +1182,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `run_entry_manifest` | any | — | record WHICH STEP a run entered the flow at. |
 | `run_output_completeness_check` | any | — | the EMPTY / MISSING / STUB deliverable gate. |
 | `run_status` | any | — | ORGANIC #599. Universal runner watchdog. |
+| `runtime_program_tree` | any | — | Retain one immutable plugin program tree for a long runner invocation. |
 | `rx_byte_assembler_ibt_flush_recovery_check` | any | Wave 15 | When a single-bit drop occurs (RX glitch on a half-duplex single-wire |
 | `rx_byte_valid_requires_ibt_gate_check` | any | Wave 26 | Wave 26 (v0.119.58) gate. |
 | `rx_classifier_no_threshold_gap_check` | any | Wave 26 | Wave 26 (v0.119.58) gate. |
@@ -1194,6 +1197,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `sata_state_extractor` | any | — | for #36 Bug 9 (L9 portion): SATA state-machine literal picker. |
 | `sata_timing_extractor` | any | — | for #36 Bug 9 (L8 portion): SATA-spec timing literal picker. |
 | `saturate_synth` | any | — | deterministic SOLVER for the CVDP SATURATE / CLAMP / THRESHOLD + SIGN-DATAPATH family the existing solvers miss. |
+| `scan_mode_constraint` | any | — | Emit and validate the source-bound scan-shift timing constraint. |
 | `scope_long_decode` | any | v0.119.1 | LL-9 (debug helper, not a structural gate). |
 | `scope_periodic_pulse_check` | any | v0.64 | Layer-3 hardware attestation gate. |
 | `scope_reply_preamble_check` | aid_class_half_duplex | Wave 58 | Wave 58 / BACKLOG-v12 P0.4 plugin gate. |
@@ -1523,7 +1527,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1442 programs)
+### `any` (1446 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2193,6 +2197,7 @@ _(no programs in this group)_
 - `l1_pin_bus_width_actionable_check` — VERDICT SEMANTICS: **BLOCKS** (exit 1 on FAIL).
 - `l1_pin_table_aliases_typed_check` — Audit-driven typed sub-field depth gate. Vendor docs commonly use  _[Wave 38]_
 - `l20_dft_scan_topology_actionable_check` — SEMANTIC gate for L20_DFT_SCAN_TOPOLOGY (batch layergate-7).
+- `l20_dft_scan_topology_extract` — Extract an explicit, typed scan topology from design-owned input docs.
 - `l21_doc_supply_rail_synth` — Derive the power-intent rail set from a supply table the design's OWN docs STATE.
 - `l21_hard_macro_supply_bind` — Bind each analog/hard-macro supply PIN to the rail the design's own documents say feeds it — the Phase-1 PRODUCER of `L21.fields.hard_mac...
 - `l21_macro_supply_rail_declared_check` — L21 SEMANTIC completeness gate.
@@ -2640,6 +2645,7 @@ _(no programs in this group)_
 - `reset_dependency_check` — deterministic compliance check derived from <chip-class> v040 debug.
 - `reset_discipline_check` — deterministic reset-discipline lint.
 - `reset_invariant_oracle_tb_gen` — RESET-INVARIANT oracle TBs — the family beside the boot-latency one.
+- `reset_sync_structural_exception` — Exact mapped-netlist proof for asynchronous reset release synchronizers.
 - `residual_combinational_synth` — deterministic spec->RTL for the RESIDUAL "other" cluster of tiny combinational VerilogEval problems: the grab-bag left after the named st...
 - `residual_recognizer` — routing recognizers for the genuinely-PROSE and VISION element types (the ones with no clean deterministic extractor). Each detects that ...
 - `response_latency_observability_check` — LL-5.
@@ -2673,6 +2679,7 @@ _(no programs in this group)_
 - `run_entry_manifest` — record WHICH STEP a run entered the flow at.
 - `run_output_completeness_check` — the EMPTY / MISSING / STUB deliverable gate.
 - `run_status` — ORGANIC #599. Universal runner watchdog.
+- `runtime_program_tree` — Retain one immutable plugin program tree for a long runner invocation.
 - `rx_byte_assembler_ibt_flush_recovery_check` — When a single-bit drop occurs (RX glitch on a half-duplex single-wire  _[Wave 15]_
 - `rx_byte_valid_requires_ibt_gate_check` — Wave 26 (v0.119.58) gate.  _[Wave 26]_
 - `rx_classifier_no_threshold_gap_check` — Wave 26 (v0.119.58) gate.  _[Wave 26]_
@@ -2687,6 +2694,7 @@ _(no programs in this group)_
 - `sata_state_extractor` — for #36 Bug 9 (L9 portion): SATA state-machine literal picker.
 - `sata_timing_extractor` — for #36 Bug 9 (L8 portion): SATA-spec timing literal picker.
 - `saturate_synth` — deterministic SOLVER for the CVDP SATURATE / CLAMP / THRESHOLD + SIGN-DATAPATH family the existing solvers miss.
+- `scan_mode_constraint` — Emit and validate the source-bound scan-shift timing constraint.
 - `scope_long_decode` — LL-9 (debug helper, not a structural gate).  _[v0.119.1]_
 - `scope_periodic_pulse_check` — Layer-3 hardware attestation gate.  _[v0.64]_
 - `scope_response_byte_decode_check` — P0.3 deterministic gate

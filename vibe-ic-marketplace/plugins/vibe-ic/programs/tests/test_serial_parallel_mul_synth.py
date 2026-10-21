@@ -220,7 +220,7 @@ def test_emit_writes_the_l7_required_declaration(tmp_path):
     assert decl_path.is_file(), \
         "L7 #7.0 requires plugin_output/declaration.json and --emit must write it"
     decl = json.loads(decl_path.read_text())
-    # Exactly L7's four required fields, exactly its stated allowed values.
+    # L7's framing fields plus the fixed transaction semantics of emit_rtl.
     assert decl == {
         "bit_order": "LSB_first",
         "reset_polarity": "active_high",
@@ -230,7 +230,60 @@ def test_emit_writes_the_l7_required_declaration(tmp_path):
         "latency_cycles": 2,
         "latency_cycles_origin": "pre_nba_sample_offset",
         "integer_encoding": "unsigned",
+        "transaction_rearm": "clocked_reset",
+        "rearm_reset_cycles": 1,
+        "parallel_hold": "through_final_product_bit",
     }
+
+
+def test_emit_declares_current_consecutive_scenario_without_case_name_special_casing(
+        tmp_path):
+    proj = _mk_project(tmp_path, ports=_SPM_PORTS,
+                       l2_text="serial-parallel multiplier: p = (x * y) mod 2^N")
+    l10 = proj / "phase1/generated_docs/L10_TEST_CASES.json"
+    l10.write_text(json.dumps({"test_cases": [
+        {"name": "arbitrary_row_id", "kind": "coverage_goal",
+         "coverage_scope": "Consecutive 7 transactions, all results must match"},
+        {"name": "unrelated_row", "kind": "coverage_goal",
+         "coverage_scope": "Operand boundaries x=0 and y=0"},
+    ]}))
+    assert spm.main([str(proj), "--emit"]) == 0
+    declaration = json.loads((proj / "plugin_output/declaration.json").read_text())
+    assert declaration["verification_stimuli"] == {
+        "arithmetic_scenarios": {
+            "arbitrary_row_id": {"transaction_count": 7},
+        }
+    }
+
+
+def test_emit_preserves_stronger_authored_scenario_population_and_refuses_weaker(
+        tmp_path):
+    proj = _mk_project(tmp_path, ports=_SPM_PORTS,
+                       l2_text="serial-parallel multiplier: p = (x * y) mod 2^N")
+    l10 = proj / "phase1/generated_docs/L10_TEST_CASES.json"
+    l10.write_text(json.dumps({"test_cases": [{
+        "name": "streaming", "kind": "coverage_goal",
+        "coverage_scope": "Consecutive 4 transactions"
+    }]}))
+    declaration = proj / "plugin_output/declaration.json"
+    declaration.parent.mkdir()
+    compatible = spm.plugin_declaration(
+        spm.extract_serial_parallel_mul_spec(
+            proj, "digital_arithmetic_primitive")[0])
+    compatible["verification_stimuli"] = {
+        "arithmetic_scenarios": {"streaming": {"transaction_count": 8}}}
+    declaration.write_text(json.dumps(compatible))
+    assert spm.main([str(proj), "--emit"]) == 0
+    assert json.loads(declaration.read_text())["verification_stimuli"][
+        "arithmetic_scenarios"]["streaming"]["transaction_count"] == 8
+
+    declaration.write_text(json.dumps({
+        **spm.plugin_declaration(spm.extract_serial_parallel_mul_spec(
+            proj, "digital_arithmetic_primitive")[0]),
+        "verification_stimuli": {
+                "arithmetic_scenarios": {"streaming": {"transaction_count": 2}}},
+    }))
+    assert spm.main([str(proj), "--emit"]) == 2
 
 
 def test_declaration_reset_polarity_follows_the_designs_own_reset_name(tmp_path):

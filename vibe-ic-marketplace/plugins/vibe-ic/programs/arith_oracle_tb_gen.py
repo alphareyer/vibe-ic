@@ -905,7 +905,8 @@ def _lcg_random_pairs(n: int, count: int, seed: int = 0x2545F491,
 #: a lower-bound word. A percentage is an ACCEPTANCE figure, never a population,
 #: so a number followed by `%` is refused by construction.
 _POPULATION_NOUN = (r"(?:組|组|筆|笔|個|个|pairs?|vectors?|sets?|samples?|"
-                    r"operand\s+pairs?|input\s+pairs?|trials?|iterations?)")
+                    r"operand\s+pairs?|input\s+pairs?|trials?|iterations?|"
+                    r"transactions?)")
 _POPULATION_RES = (
     re.compile(r"(?:≥|>=|>|至少|at\s+least|no\s+fewer\s+than|minimum(?:\s+of)?)"
                r"\s*([0-9][0-9,_]*)(?![0-9.,_]*\s*%)", re.IGNORECASE),
