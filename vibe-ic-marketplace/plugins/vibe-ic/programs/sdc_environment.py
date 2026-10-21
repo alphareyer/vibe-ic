@@ -192,6 +192,41 @@ def _liberty_blocks(text: str, kind: str) -> List[Tuple[str, str]]:
     return out
 
 
+_LIBERTY_GAP = r"(?:\s|/\*.*?\*/|//[^\r\n]*(?:\r?\n|$))*"
+_LIBERTY_HEADER_SCAN = re.compile(
+    r'(?P<block>/\*.*?\*/)|(?P<line>//[^\r\n]*)|'
+    r'(?P<string>"(?:\\.|[^"\\])*")|'
+    r'(?P<header>\bcell' + _LIBERTY_GAP + r'\(' + _LIBERTY_GAP
+    + r'(?:(?:"(?P<quoted>(?:\\.|[^"\\])*)")|'
+      r'(?P<bare>[A-Za-z_][A-Za-z0-9_.$/:+-]*))'
+    + _LIBERTY_GAP + r'\)' + _LIBERTY_GAP + r'\{)', re.S)
+
+
+def _liberty_may_have_selected_cell(text: str, masters: set[str]) -> bool:
+    """Cheap conservative prefilter for exact Liberty ``cell`` headers.
+
+    The scan runs in the regex engine and ignores complete comments and
+    unrelated quoted strings.  Quoted/unquoted headers and comments between
+    their tokens are supported.  Other attributes and longer cell names do not
+    count: only the exact finite producer-selected master set can admit a deep
+    structural parse.
+    """
+    if not masters:
+        return False
+    for hit in _LIBERTY_HEADER_SCAN.finditer(text):
+        if hit.group("header") is not None:
+            name = hit.group("quoted")
+            if name is None:
+                name = hit.group("bare")
+            if name in masters:
+                return True
+            # An escaped selected header is outside the exact supported name
+            # grammar; deep-parse it rather than proving absence.
+            if name and "\\" in name and any(master in name for master in masters):
+                return True
+    return False
+
+
 def _own_attrs(body: str) -> str:
     """A group's own simple attributes: its body with every nested group cut."""
     out, depth = [], 0
@@ -399,22 +434,32 @@ def _core_pad_models(project: Path, container: str = "",
     views: List[Dict[str, object]] = []
     cell_views: Dict[str, List[Tuple[str, str, float]]] = {}
     selected = {str(pad["master"]) for pad in pads.values()}
+    read_views = 0
+    deep_parsed = 0
     for path in sorted(str(item) for item in libs if isinstance(item, str)):
         text, where = _read_pdk_file(path, container, to_container_path)
         if text is None:
             views.append({"liberty": path, "why": "NOT_READ"})
             continue
+        read_views += 1
         sha = hashlib.sha256(text.encode()).hexdigest()
         unit_pf = _liberty_capacitance_unit_pf(text)
         found = []
-        for cell, body in _liberty_blocks(text, "cell"):
-            if cell in selected:
-                cell_views.setdefault(cell, []).append((path, body, unit_pf or 0.0))
-                found.append(cell)
+        may_have_selected = _liberty_may_have_selected_cell(text, selected)
+        if may_have_selected:
+            deep_parsed += 1
+            for cell, body in _liberty_blocks(text, "cell"):
+                if cell in selected:
+                    cell_views.setdefault(cell, []).append((path, body, unit_pf or 0.0))
+                    found.append(cell)
         views.append({"liberty": path, "read_from": where, "sha256": sha,
                       "capacitance_unit_pf": unit_pf,
+                      "deep_parsed": may_have_selected,
                       "selected_masters": sorted(found)})
     basis["views"] = views
+    basis["read_view_count"] = read_views
+    basis["deep_parsed_view_count"] = deep_parsed
+    basis["prefilter_skipped_view_count"] = read_views - deep_parsed
 
     models: Dict[str, Dict[str, object]] = {}
     errors: List[str] = []

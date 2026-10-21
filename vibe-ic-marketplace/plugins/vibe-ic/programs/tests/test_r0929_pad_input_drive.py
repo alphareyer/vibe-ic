@@ -30,6 +30,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
 if str(PROGRAMS) not in sys.path:
     sys.path.insert(0, str(PROGRAMS))
@@ -699,6 +701,89 @@ def test_issue3427_native_opensta_reads_the_translated_core_deck(tmp_path):
     output = run.stdout + run.stderr
     assert run.returncode == 0 and "CORE_PAD_TRANSLATION_OK" in output, output
     assert "Error:" not in output and "STA-" not in output, output
+
+
+@pytest.mark.parametrize("header", [
+    "cell (neutral_pad) { pin (PAD) { direction : input; } }",
+    'cell ("neutral_pad") { pin (PAD) { direction : input; } }',
+    'cell /* legal gap */ (\n "neutral_pad" // selected master\n ) { }',
+])
+def test_issue3440_prefilter_keeps_quoted_unquoted_selected_headers(header):
+    import sdc_environment as SE
+    assert SE._liberty_may_have_selected_cell(header, {"neutral_pad"}) is True
+
+
+@pytest.mark.parametrize("text", [
+    "/* cell (neutral_pad) { pin (PAD) {} } */\ncell (other) {}",
+    'comment : "cell (neutral_pad) { not a group }";\ncell (other) {}',
+    "// cell (neutral_pad) { }\ncell (other) {}",
+    "cell (neutral_pad_wrapped) { pin (PAD) {} }",
+])
+def test_issue3440_prefilter_does_not_admit_comment_or_string_headers(text):
+    import sdc_environment as SE
+    assert SE._liberty_may_have_selected_cell(text, {"neutral_pad"}) is False
+
+
+def test_issue3440_irrelevant_views_are_hash_bound_without_deep_parse(tmp_path):
+    """The translated commands stay identical while irrelevant views are cheap."""
+    import sdc_environment as SE
+    project = _core_wrapper_project(tmp_path)
+    staged = (
+        "set_input_transition -max 25 [get_ports {a}]\n"
+        "set_input_transition -min 0.01 [get_ports {a}]\n"
+        "set_load -max 5 [get_ports {y}]\n"
+        "set_load -min 0 [get_ports {y}]\n")
+    baseline, base_rec = SE.staged_sdc_pad_input_drive(
+        project, staged, "input/constraints/external.sdc",
+        analysis_top="neutral_core")
+    record_path = project / "reports/phase3/io_pad_chip_top.json"
+    record = json.loads(record_path.read_text())
+    selected = Path(record["io_library_liberty"][0])
+    irrelevant = []
+    for index in range(200):
+        path = tmp_path / "pdk" / f"irrelevant_{index}.lib"
+        extra = ("/* cell (neutral_pad) { pin (PAD) {} } */"
+                 if index == 0 else
+                 'note : "cell (neutral_pad) { not a group }";'
+                 if index == 1 else "")
+        path.write_text(
+            f"library (irrelevant_{index}) {{ capacitive_load_unit (1, pf); "
+            f"{extra} cell (other_{index}) {{ pin (A) {{ direction : input; }} }} }}")
+        irrelevant.append(str(path))
+    record["io_library_liberty"] = [str(selected), *irrelevant]
+    record_path.write_text(json.dumps(record))
+
+    optimized, rec = SE.staged_sdc_pad_input_drive(
+        project, staged, "input/constraints/external.sdc",
+        analysis_top="neutral_core")
+    commands = lambda deck: [line for line in deck.splitlines()
+                             if line.strip() and not line.lstrip().startswith("#")]
+    assert base_rec["verdict"] == rec["verdict"] == "PAD_TRANSLATED"
+    assert commands(optimized) == commands(baseline)
+    basis = rec["pad_model_basis"]
+    assert basis["read_view_count"] == 201
+    assert basis["deep_parsed_view_count"] == 1
+    assert basis["prefilter_skipped_view_count"] == 200
+    assert len(basis["views"]) == 201
+    assert all(len(view["sha256"]) == 64 for view in basis["views"])
+
+
+def test_issue3440_unrelated_attribute_cannot_fabricate_selected_master(tmp_path):
+    import sdc_environment as SE
+    project = _core_wrapper_project(tmp_path)
+    fake = tmp_path / "pdk" / "attribute_only.lib"
+    fake.write_text(
+        "library (attribute_only) { capacitive_load_unit (1, pf); "
+        "selected_pad_master : neutral_pad; cell (other) { pin (A) { "
+        "direction : input; capacitance : 0.1; } } }")
+    record_path = project / "reports/phase3/io_pad_chip_top.json"
+    record = json.loads(record_path.read_text())
+    record["io_library_liberty"] = [str(fake)]
+    record_path.write_text(json.dumps(record))
+    models, basis = SE._core_pad_models(project)
+    assert models is None
+    assert "master neutral_pad absent" in basis["why"]
+    assert basis["views"][0]["selected_masters"] == []
 
 
 def test_an_absent_record_on_a_die_top_is_not_measured(tmp_path):
