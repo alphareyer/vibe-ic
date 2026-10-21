@@ -1,10 +1,12 @@
 """v0.1.50 — STA endpoint triage (Pattern-B → program).
 
-Doctrine: `skills/sta-review/SKILL.md` enumerated 5 STA-violation
-categories with fix proposals. All deterministic given a STA report
-plus per-path delay breakdown.
+Doctrine: `skills/sta-review/SKILL.md` enumerates STA-violation
+categories with fix proposals. All deterministic given a STA report,
+per-path delay breakdown, and any source-bound I/O electrical boundary.
 
 Categories:
+  constraint_boundary_limited    → repair contradictory I/O constraints first
+  constraint_boundary_unresolved → obtain a current drive/load model first
   cell_delay_limited  → upsize driver / Vt swap
   net_delay_limited   → insert buffer / reroute / shorten wire
   logic_depth_limited → pipeline / restructure RTL
@@ -32,6 +34,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 import argparse
 import json
+import math
 import re
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -40,6 +43,8 @@ import plugin_manifest_discovery as _pmd  # noqa: E402  (#800 ONE version reader
 
 
 CATEGORIES = (
+    "constraint_boundary_limited",
+    "constraint_boundary_unresolved",
     "cell_delay_limited",
     "net_delay_limited",
     "logic_depth_limited",
@@ -48,6 +53,8 @@ CATEGORIES = (
 )
 
 FIX_STRATEGY: Dict[str, str] = {
+    "constraint_boundary_limited": "resolve the I/O drive/load boundary before RTL or ECO repair",
+    "constraint_boundary_unresolved": "provide a current source-bound I/O electrical model before repair",
     "cell_delay_limited":  "upsize driver cells; Vt swap (LVT)",
     "net_delay_limited":   "insert buffer; reroute or shorten wire",
     "logic_depth_limited": "pipeline path; restructure RTL",
@@ -65,6 +72,10 @@ class EndpointFinding:
     cell_delay_pct: Optional[float] = None
     net_delay_pct: Optional[float] = None
     logic_depth: Optional[int] = None
+    boundary_role: Optional[str] = None
+    boundary_state: Optional[str] = None
+    boundary_source_sha256: Optional[str] = None
+    boundary_deck_sha256: Optional[str] = None
 
 
 @dataclass
@@ -92,8 +103,13 @@ def classify_endpoint(
     logic_depth: Optional[int],
     skew_dominant: bool = False,
     is_hold: bool = False,
+    boundary_state: Optional[str] = None,
 ) -> str:
     """Classify a single violating endpoint by delay breakdown."""
+    if boundary_state == "CONFLICT":
+        return "constraint_boundary_limited"
+    if boundary_state == "UNRESOLVED":
+        return "constraint_boundary_unresolved"
     if is_hold:
         return "hold_violation"
     if skew_dominant:
@@ -136,20 +152,63 @@ def build_report(endpoints: List[EndpointFinding],
     )
 
 
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_ADMITTED = {"PASS", "RESOLVED", "ADMITTED"}
+
+
+def boundary_state(record: Optional[Dict[str, Any]], role: Optional[str]) -> Optional[str]:
+    """Return PASS/CONFLICT/UNRESOLVED for a source-bound I/O boundary.
+
+    The classifier derives the state from measured values. A caller cannot
+    turn a contradictory boundary into PASS by supplying a verdict label.
+    Missing hashes or values are unresolved and therefore cannot recommend an
+    RTL/ECO edit.
+    """
+    if record is None or role is None:
+        return None
+    if role not in {"input", "output"}:
+        return "UNRESOLVED"
+    if record.get("schema") != "vibeic.sta_constraint_boundary.v1":
+        return "UNRESOLVED"
+    if not all(_SHA256.fullmatch(str(record.get(key, "")).lower())
+               for key in ("source_sha256", "deck_sha256")):
+        return "UNRESOLVED"
+    keys = (("input_transition_ns", "library_max_transition_ns") if role == "input"
+            else ("output_load_pf", "available_driver_max_capacitance_pf"))
+    try:
+        demand, limit = (float(record[key]) for key in keys)
+    except (KeyError, TypeError, ValueError):
+        return "UNRESOLVED"
+    if not all(math.isfinite(value) and value >= 0 for value in (demand, limit)):
+        return "UNRESOLVED"
+    admitted = str(record.get("pad_driver_admission", "")).upper() in _ADMITTED
+    if demand > limit and not admitted:
+        return "CONFLICT"
+    if not admitted:
+        return "UNRESOLVED"
+    return "PASS"
+
+
 def make_finding(endpoint: str, slack_ns: float,
                   cell_delay_pct: Optional[float] = None,
                   net_delay_pct: Optional[float] = None,
                   logic_depth: Optional[int] = None,
-                  skew_dominant: bool = False) -> EndpointFinding:
+                  skew_dominant: bool = False,
+                  boundary_role: Optional[str] = None,
+                  boundary: Optional[Dict[str, Any]] = None) -> EndpointFinding:
     is_hold = slack_ns < 0 and logic_depth is not None and logic_depth <= 2
+    bstate = boundary_state(boundary, boundary_role)
     cat = classify_endpoint(cell_delay_pct, net_delay_pct,
                             logic_depth, skew_dominant=skew_dominant,
-                            is_hold=is_hold)
+                            is_hold=is_hold, boundary_state=bstate)
     return EndpointFinding(
         endpoint=endpoint, slack_ns=slack_ns, category=cat,
         fix_strategy=FIX_STRATEGY[cat],
         cell_delay_pct=cell_delay_pct, net_delay_pct=net_delay_pct,
-        logic_depth=logic_depth,
+        logic_depth=logic_depth, boundary_role=boundary_role,
+        boundary_state=bstate,
+        boundary_source_sha256=(str(boundary.get("source_sha256")) if boundary else None),
+        boundary_deck_sha256=(str(boundary.get("deck_sha256")) if boundary else None),
     )
 
 
@@ -191,11 +250,15 @@ def _cli() -> int:
                         '"logic_depth": ...}, ...]')
     p.add_argument("--wns", type=float)
     p.add_argument("--tns", type=float)
+    p.add_argument("--boundary-json", type=Path,
+                   help="source-bound I/O electrical boundary record")
     p.add_argument("--out-md", type=Path)
     p.add_argument("--out-json", type=Path)
     args = p.parse_args()
     raw = json.loads(args.endpoints_json.read_text(encoding="utf-8"))
-    endpoints = [make_finding(**r) for r in raw]
+    boundary = (json.loads(args.boundary_json.read_text(encoding="utf-8"))
+                if args.boundary_json else None)
+    endpoints = [make_finding(boundary=boundary, **r) for r in raw]
     rep = build_report(endpoints, args.wns, args.tns)
     md = report_to_markdown(rep)
     if args.out_md:

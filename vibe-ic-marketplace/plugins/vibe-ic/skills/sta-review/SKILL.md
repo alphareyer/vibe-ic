@@ -9,7 +9,8 @@ description: Read Static Timing Analysis reports, triage setup/hold/recovery/rem
 > Mandatory program preflight first; AI is the backstop, not the lead.
 
 STA signoff runs in a commercial tool (PrimeTime, Tempus, OpenSTA). The
-deterministic triage (5 endpoint categories → fix strategies) is now in
+deterministic triage (constraint-boundary states plus 5 implementation
+categories → fix strategies) is now in
 `programs/sta_triage_classify.py`; this skill is the wrapper that runs
 it, narrates residual interpretation, and refuses to override the
 program's category counts.
@@ -23,14 +24,20 @@ Before any narrative:
 python3 plugins/vibe-ic/programs/sta_report_check.py \
     --rpt <sta.rpt> --json /tmp/sta_check.json
 
-# 2. Endpoint categorisation (5 categories + fix strategy per category):
+# 2. Endpoint categorisation. For an I/O path, include --boundary-json and
+#    boundary_role=input|output on the corresponding endpoint record.
 python3 plugins/vibe-ic/programs/sta_triage_classify.py \
     --endpoints-json <endpoints.json> \
+    [--boundary-json <source_bound_io_boundary.json>] \
     --wns <wns_ns> --tns <tns_ns> \
     --out-md /tmp/sta_triage.md --out-json /tmp/sta_triage.json
 ```
 
-The program returns counts per category (cell_delay_limited /
+The program first returns `constraint_boundary_limited` or
+`constraint_boundary_unresolved` when source/deck hashes and the electrical
+drive/load model do not establish a legal boundary. It does not recommend RTL
+or ECO changes in those states. Once the boundary is legal, it returns the
+implementation categories (cell_delay_limited /
 net_delay_limited / logic_depth_limited / clock_skew_limited /
 hold_violation) plus the fix strategy per category. **Do not author
 these counts by reading the report.**
