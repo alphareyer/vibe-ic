@@ -430,6 +430,11 @@ def classify(step: Any,
         return ("MISSING_CAPABILITY", "env-unavailable-waiver",
                 "an ENV_UNAVAILABLE-tier waiver was bound to this step, which "
                 "is the flow naming a capability it does not have here")
+    if (status == _T.Verdict.NOT_MEASURED.value
+            and any("NATIVE_TOOL_ABSENT:" in r for r in reasons)):
+        return ("MISSING_CAPABILITY", "native-tool-absent",
+                "the selected native execution route named a required tool "
+                "that is not launchable on this host")
 
     # 7. A consequence of something else on this list. Ordered BEFORE the
     #    design-fact rule on purpose: a gate that ran, and failed, on a step

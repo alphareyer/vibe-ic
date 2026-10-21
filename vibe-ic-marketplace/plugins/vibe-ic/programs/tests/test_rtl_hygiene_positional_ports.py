@@ -331,7 +331,7 @@ def test_native_selected_target_failure_never_uses_available_host(tmp_path, monk
             return subprocess.CompletedProcess(argv, 127 if rejection == 'missing_tool' else 0, '', '')
         monkeypatch.setattr(librelane_contract, 'run_container', broken)
     rc, findings, context = _selected_native_main(tmp_path, monkeypatch)
-    assert rc == 1, context
+    assert rc == (2 if rejection in ('unavailable', 'missing_tool') else 1), context
     assert context['status'] == 'NOT_MEASURED'
     assert any(f['rule'] == 'native-elaboration-unresolved' for f in findings)
     assert len(calls) == (0 if rejection == 'unavailable' else 1)

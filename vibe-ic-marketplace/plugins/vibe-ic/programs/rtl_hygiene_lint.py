@@ -6956,6 +6956,10 @@ def autofix_delayed_blocking_clock_toggle(path: Path) -> Tuple[int, List[str]]:
     return len(sites), [str(site['name']) for site in sites]
 
 
+class NativeElaborationCapabilityAbsent(ValueError):
+    """The selected execution route has no launchable Yosys binary."""
+
+
 def _native_driver_run(script, work, include_dirs, context, selected_image=None):
     """Use this invocation's selected image, or the existing direct tool route."""
     import os
@@ -6987,7 +6991,9 @@ def _native_driver_run(script, work, include_dirs, context, selected_image=None)
             context.update(backend='docker', image_digest=digest,
                            image_digest_kind=kind)
             if not digest:
-                raise ValueError('selected native EDA image unavailable: ' + why)
+                raise NativeElaborationCapabilityAbsent(
+                    'NATIVE_TOOL_ABSENT: selected native EDA image with Yosys '
+                    'is unavailable: ' + why)
             target = image._pinned(selected, digest, kind)
             context['image'] = target
             # A fresh process receipt separates the tool's natural exit from a
@@ -7031,15 +7037,21 @@ sys.exit(record['native_returncode'] if record['native_returncode'] is not None 
             context['native_returncode'] = process.get('native_returncode')
             if process.get('launch_error'):
                 atomic_write_text(work / 'native.log', result.stdout + result.stderr)
-                raise ValueError('selected native EDA target could not launch Yosys: '
-                                 + process['launch_error'])
+                raise NativeElaborationCapabilityAbsent(
+                    'NATIVE_TOOL_ABSENT: selected native EDA target could not '
+                    'launch Yosys: ' + process['launch_error'])
             if process.get('command') != command or process.get('native_returncode') != result.returncode:
                 atomic_write_text(work / 'native.log', result.stdout + result.stderr)
                 raise ValueError('selected native EDA target/tool result mismatch; ' + str(work))
             return result
     context['tool_path'] = shutil.which(command[0])
     context['command'] = command
-    result = _pr.run(command, capture_output=True, text=True)
+    try:
+        result = _pr.run(command, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        raise NativeElaborationCapabilityAbsent(
+            f"NATIVE_TOOL_ABSENT: Yosys is not launchable on the selected "
+            f"local route: {exc}") from exc
     context.update(native_returncode=result.returncode, transport_returncode=result.returncode)
     return result
 
@@ -7128,7 +7140,11 @@ def _native_driver_view(files, top, defines, parameters, include_dirs, output_di
             raise ValueError('native elaboration did not emit the selected top')
     except (OSError, ValueError) as exc:
         context.update(status='NOT_MEASURED', reason=str(exc))
+        if isinstance(exc, NativeElaborationCapabilityAbsent):
+            context.update(reason_class='tool_absent', capability='yosys')
         atomic_write_text(work / 'context.json', json.dumps(context, indent=2))
+        if isinstance(exc, NativeElaborationCapabilityAbsent):
+            raise
         raise ValueError(str(exc)) from exc
     context.update(status='MEASURED', native_json_sha256=hashlib.sha256(
         native_json.read_bytes()).hexdigest())
@@ -8090,6 +8106,7 @@ def main():
     min_sev = sev_order[args.severity]
 
     all_findings: List[Finding] = []
+    native_capability_absent = None
     native_design = None
     if args.top:
         try:
@@ -8097,6 +8114,8 @@ def main():
                 args.files, args.top, args.define, args.parameter, args.include_dir,
                 Path(args.json).parent if args.json else Path.cwd())
         except (OSError, ValueError) as exc:
+            if isinstance(exc, NativeElaborationCapabilityAbsent):
+                native_capability_absent = str(exc)
             all_findings.append(Finding(str(args.files[0]), 1, 'ERROR',
                 'native-elaboration-unresolved', '', str(exc) + '; driver proof NOT_MEASURED'))
     hierarchy = None
@@ -8164,6 +8183,17 @@ def main():
     # below-threshold + invisible combination stops tripping a silent rc=1.
     blocking = [f for f in filtered
                 if f.block_eligible and f.severity in ('ERROR', 'WARN')]
+    if (native_capability_absent and blocking
+            and all(f.rule in ('native-elaboration-unresolved',
+                               'instance-driver-analysis-unresolved')
+                    for f in blocking)):
+        # The findings stay in the legacy list-shaped JSON for downstream
+        # diagnostics, but the process word must describe what was measured:
+        # no native elaboration ran. rc=2 is the flow's blocking non-verdict
+        # channel; EXECUTION_ERROR keeps it INCOMPLETE/NOT_MEASURED rather than
+        # turning a missing tool into either PASS or a design FAIL.
+        print("NOT_MEASURED [EXECUTION_ERROR]: " + native_capability_absent)
+        return 2
     return 1 if blocking else 0
 
 
