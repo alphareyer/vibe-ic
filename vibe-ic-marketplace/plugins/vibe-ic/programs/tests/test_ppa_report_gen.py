@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 import sys
 
 import pytest
@@ -19,6 +20,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import ppa_report_gen as gen  # noqa: E402
 
 SHA = "sha256:" + "a" * 64
+PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[2]
+COMPLIANCE = PLUGIN_ROOT / "skills/ppa-measure/compliance.yaml"
+COMPLIANCE_CHECK = PLUGIN_ROOT / "_shared/skill_compliance_check.py"
 
 
 def _measured(metric="timing.setup.wns_ns", value=-0.124, **over):
@@ -50,6 +54,14 @@ def _corpus(tmp_path, *records):
     return root
 
 
+def _compliance_rc(report: pathlib.Path) -> int:
+    return subprocess.run(
+        [sys.executable, str(COMPLIANCE_CHECK), "--requirements",
+         str(COMPLIANCE), str(report)],
+        text=True, capture_output=True, check=False,
+    ).returncode
+
+
 # ---------------------------------------------------------------- positive
 
 def test_positive_a_well_formed_corpus_generates(tmp_path):
@@ -58,6 +70,101 @@ def test_positive_a_well_formed_corpus_generates(tmp_path):
     assert result["coverage"] == {"total": 2,
                                   "by_status": {"MEASURED": 1,
                                                 "NOT_MEASURED": 1}}
+
+
+def test_positive_the_canonical_assembler_bundle_generates(tmp_path):
+    """Issue #3423: the documented assembler output is a report input."""
+    path = tmp_path / "bundle.json"
+    path.write_text(json.dumps({
+        "schema": gen.metric_contract.BUNDLE_SCHEMA_ID,
+        "records": [_measured(), _not_measured()],
+        "records_digest": "sha256:" + "b" * 64,
+    }), encoding="utf-8")
+
+    rc, result = gen.generate(path)
+
+    assert rc == gen.RC_OK, result
+    assert result["coverage"] == {
+        "total": 2,
+        "by_status": {"MEASURED": 1, "NOT_MEASURED": 1},
+    }
+
+
+def test_unknown_wrapper_does_not_gain_authority_from_a_records_key(tmp_path):
+    """Only the shared closed carrier registry may unwrap a document."""
+    path = tmp_path / "unknown.json"
+    path.write_text(json.dumps({
+        "schema": "vibeic.ppa.unknown.v1",
+        "records": [_measured()],
+    }), encoding="utf-8")
+
+    rc, result = gen.generate(path)
+
+    assert (rc, result["code"]) == (gen.RC_UNDETERMINED, "EMPTY_CORPUS")
+
+
+def test_empty_canonical_bundle_remains_an_explicit_empty_corpus(tmp_path):
+    path = tmp_path / "empty_bundle.json"
+    path.write_text(json.dumps({
+        "schema": gen.metric_contract.BUNDLE_SCHEMA_ID,
+        "records": [],
+        "records_digest": "sha256:" + "c" * 64,
+    }), encoding="utf-8")
+
+    rc, result = gen.generate(path)
+
+    assert (rc, result["code"]) == (gen.RC_UNDETERMINED, "EMPTY_CORPUS")
+
+
+def test_malformed_record_inside_bundle_is_still_refused(tmp_path):
+    path = tmp_path / "bad_bundle.json"
+    path.write_text(json.dumps({
+        "schema": gen.metric_contract.BUNDLE_SCHEMA_ID,
+        "records": [_measured(status="NOT_MEASURED", reason="missing")],
+        "records_digest": "sha256:" + "d" * 64,
+    }), encoding="utf-8")
+
+    rc, result = gen.generate(path)
+
+    assert (rc, result["code"]) == (gen.RC_REFUSED,
+                                    "VALUE_WITHOUT_MEASUREMENT")
+
+
+def test_generated_report_satisfies_the_mandatory_skill_compliance(
+        tmp_path, monkeypatch):
+    """Issue #3425: the required generator and gate share one contract."""
+    monkeypatch.chdir(tmp_path)
+    rc, result = gen.generate(_corpus(pathlib.Path("."), _measured(),
+                                      _not_measured()))
+    assert rc == gen.RC_OK, result
+    report = pathlib.Path("REPORT.md")
+    report.write_text(result["report_md"], encoding="utf-8")
+    assert _compliance_rc(report) == 0
+
+
+@pytest.mark.parametrize("present,missing", [
+    ("## Summary", "## Overview"),
+    ("Verdict authority:", "Authority:"),
+    ("## Evidence", "## Sources"),
+    (SHA, "digest:" + "a" * 64),
+    ("Next: run /ppa-diagnose", "Next step: ppa-diagnose"),
+    ("## Measurements", "## Metric rows"),
+    ("Coverage: MEASURED=", "Counts: MEASURED="),
+    (gen.METRIC_SCHEMA, "vibeic.ppa.metric"),
+    ('"scope": {', '"scope_fields": {'),
+])
+def test_removing_each_required_report_binding_makes_compliance_red(
+        tmp_path, monkeypatch, present, missing):
+    """Each positive result depends on the element the schema names."""
+    monkeypatch.chdir(tmp_path)
+    rc, result = gen.generate(_corpus(pathlib.Path("."), _measured(),
+                                      _not_measured()))
+    assert rc == gen.RC_OK, result
+    assert present in result["report_md"]
+    report = pathlib.Path("REPORT.md")
+    report.write_text(result["report_md"].replace(present, missing),
+                      encoding="utf-8")
+    assert _compliance_rc(report) == 1
 
 
 def test_the_not_measured_row_is_printed_not_omitted(tmp_path):
