@@ -812,8 +812,14 @@ def run_chain(project: Path, netlist_rel: str, clock: str,
             cmd += ["--reset-active-low"]
     cmd.append(f"/work/{fault_input_rel}")
 
-    ec, out, err = _fatpg._run_docker(project, cmd, timeout=timeout,
-                                      pdk_dir=pdk_dir)
+    # This is the ONE supervisor for the actual engine.  The caller waits for
+    # this producer as an ordinary child; it must not wrap us in a second host
+    # process-tree watchdog because Docker/containerd reparents the engine and
+    # makes that outer view look idle while the named container is progressing.
+    # The former timeout remains a recorded budget, not a terminating clock.
+    ec, out, err = _fatpg._run_docker(
+        project, cmd, pdk_dir=pdk_dir, supervised=True,
+        ceiling_s=float(timeout))
     log = (out + "\n" + err)
     produced = project / out_rel
     if ec != 0 or not produced.is_file():
