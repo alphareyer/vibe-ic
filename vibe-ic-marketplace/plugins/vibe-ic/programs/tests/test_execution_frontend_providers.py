@@ -401,8 +401,13 @@ def test_controller_executes_worker_and_validator_reddens_on_output_mutation(tmp
     result=controller.run(context,run)
     receipt_path=run/'frontend_D1/receipt.json'; receipt_bytes=receipt_path.read_bytes()
     receipt=json.loads(receipt_bytes); output=Path(receipt['output_root'])
-    process,=receipt['processes']
-    assert process['component']=='frontend_worker' and process['rc']==0
+    processes=receipt['processes']
+    assert [(process['component'], process['rc']) for process in processes] == [
+        ('frontend_worker', 0),
+        ('phase1_all_l_docs_present_check', 0),
+        ('phase1_expert_parse_track', 4),
+    ]
+    process=processes[0]
     assert process['pid']>0 and process['ended_ns']>process['started_ns']
     assert 'MemoryError' not in ''.join(Path(process[key]).read_text()
                                       for key in ('stdout', 'stderr'))
@@ -422,10 +427,11 @@ def test_controller_executes_worker_and_validator_reddens_on_output_mutation(tmp
     assert expert['ai_subtrack']['expectations']==[]
     assert result['status']=='NOT_MEASURED'
     assert result['candidate_statuses']=={'frontend_D1':'NOT_MEASURED'}
-    assert receipt['reason']=='GATE_EXECUTION_UNBOUND'
-    assert receipt['evidence']['verdict']=='NOT_MEASURED'
-    assert receipt['evidence']['gates']=={
-        name:'NOT_MEASURED' for name in row['mandatory_gate_programs']}
+    # The canonical consumers now run in order.  This intentionally incomplete
+    # fixture reaches the expert-track consumer and is refused on its measured
+    # rc=4 handoff; it is no longer refused because the D1 handoff is unwired.
+    assert receipt['reason']=='PROCESS_ERROR'
+    assert receipt['evidence'] is None
     assert json.loads((run/'comparison.json').read_text())['eligible_arms']==[]
     assert not (run/'selected').exists() and not (run/'adoption.json').exists()
     canonical=output/'canonical.json'; original=canonical.read_bytes()
@@ -435,7 +441,16 @@ def test_controller_executes_worker_and_validator_reddens_on_output_mutation(tmp
     # Their program result cannot qualify D1 without the canonical consumers.
     assert record['producer_result']['status']=='PASS'
     assert 'HANDOFF_EMITTED' in record['producer_steps'][1]['detail']
-    assert receipt['evidence']['outputs']=={'canonical.json':em.digest(canonical)}
+    assert record['missing_outputs']==[]
+    resolved_outputs=set()
+    for spec in row['required_output_contract']:
+        matches=[]
+        for alternative in str(spec).split(' OR '):
+            matches.extend(path for path in output.glob(alternative.strip())
+                           if path.is_file())
+        assert matches, spec
+        resolved_outputs.update(str(path.relative_to(output)) for path in matches)
+    assert set(record['canonical_outputs']) == resolved_outputs
     arm,=registry.adapters('D1')
     # The real producer recorder stamped its own writes, not a copied claim.
     import _phase1_producer_identity as identity
@@ -457,39 +472,19 @@ def test_controller_executes_worker_and_validator_reddens_on_output_mutation(tmp
         worker.produce_d1(wrong_input, output)
     assert canonical.read_bytes()==original
     assert manifest.read_bytes()==original_manifest
-    # Forged SDC successes cannot qualify any D1 gate.
-    sdc=output/'reports/phase2/sdc_check.json'; sdc.parent.mkdir(parents=True)
-    sdc.write_text(json.dumps({'program':'sdc_syntax_check','passed':True}))
-    (output/'reports/sdc_validator.json').write_text(json.dumps(
-        {'verdict':'PASS','exit_code':0,'issues':[]}))
-    record['producer_result']['status']='FAIL'
-    canonical.write_text(json.dumps(record))
-    assert arm.validate(output,context.binding()).verdict=='FAIL'
-    record['producer_result']['status']='PASS'
-    record['producer_result']['detail']='forged qualification without AI evidence'
-    canonical.write_text(json.dumps(record))
-    assert em.digest(canonical)!=receipt['evidence']['outputs']['canonical.json']
+    # Mutating a declared producer output cannot turn this rejected D1 arm
+    # into an eligible candidate.  The strict step binding catches the changed
+    # output before any later frontend row can borrow unrelated evidence.
+    l1=output/'phase1/generated_docs/L1_DATASHEET.json'
+    l1.write_text(l1.read_text()+'\n')
     changed=arm.validate(output,context.binding())
-    assert changed.verdict=='NOT_MEASURED'
-    assert changed.gates==receipt['evidence']['gates']
+    assert changed.verdict!='PASS'
     choice={'arm_id':'frontend_D1','receipt_sha256':em.digest(receipt_path),
             'rationale':'mutation refusal control','reviewer':'test','binding':context.binding()}
     with pytest.raises(em.Refusal, match='AI_CHOICE_INELIGIBLE'):
         controller.adopt(context,run,choice)
     assert not (run/'selected').exists()
     assert json.loads((run/'adoption.json').read_text())['status']!='ADOPTED'
-    # Missing, unknown and malformed canonical records also cannot qualify.
-    for invalid in (None, [], {'schema':'unknown'},
-                    {**record, 'producer_result':'StepResult(status=PASS)'}):
-        if invalid is None:
-            canonical.unlink()
-        else:
-            canonical.write_text(json.dumps(invalid))
-        rejected=arm.validate(output,context.binding())
-        assert rejected.verdict=='NOT_MEASURED'
-        assert rejected.gates==receipt['evidence']['gates']
-    canonical.write_bytes(original)
-    assert arm.validate(output,context.binding()).verdict=='NOT_MEASURED'
     assert receipt_path.read_bytes()==receipt_bytes
 
 def test_step8_public_controller_eligible_and_adopted(tmp_path):
@@ -773,6 +768,41 @@ def test_step7_provider_runs_declared_consumers_and_requires_every_output(
     assert set(accepted.gates.values()) == {'PASS'}
 
     matrix.unlink()
+    refused = adapter.validate(tmp_path, facts)
+    assert refused.verdict == 'NOT_MEASURED'
+
+
+def test_d1_provider_runs_declared_consumers_and_requires_every_output(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import execution_frontend_worker as worker
+    import flow_compliance_check
+
+    registry = em.Registry()
+    p.register_factories(registry, step_ids=('D1',))
+    adapter, = registry.adapters('D1')
+    portfolio = em.load_portfolio()
+    row = next(item for item in portfolio['steps'] if item['id'] == 'D1')
+    assert [component.name for component in adapter.components] == [
+        'frontend_worker', *row['mandatory_gate_programs']]
+
+    for spec in p.CANONICAL_ROWS['D1']:
+        rel = str(spec).replace('*', 'neutral')
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}\n' if path.suffix == '.json' else 'measured output\n')
+    paths = worker._output_paths(tmp_path, p.CANONICAL_ROWS['D1'])
+    worker._write_step_binding(tmp_path, 'D1', paths)
+    monkeypatch.setattr(
+        flow_compliance_check, 'check_step',
+        lambda *args, **kwargs: SimpleNamespace(status='PASS'))
+    facts = {'step_id': 'D1', 'source': 'test'}
+    accepted = adapter.validate(tmp_path, facts)
+    assert accepted.verdict == 'PASS'
+    assert set(accepted.gates) == set(row['mandatory_gate_programs'])
+    assert set(accepted.gates.values()) == {'PASS'}
+
+    (tmp_path / 'phase1/generated_docs/L1_DATASHEET.json').unlink()
     refused = adapter.validate(tmp_path, facts)
     assert refused.verdict == 'NOT_MEASURED'
 

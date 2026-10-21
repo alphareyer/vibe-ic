@@ -149,6 +149,26 @@ def test_writer_no_prior_comment_stamps_marker(tmp_path):
     assert summary[_AUTO_REL]["skipped"] == "ZERO_UNPROMOTED_MARKER"
 
 
+def test_writer_emits_canonical_output_when_nothing_is_promoted(tmp_path):
+    """D1 owns the canonical catalogue even when its measured population is
+    empty; later substance gates, rather than a missing producer artefact,
+    decide whether that empty catalogue is acceptable for the design.
+    """
+    project = tmp_path / "no_promoted_literals"
+    _seed_l_haystack(project, [])
+    auto = _write_auto_with_unbackfilled(
+        project, ["NOT_IN_TYPED_DOCS"], preseed_comment=None)
+    canonical = _pl.phase1_extraction_patterns_file(project)
+
+    P1._seed_canonical_from_backfilled_subset(project, auto, canonical)
+
+    payload = json.loads(canonical.read_text(encoding="utf-8"))
+    assert list(payload) == ["_comment"]
+    assert "coverage denominator" in payload["_comment"]
+    remaining = json.loads(auto.read_text(encoding="utf-8"))
+    assert remaining["datasheet.txt"][0]["literal"] == "NOT_IN_TYPED_DOCS"
+
+
 # ---------------------------------------------------------------------------
 # HEADLINE: the real empty-companion shape → SKIP exit 0 (honest N/A).
 # ---------------------------------------------------------------------------

@@ -55618,11 +55618,6 @@ def _seed_canonical_from_backfilled_subset(project: Path,
     except Exception as e:
         print(f"      seed-canonical: cannot rewrite {auto_path.name}: {e}")
 
-    if not promoted:
-        print(f"      → no auto literals were backfilled into typed L docs; "
-              f"{auto_path.name} kept (unpromoted={n_in})")
-        return
-
     canonical_payload = {
         "_comment": (
             "Canonical extraction patterns auto-seeded by phase1_one_shot_"
@@ -55637,6 +55632,11 @@ def _seed_canonical_from_backfilled_subset(project: Path,
         canonical_path.write_text(
             json.dumps(canonical_payload, ensure_ascii=False, indent=2),
             encoding="utf-8")
+        if not promoted:
+            print(f"      → seeded empty {canonical_path.name}; no auto "
+                  f"literals were backfilled into typed L docs "
+                  f"(unpromoted {n_in} kept in {auto_path.name})")
+            return
         print(f"      → seeded {canonical_path.name} with "
               f"{n_promoted}/{n_in} backfilled literals "
               f"(unpromoted {n_in - n_promoted} kept in {auto_path.name})")

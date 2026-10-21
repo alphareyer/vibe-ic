@@ -162,9 +162,35 @@ def produce_d1(project,output,**k):
                 f'docs rc={rc_extract}; expert track rc={rc_track}',
                 reason_class='no_population' if verdict == 'NOT_MEASURED' else '')
     require_issued_frontend(project, output, 'D1', parameters)
+    # Publish the private producer's exact regular-file outputs into the arm
+    # root that the declared D1 consumers execute against.  The staged tree
+    # began as only the issued census, so every non-input file here was
+    # produced by this invocation.  Inputs are copied too, because several D1
+    # gates compare generated claims with the original source documents.
+    for path in sorted(staged.rglob('*')):
+        if not path.is_file() or path.is_symlink():
+            continue
+        rel = path.relative_to(staged)
+        target = output / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if target.is_symlink() or target.read_bytes() != path.read_bytes():
+                raise RuntimeError(f'D1: publication collision: {rel}')
+            continue
+        shutil.copyfile(path, target)
+    contract = _flow_contract('D1')
+    paths = _output_paths(output, contract.get('required_outputs') or ())
+    expected = {str(spec) for spec in contract.get('required_outputs') or ()}
+    missing = sorted(expected - set(paths.values()))
+    if value.status == 'PASS' and missing:
+        raise RuntimeError(f'D1: passing producer outputs incomplete: {missing}')
+    if not missing:
+        _write_step_binding(output, 'D1', paths)
+    require_issued_frontend(project, output, 'D1', parameters)
     return _write('D1', output, producer, producer_result=asdict(value),
                   producer_steps=[asdict(row) for row in rows],
-                  reason='producer executed; D1 handoff qualification is not connected')
+                  canonical_outputs=sorted(paths), missing_outputs=missing,
+                  reason='producer executed; canonical D1 consumers own qualification')
 
 
 def _output_paths(root, required):

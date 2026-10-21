@@ -370,39 +370,6 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
             required=tuple(contract.get('required_outputs') or ())
             concrete=_concrete_outputs(root, required)
             artifacts={rel:digest(root/rel) for rel in concrete}
-            if _row == 'D1':
-                # This worker reaches the real Phase-1 expert handoff, but its
-                # canonical outputs/gates are not connected to adoption yet.
-                # Never apply Step 8's SDC reports to these 32 D1 obligations.
-                canonical = root / 'canonical.json'
-                record = None
-                if canonical.is_file() and not canonical.is_symlink():
-                    artifacts = {'canonical.json': digest(canonical)}
-                    try:
-                        record = json.loads(canonical.read_text())
-                    except (OSError, ValueError, TypeError):
-                        pass
-                else:
-                    artifacts = {}
-                producer = record.get('producer_result') if isinstance(record, dict) else None
-                typed = (isinstance(record, dict) and
-                         record.get('schema') == 'frontend_worker_output/1' and
-                         record.get('step_id') == 'D1' and
-                         record.get('producer') == 'phase1_one_shot_runner._run_docs_mode+run_phase1_second_track' and
-                         record.get('result') == 'NOT_MEASURED' and
-                         isinstance(producer, dict) and
-                         producer.get('name') == 'phase1' and
-                         producer.get('status') in ('PASS', 'FAIL', 'NOT_MEASURED',
-                                                    'NOT_APPLICABLE', 'INCOMPLETE') and
-                         type(producer.get('duration_s')) in (int, float) and
-                         isinstance(producer.get('detail'), str) and
-                         isinstance(producer.get('extras'), dict) and
-                         isinstance(producer.get('reason_class'), str))
-                verdict = 'FAIL' if typed and producer['status'] == 'FAIL' else 'NOT_MEASURED'
-                return Evidence(facts, verdict,
-                                {name: 'NOT_MEASURED' for name in _gate_names}, artifacts,
-                                detail=('D1_CANONICAL_HANDOFF_NOT_CONNECTED' if typed else
-                                        'D1_CANONICAL_RECORD_MISSING_OR_INVALID'))
             if _row == '0.5ic':
                 try:
                     before_chain = em.consume_frontend_chain(root, facts)
@@ -536,7 +503,7 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
             closure += tuple(source_path.with_name(name) for name in (
                 'execution_step4.py', 'execution_step4_icarus.py',
                 'execution_step4_verilator.py'))
-        if row in ('4', '7'):
+        if row in ('D1', '4', '7'):
             closure += tuple(source_path.with_name(name + '.py') for name in portfolio_gates)
         if row == '8':
             closure += tuple(source_path.with_name(name) for name in ('sdc_syntax_check.py','sdc_validator_check.py','sdc_exception_correlation_check.py','derived_clock_sdc_required_check.py'))
@@ -559,7 +526,7 @@ def register_factories(registry, *, step_ids=None, project=None, parameters=None
         worker_budget = {'timeout_s': 120} if row in ('D1', '0.5ic') else {}
         components = [Component('frontend_worker', ('python3',worker,'--step',row,'--inputs','{inputs}','--outputs','{outputs}',
                        *(('--manifest','{inputs}/issued_manifest.json') if row == '8' else ())), **worker_budget)]
-        if row in ('0.5ic', '7', '8'):
+        if row in ('D1', '0.5ic', '7', '8'):
             def commands(node):
                 if isinstance(node, dict):
                     for key, value in node.items():
