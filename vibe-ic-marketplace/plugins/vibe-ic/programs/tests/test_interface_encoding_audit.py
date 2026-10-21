@@ -204,6 +204,69 @@ def test_predicate_receipt_is_fresh_source_evidence_not_authored_pass(tmp_path):
     assert (tmp_path / 'out/encoding_audit_report.json').read_bytes() == report_bytes
 
 
+def test_issue3368_scalar_applicability_replay_cannot_hide_current_mismatch(
+        tmp_path, monkeypatch):
+    import _rtl_audit_applicability as applicability
+    import flow_compliance_check as flow
+
+    scalar = '''
+module source(input logic en, input logic rst, output logic ready);
+  assign ready = en & ~rst;
+endmodule
+module sink(input logic ready, output logic accepted);
+  assign accepted = ready;
+endmodule
+module neutral;
+  logic ready;
+  source a(.en(1'b1), .rst(1'b0), .ready(ready));
+  sink b(.ready(ready), .accepted());
+endmodule
+'''
+    result, report = run_cli(tmp_path, {'neutral.sv': scalar}, 'neutral')
+    assert result.returncode == 0, result.stdout + result.stderr
+    initial = _consume_encoding_receipt(tmp_path)
+    if report['summary']['verdict'] == 'PASS':
+        assert initial.state == 'PASS'
+    else:
+        assert report['summary']['verdict'] == 'INCONCLUSIVE'
+        assert initial.state == 'NOT_MEASURED'
+
+    current = (
+        "module producer(output reg [5:0] count); initial count <= 6'd0; endmodule\n"
+        "module consumer(input [5:0] count); "
+        "always @* if(count == 6'b110000) begin end endmodule\n"
+        "module neutral; wire [5:0] count; producer p(.count(count)); "
+        "consumer c(.count(count)); endmodule\n")
+    rtl = tmp_path / 'rtl'
+    (rtl / 'neutral.sv').write_text(current)
+
+    # Reproduce the old replay attempt: rewrite only the receipt's declared
+    # source identity to match the current bytes.  The consumer must derive
+    # applicability from the current hierarchy, not trust these declarations.
+    current_source = applicability.source_census(rtl)
+    report['source'] = current_source
+    (tmp_path / 'out/encoding_audit_report.json').write_text(
+        json.dumps(report, indent=2) + '\n')
+    stale = _consume_encoding_receipt(tmp_path)
+    assert stale.state == 'NOT_MEASURED', stale
+
+    project = tmp_path / 'project'
+    project_rtl = project / 'phase2/stage1/rtl'
+    project_rtl.mkdir(parents=True)
+    (project_rtl / 'neutral.v').write_text(current)
+    docs = project / 'phase1/generated_docs'
+    docs.mkdir(parents=True)
+    (docs / 'L9_INTEGRATION_SPEC.json').write_text(
+        json.dumps({'top_module': 'neutral'}))
+    monkeypatch.setattr(flow, '_STRUCTURAL_RTL_GATES',
+                        ('interface_encoding_audit',))
+    records = []
+    flow._run_structural_rtl_gates(project, records_out=records)
+    assert len(records) == 1
+    assert records[0]['verdict'] == 'FAIL', records
+    assert records[0]['evidence']['exit_code'] == 1
+
+
 def test_p0_consumes_the_native_predicate_proof_without_a_waiver(tmp_path, monkeypatch):
     import flow_compliance_check as flow
     project = tmp_path / 'project'
