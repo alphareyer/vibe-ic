@@ -175,12 +175,23 @@ def test_a_word_merely_CONTAINING_a_term_is_not_the_subject(tmp_path, decoy):
     assert _emit(proj, "L24")["applicability"] == "NOT_APPLICABLE"
 
 
-def test_an_unregistered_layer_is_untouched(tmp_path):
-    """Every other layer keeps the APPLICABLE skeleton it has today."""
+def test_a_layer_without_subject_routing_or_extractor_is_untouched(tmp_path):
+    """Layers with neither mechanism keep the APPLICABLE skeleton."""
     proj = _project(tmp_path, spec_md="It multiplies.\n")
-    for code in ("L20", "L21", "L22", "L23"):
+    for code in ("L21", "L22"):
         assert code not in P._INPUT_SUBJECT_TERMS
         assert code not in P._LAYER_EXTRACTORS
+        doc = _emit(proj, code)
+        assert doc["applicability"] == "APPLICABLE", code
+        assert doc["extraction_status"] == "NOT_YET_EXTRACTED", code
+
+
+def test_registered_extractors_do_not_invent_content(tmp_path):
+    """A registered producer still leaves unrelated input unextracted."""
+    proj = _project(tmp_path, spec_md="It multiplies.\n")
+    for code in ("L20", "L23"):
+        assert code not in P._INPUT_SUBJECT_TERMS
+        assert code in P._LAYER_EXTRACTORS
         doc = _emit(proj, code)
         assert doc["applicability"] == "APPLICABLE", code
         assert doc["extraction_status"] == "NOT_YET_EXTRACTED", code

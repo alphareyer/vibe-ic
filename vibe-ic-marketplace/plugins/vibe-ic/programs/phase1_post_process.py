@@ -554,6 +554,12 @@ def _l23_extract(project_dir: Path) -> Optional[Dict[str, Any]]:
     return extract_security_requirements(project_dir)
 
 
+def _l20_extract(project_dir: Path) -> Optional[Dict[str, Any]]:
+    """L20's explicit typed scan topology, via its canonical extractor."""
+    from l20_dft_scan_topology_extract import extract_dft_scan_topology
+    return extract_dft_scan_topology(project_dir)
+
+
 def _l24_extract(project_dir: Path) -> Optional[Dict[str, Any]]:
     """L24's requirement rows, via its own extractor module."""
     from l24_signoff_requirements_extract import extract_signoff_requirements
@@ -569,6 +575,7 @@ def _l25_extract(project_dir: Path) -> Optional[Dict[str, Any]]:
 #: Layer -> source extractor. A layer without an entry keeps its skeleton.
 #: L23 preserves typed source clauses; L24 extracts signoff requirements.
 _LAYER_EXTRACTORS: Dict[str, Any] = {
+    "L20": _l20_extract,
     "L23": _l23_extract,
     "L24": _l24_extract,
 }
@@ -809,6 +816,26 @@ def emit_l_doc_skeleton(l_doc_code: str,
         out["evidence"] = extracted.get("extraction_evidence", {})
         out["source_documents"] = extracted.get("source_documents", [])
         out["extraction_evidence_scan"] = extracted.get("scan", {})
+    elif extracted and str(l_doc_code or "").upper() == "L20":
+        sources = extracted.get("scan_topology_sources", [])
+        out["source_documents"] = sorted({
+            source.get("document") for source in sources
+            if isinstance(source, dict) and source.get("document")})
+        evidence: Dict[str, List[Dict[str, str]]] = {}
+        for chain in extracted.get("scan_chains", []):
+            if not isinstance(chain, dict) or not isinstance(chain.get("source"), dict):
+                continue
+            source = chain["source"]
+            document = source.get("document")
+            if not document:
+                continue
+            evidence.setdefault(document, []).append({
+                "literal": str(chain.get("name", "")),
+                "label": (f"scan topology {source.get('section', '')} "
+                          f"row {source.get('row_line', '')}").strip(),
+            })
+        out["evidence"] = evidence
+        out["extraction_evidence_scan"] = extracted.get("scan_topology_scan")
     elif extracted:
         out["extraction_evidence_scan"] = extracted.get(
             "signoff_requirements_scan")
