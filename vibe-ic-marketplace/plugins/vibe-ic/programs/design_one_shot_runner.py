@@ -22770,6 +22770,11 @@ def _step_dft_insertion(project: Path, top_name: str, container: str,
             # design whose L20 has no DFT topology.
             _scan_meta["authorized_by_l20_contract"] = True
             _scan_json.write_text(json.dumps(_scan_meta, indent=2) + "\n")
+            _scan_outputs = ["phase2/stage2/dft/scan_netlist.v",
+                             "reports/phase2/dft/scan_chain.json"]
+            if isinstance(_scan_meta.get("scan_mode_constraint"), dict):
+                _scan_outputs.append(
+                    _scan_meta["scan_mode_constraint"]["path"])
             results.append(StepResult(
                 "dft_scan_insertion", "PASS", time.time() - _scan_t0,
                 f"fault chain: {_scan_meta.get('internal_chain_length')} "
@@ -22780,8 +22785,7 @@ def _step_dft_insertion(project: Path, top_name: str, container: str,
                 f"{_scan_meta.get('area_instances_before')}→"
                 f"{_scan_meta.get('area_instances_after')} instances "
                 f"({_scan_meta.get('area_instances_delta_pct')}%)",
-                output_files=["phase2/stage2/dft/scan_netlist.v",
-                              "reports/phase2/dft/scan_chain.json"]))
+                output_files=_scan_outputs))
         else:
             if _scan_rc == 0 and (_scan_meta or {}).get("published"):
                 _scan_rc = 1

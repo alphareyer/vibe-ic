@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """dft_signoff_check.py — aggregate DFT sign-off gate (foundry / ATE bar).
 
-Rolls the three DFT-depth checks into ONE tapeout-facing verdict:
+Rolls the four DFT-depth checks into ONE tapeout-facing verdict:
 
   1. STUCK-AT   : measured stuck-at coverage >= foundry floor
                   (delegated to dft_atpg_coverage_check — recomputed, never
@@ -25,6 +25,11 @@ Rolls the three DFT-depth checks into ONE tapeout-facing verdict:
                   bsdl_plan evidence FAILs, unless the whole step was
                   disclosed-skipped (see the §4.05 block below, which this
                   program short-circuits on before it reaches BSDL at all).
+  4. SCAN TIMING: when L20 declares a scan-shift frequency, require the
+                  dedicated scan-mode SDC and scan-chain receipt to remain
+                  bound to the exact current L20 bytes. A design with no
+                  declared scan frequency records an explicit SKIP. The
+                  functional-mode SDC is never replaced.
 
 §4.05 (never an UNDISCLOSED pass on absence):
   * absent stuck-at evidence, no disclosed sentinel → FAIL
@@ -57,6 +62,7 @@ Overall PASS iff:
                                                           demotes ENGINE_LIMITED
                                                           to FAIL)
   AND bsdl ∈ {PASS, SKIP}
+  AND scan_shift_timing ∈ {PASS, SKIP}
 
 BLOCKING GATE: a FAIL verdict returns rc=1 and is meant to STOP tapeout sign-off;
 PASS returns rc=0, and a disclosed step-11 self-skip returns rc=2 (scored as a
@@ -103,8 +109,16 @@ except Exception:  # pragma: no cover - path fallback
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import dft_signoff_common  # type: ignore
 
+try:
+    import fault_scan_chain_insert as _scan
+    import l_doc_consumer_contract as _ldoc
+except Exception:  # pragma: no cover - path fallback
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import fault_scan_chain_insert as _scan  # type: ignore
+    import l_doc_consumer_contract as _ldoc  # type: ignore
+
 _PROGRAM = "dft_signoff_check"
-_VERSION = "1.0.0"
+_VERSION = "1.1.0"
 
 FOUNDRY_FLOOR_DEFAULT = getattr(_sa, "FOUNDRY_FLOOR_DEFAULT", 95.0)
 TRANSITION_TARGET_DEFAULT = 90.0
@@ -358,6 +372,53 @@ def evaluate_bsdl(bsdl_plan: Optional[dict]) -> dict:
                         f"bsdl_present={bsdl_plan.get('bsdl_present')})"]}
 
 
+def evaluate_scan_shift_timing(project: Path) -> dict:
+    """Consume the current L20-bound scan-mode SDC when frequency is owed.
+
+    A design without a declared scan frequency has no scan-shift timing
+    contract to sign off and is an explicit SKIP. Once L20 declares one, the
+    dedicated SDC and the scan-chain receipt are BLOCKING inputs; functional
+    timing constraints are never substituted or modified here.
+    """
+    binding, problems = _scan.load_l20_scan_contract(project)
+    if binding is None:
+        _path, doc = _ldoc.load_l_doc(project, "L20")
+        fields = _ldoc.l_doc_fields(doc) if isinstance(doc, dict) else {}
+        chains = fields.get("scan_chains") if isinstance(fields, dict) else []
+        declared = any(
+            isinstance(chain, dict) and any(
+                chain.get(key) not in (None, "") for key in (
+                    "frequency_mhz", "shift_frequency_mhz", "shift_freq_mhz"))
+            for chain in (chains if isinstance(chains, list) else []))
+        if not declared:
+            return {"status": "SKIP", "required": False,
+                    "reasons": ["L20 declares no scan-shift frequency"]}
+        return {"status": "FAIL", "required": True,
+                "reasons": problems or ["declared scan timing contract is invalid"]}
+    chain = binding.get("chain") or {}
+    if chain.get("frequency_mhz") is None:
+        return {"status": "SKIP", "required": False,
+                "reasons": ["L20 declares no scan-shift frequency"]}
+    receipt_path = project / "reports/phase2/dft/scan_chain.json"
+    receipt = _load_json(receipt_path)
+    if receipt is None:
+        return {"status": "FAIL", "required": True,
+                "reasons": ["scan_chain.json is missing or unparseable"]}
+    if receipt.get("published") is not True:
+        return {"status": "FAIL", "required": True,
+                "reasons": ["scan_chain.json is not a published scan result"]}
+    current, reason = _scan.l20_binding_is_current(project, receipt)
+    constraint = receipt.get("scan_mode_constraint")
+    if not current:
+        return {"status": "FAIL", "required": True,
+                "constraint": constraint, "reasons": [reason]}
+    return {
+        "status": "PASS", "required": True,
+        "constraint": constraint,
+        "reasons": ["current scan-mode SDC is bound to L20 and consumed by DFT sign-off"],
+    }
+
+
 # ── aggregate ──────────────────────────────────────────────────────────
 
 def audit(project: Path,
@@ -396,6 +457,8 @@ def audit(project: Path,
                                      project=project)
     # 3) BSDL
     bsdl = evaluate_bsdl(bsdl_plan)
+    # 4) scan-shift timing — BLOCKING only when L20 declares a frequency.
+    scan_shift_timing = evaluate_scan_shift_timing(project)
 
     # The stuck-at dimension is non-blocking for exactly the dispositions the
     # coverage gate's OWN rc mapping treats as rc=0 — read from the SINGLE
@@ -406,8 +469,10 @@ def audit(project: Path,
     stuck_ok = _sa.stuck_at_signoff_passes(stuck_at["status"])
     trans_ok = transition["status"] in ("PASS", "ENGINE_LIMITED")
     bsdl_ok = bsdl["status"] in ("PASS", "SKIP")
+    scan_timing_ok = scan_shift_timing["status"] in ("PASS", "SKIP")
 
-    overall = "PASS" if (stuck_ok and trans_ok and bsdl_ok) else "FAIL"
+    overall = "PASS" if (stuck_ok and trans_ok and bsdl_ok
+                          and scan_timing_ok) else "FAIL"
 
     return {
         "program": _PROGRAM,
@@ -418,6 +483,7 @@ def audit(project: Path,
         "stuck_at": stuck_at,
         "transition": transition,
         "bsdl": bsdl,
+        "scan_shift_timing": scan_shift_timing,
         "verdict": overall,
         "status": overall,
     }
@@ -500,7 +566,9 @@ def main(argv: Optional[list] = None) -> int:
 
     print(f"{_PROGRAM}: stuck_at={report['stuck_at']['status']} "
           f"transition={report['transition']['status']} "
-          f"bsdl={report['bsdl']['status']} verdict={report['verdict']}",
+          f"bsdl={report['bsdl']['status']} "
+          f"scan_shift_timing={report['scan_shift_timing']['status']} "
+          f"verdict={report['verdict']}",
           file=sys.stderr)
     return 0 if report["verdict"] == "PASS" else 1
 

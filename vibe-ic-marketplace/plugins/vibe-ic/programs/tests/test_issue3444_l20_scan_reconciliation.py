@@ -121,11 +121,11 @@ def test_declared_clock_must_equal_step11_clock(tmp_path):
     assert "does not match Step 11 clock" in "; ".join(problems)
 
 
-def test_declared_shift_frequency_is_refused_until_an_actuator_exists(tmp_path):
+def test_declared_shift_frequency_is_canonicalized_for_the_actuator(tmp_path):
     project = _project(tmp_path, [_chain(frequency_mhz=4)])
     binding, problems = S.load_l20_scan_contract(project, "clk", 2)
-    assert binding is None
-    assert "no shift-frequency actuator" in "; ".join(problems)
+    assert problems == []
+    assert binding["chain"]["frequency_mhz"] == "4.0"
 
 
 def test_reconciliation_rejects_measured_length_port_and_clock_mutations(tmp_path):
