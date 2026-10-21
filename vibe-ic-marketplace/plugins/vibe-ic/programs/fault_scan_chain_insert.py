@@ -989,7 +989,10 @@ def run_chain(project: Path, netlist_rel: str, clock: str,
                 f"losslessly (they carry real nets). Scan insertion on a design "
                 f"with a driven bidirectional top-level port is an open backlog "
                 f"item (bidirectional boundary-scan cell).")
-        return 1, err_report
+        # Preserve the supervisor's semantic rc (notably RC_STALLED=199) so
+        # the parent can distinguish a measured stall from an ordinary tool
+        # failure. A zero exit with a missing output remains a producer failure.
+        return ec if ec != 0 else 1, err_report
 
     chained_text = produced.read_text(encoding="utf-8", errors="replace")
     if stripped_inout:
@@ -1122,7 +1125,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", default=SCAN_JSON_REL,
                    help=f"Report JSON path relative to project "
                         f"(default {SCAN_JSON_REL})")
-    p.add_argument("--timeout", type=int, default=900)
+    p.add_argument(
+        "--timeout", type=int, default=900,
+        help=("Recorded runtime ceiling in seconds. Crossing it is reported "
+              "but does not terminate a progressing fault-chain container; "
+              "the container-aware stall supervisor remains authoritative."))
     args = p.parse_args(argv)
 
     project = Path(args.project_dir).resolve()
