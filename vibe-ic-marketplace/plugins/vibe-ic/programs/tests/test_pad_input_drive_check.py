@@ -287,6 +287,26 @@ def test_pad_drive_boundary_identity_matrix(
     assert record["verdict"] == producer_verdict, record
 
 
+def test_core_pad_translation_is_accepted_only_with_its_exact_deck_lines(tmp_path):
+    """A producer-bound PAD->core model is valid, but its deck is mandatory."""
+    project = _die(tmp_path)
+    path = project / SE.IO_PAD_RECORD
+    pad = json.loads(path.read_text())
+    pad["pad_instances"] = {
+        "u_clk": {"port": "clk", "master": "quartz_io__in",
+                  "terminal": "PAD", "core_pin": "Y", "direction": "input"}}
+    path.write_text(json.dumps(pad))
+    text, record, rc, gate, step23 = _stage_drive(
+        project, "neutral_core", record_state="full", with_drive=True)
+    assert record["verdict"] == "PAD_TRANSLATED"
+    assert "set_driving_cell" in text
+    assert (rc, gate["verdict"], step23.status) == (0, "PASS", "PASS")
+    deck = project / DECK
+    deck.write_text(deck.read_text().replace(record["sdc_lines"][0], ""))
+    rc, gate = _run(project)
+    assert (rc, gate["verdict"]) == (1, "FAIL")
+
+
 def test_an_absent_record_on_a_die_is_rc2(tmp_path):
     rc, doc = _run(_die(tmp_path))
     assert (rc, doc["verdict"]) == (2, "NOT_MEASURED")

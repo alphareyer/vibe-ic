@@ -344,6 +344,334 @@ def _signal_pad_instances(record: Dict[str, object]) -> Dict[str, object]:
             if not pad.get("kind")}
 
 
+def _liberty_capacitance_unit_pf(text: str) -> Optional[float]:
+    """Return the pF represented by one Liberty capacitance unit."""
+    match = re.search(
+        r"\bcapacitive_load_unit\s*\(\s*([0-9.eE+-]+)\s*,\s*([fpnu]f)\s*\)",
+        text, re.I)
+    if not match:
+        return None
+    try:
+        number = float(match.group(1))
+    except ValueError:
+        return None
+    scale = {"ff": 1e-3, "pf": 1.0, "nf": 1e3, "uf": 1e6}.get(
+        match.group(2).lower())
+    return number * scale if scale is not None and number > 0 else None
+
+
+def _core_pad_models(project: Path, container: str = "",
+                     to_container_path: Optional[Callable[[str, str], str]] = None
+                     ) -> Tuple[Optional[Dict[str, Dict[str, object]]], Dict[str, object]]:
+    """Resolve the producer-selected pad cells at their core-facing pins.
+
+    Input ports need a real PAD -> core-output timing arc.  Output ports need
+    the core-facing input capacitance from every linked view that contains the
+    selected master.  The result is bound to the producer record and Liberty
+    bytes; a name-only pad guess is never admitted.
+    """
+    import hashlib
+    import json
+
+    basis: Dict[str, object] = {"record": IO_PAD_RECORD}
+    try:
+        raw = (Path(project) / IO_PAD_RECORD).read_bytes()
+        record = json.loads(raw)
+    except (OSError, ValueError, TypeError):
+        basis["why"] = "pad producer record is absent or unreadable"
+        return None, basis
+    basis["record_sha256"] = hashlib.sha256(raw).hexdigest()
+    pads = _signal_pad_instances(record) if isinstance(record, dict) else {}
+    basis["signal_pad_instance_count"] = len(pads)
+    required = ("port", "master", "terminal", "core_pin", "direction")
+    incomplete = [name for name, pad in pads.items()
+                  if any(not isinstance(pad.get(key), str) or not pad.get(key)
+                         for key in required)]
+    if not pads or incomplete:
+        basis["why"] = ("no signal pad instances" if not pads else
+                        "incomplete signal pad instances: " + ", ".join(incomplete))
+        return None, basis
+    libs = record.get("io_library_liberty")
+    if not isinstance(libs, list) or not libs:
+        basis["why"] = "pad producer names no linked IO Liberty"
+        return None, basis
+
+    views: List[Dict[str, object]] = []
+    cell_views: Dict[str, List[Tuple[str, str, float]]] = {}
+    selected = {str(pad["master"]) for pad in pads.values()}
+    for path in sorted(str(item) for item in libs if isinstance(item, str)):
+        text, where = _read_pdk_file(path, container, to_container_path)
+        if text is None:
+            views.append({"liberty": path, "why": "NOT_READ"})
+            continue
+        sha = hashlib.sha256(text.encode()).hexdigest()
+        unit_pf = _liberty_capacitance_unit_pf(text)
+        found = []
+        for cell, body in _liberty_blocks(text, "cell"):
+            if cell in selected:
+                cell_views.setdefault(cell, []).append((path, body, unit_pf or 0.0))
+                found.append(cell)
+        views.append({"liberty": path, "read_from": where, "sha256": sha,
+                      "capacitance_unit_pf": unit_pf,
+                      "selected_masters": sorted(found)})
+    basis["views"] = views
+
+    models: Dict[str, Dict[str, object]] = {}
+    errors: List[str] = []
+    for name, pad in sorted(pads.items()):
+        master = str(pad["master"])
+        terminal = str(pad["terminal"])
+        core_pin = str(pad["core_pin"])
+        direction = str(pad["direction"])
+        present = cell_views.get(master, [])
+        if not present:
+            errors.append(f"{name}: master {master} absent from linked IO Liberty")
+            continue
+        model: Dict[str, object] = {
+            "instance": name, "port": str(pad["port"]), "master": master,
+            "terminal": terminal, "core_pin": core_pin, "direction": direction,
+        }
+        if direction in ("input", "inout"):
+            missing_arc = []
+            for path, cell_body, _unit_pf in present:
+                pin_bodies = dict(_liberty_blocks(cell_body, "pin"))
+                core_body = pin_bodies.get(core_pin)
+                terminal_body = pin_bodies.get(terminal)
+                core_dir = (re.search(r"\bdirection\s*:\s*\"?(\w+)",
+                                      _own_attrs(core_body or "")))
+                terminal_dir = (re.search(r"\bdirection\s*:\s*\"?(\w+)",
+                                          _own_attrs(terminal_body or "")))
+                has_arc = any(
+                    (lambda rel: bool(rel and rel.group(1) == terminal))(
+                        re.search(r"\brelated_pin\s*:\s*\"?([^\";\s]+)",
+                                  _own_attrs(timing)))
+                    for _unused, timing in _liberty_blocks(core_body or "", "timing"))
+                if (not core_dir or core_dir.group(1) != "output"
+                        or not terminal_dir
+                        or terminal_dir.group(1) not in ("input", "inout")
+                        or not has_arc):
+                    missing_arc.append(path)
+            if missing_arc:
+                errors.append(f"{name}: no {terminal}->{core_pin} input-pad arc in "
+                              + ", ".join(missing_arc))
+            else:
+                model["input_arc"] = f"{terminal}->{core_pin}"
+        if direction in ("output", "inout"):
+            caps: List[float] = []
+            missing_cap = []
+            for path, cell_body, unit_pf in present:
+                pin_body = dict(_liberty_blocks(cell_body, "pin")).get(core_pin)
+                cap = re.search(r"\bcapacitance\s*:\s*([0-9.eE+-]+)",
+                                _own_attrs(pin_body or ""))
+                if not cap or unit_pf <= 0:
+                    missing_cap.append(path)
+                    continue
+                try:
+                    value = float(cap.group(1)) * unit_pf
+                except ValueError:
+                    value = -1.0
+                if not math.isfinite(value) or value < 0:
+                    missing_cap.append(path)
+                else:
+                    caps.append(value)
+            if missing_cap or not caps:
+                errors.append(f"{name}: no sourced {core_pin} capacitance in "
+                              + ", ".join(missing_cap or [p for p, _b, _u in present]))
+            else:
+                model["core_load_pf"] = {"min": min(caps), "max": max(caps)}
+        models[str(pad["port"])] = model
+    if errors:
+        basis["why"] = "; ".join(errors)
+        return None, basis
+    return models, basis
+
+
+def _selector_pad_ports(selector: str, models: Dict[str, Dict[str, object]],
+                        direction: str) -> List[str]:
+    """Resolve the small SDC selector subset emitted by our Step-7 author."""
+    import fnmatch
+
+    eligible = sorted(port for port, model in models.items()
+                      if model.get("direction") in
+                      (("input", "inout") if direction == "input"
+                       else ("output", "inout")))
+    compact = selector.strip()
+    if compact == "[all_inputs]" and direction == "input":
+        return eligible
+    if compact == "[all_outputs]" and direction == "output":
+        return eligible
+    match = re.fullmatch(r"\[get_ports(?:\s+-quiet)?\s+(.+)\]", compact)
+    if not match:
+        return []
+    body = match.group(1).strip()
+    if body.startswith("{") and body.endswith("}"):
+        body = body[1:-1]
+    patterns = body.split()
+    return [port for port in eligible
+            if any(port == pattern or fnmatch.fnmatchcase(port, pattern)
+                   for pattern in patterns)]
+
+
+def _core_pad_translate_line(line: str, models: Dict[str, Dict[str, object]]
+                             ) -> Tuple[Optional[List[str]], Optional[Dict[str, object]]]:
+    """Translate one external pad command to the corresponding core model."""
+    match = re.fullmatch(
+        r"\s*(set_input_transition|set_load)\s+(.+?)\s+"
+        r"(\[(?:all_inputs|all_outputs|get_ports\b.*)\])\s*", line)
+    if not match:
+        return None, None
+    command, arg_text, selector = match.groups()
+    tokens = arg_text.split()
+    flags = [token for token in tokens if token.startswith("-")]
+    allowed = {"-max", "-min", "-rise", "-fall"}
+    numbers = []
+    for token in tokens:
+        if token.startswith("-"):
+            continue
+        try:
+            numbers.append(float(token))
+        except ValueError:
+            return [], {"line": line.strip(), "why": f"unsupported argument {token!r}"}
+    if set(flags) - allowed or len(numbers) != 1 or not math.isfinite(numbers[0]):
+        return [], {"line": line.strip(), "why": "unsupported option/value shape"}
+    direction = "input" if command == "set_input_transition" else "output"
+    ports = _selector_pad_ports(selector, models, direction)
+    if not ports:
+        return [], {"line": line.strip(), "why": "selector resolves no producer pad port"}
+    groups: Dict[Tuple[str, ...], List[str]] = {}
+    for port in ports:
+        model = models[port]
+        if command == "set_input_transition":
+            key = (str(model["master"]), str(model["terminal"]),
+                   str(model["core_pin"]))
+        else:
+            loads = model.get("core_load_pf")
+            if not isinstance(loads, dict):
+                return [], {"line": line.strip(), "why": f"{port} has no core load"}
+            sense = "min" if "-min" in flags else "max"
+            key = (f"{float(loads[sense]):g}", sense)
+        groups.setdefault(key, []).append(port)
+    out = []
+    for key, selected in sorted(groups.items()):
+        target = "[get_ports {" + " ".join(sorted(selected)) + "}]"
+        if command == "set_input_transition":
+            master, terminal, pin = key
+            edge_flags = " ".join(flag for flag in flags if flag in ("-min", "-max"))
+            value = numbers[0]
+            out.append(
+                f"set_driving_cell -lib_cell {master} "
+                f"-from_pin {terminal} -pin {pin} "
+                f"-input_transition_rise {value:g} -input_transition_fall {value:g} "
+                f"{edge_flags} {target}".replace("  ", " "))
+        else:
+            load, _sense = key
+            option_flags = " ".join(flags)
+            out.append(f"set_load {option_flags} {load} {target}".replace("  ", " "))
+    return out, {"line": line.strip(), "ports": sorted(ports),
+                 "external_value": numbers[0], "translated_lines": out}
+
+
+def _translate_core_pad_boundary(project: Path, text: str, staged_rel: str,
+                                 record: Dict[str, object], container: str,
+                                 to_container_path: Optional[Callable[[str, str], str]]
+                                 ) -> Tuple[str, Dict[str, object]]:
+    """Keep package obligations as evidence and execute their core-side model."""
+    models, basis = _core_pad_models(project, container, to_container_path)
+    if models is None:
+        # Older/sparse producer records carry boundary identity only.  They do
+        # not assert a wrapper model, so retain the pre-existing CORE / N/A
+        # behavior; translation begins only with an actual signal-pad map.
+        if not basis.get("signal_pad_instance_count"):
+            return text, record
+        if not any(re.match(r"\s*(set_input_transition|set_load)\b", line)
+                   for line in text.splitlines()):
+            return text, record
+        refused: List[str] = []
+        inert: List[str] = []
+        continuing = False
+        for raw in text.splitlines(keepends=True):
+            line = raw[:-1] if raw.endswith("\n") else raw
+            selected = continuing or bool(re.match(
+                r"\s*(set_input_transition|set_load)\b", line))
+            if selected:
+                refused.append(line.strip())
+                ending = "\n" if raw.endswith("\n") else ""
+                inert.append(f"# R-0929-CORE-PAD-TRANSLATION REFUSED: "
+                             f"{line} [disabled]{ending}")
+                continuing = line.rstrip().endswith("\\")
+            else:
+                inert.append(raw)
+        identity = {key: record[key] for key in ("analysis_top", "boundary")
+                    if key in record}
+        reason = ("pad-facing constraints cannot be executed on the core and "
+                  f"the recorded wrapper model is incomplete: {basis.get('why')}")
+        inert.append(f"# NOT_MEASURED: CORE_PAD_BOUNDARY_TRANSLATION; {reason}\n")
+        return "".join(inert), {
+            "schema": PAD_INPUT_DRIVE_SCHEMA, "applies": True,
+            "verdict": "NOT_MEASURED",
+            "model": "producer-bound pad wrapper core translation",
+            "source": f"design-staged SDC {staged_rel}",
+            "reason": reason, "refused_staged_sdc_lines": refused,
+            "sdc_lines": [], "pad_model_basis": basis, **identity,
+        }
+    external: List[Dict[str, object]] = []
+    generated: List[str] = []
+    errors: List[Dict[str, object]] = []
+    out: List[str] = []
+    covered_inputs, covered_outputs = set(), set()
+    for raw in text.splitlines(keepends=True):
+        line = raw[:-1] if raw.endswith("\n") else raw
+        translated, obligation = _core_pad_translate_line(line, models)
+        if obligation is None:
+            out.append(raw)
+            continue
+        ending = "\n" if raw.endswith("\n") else ""
+        out.append(f"# R-0929-CORE-PAD-TRANSLATION EXTERNAL: {line.strip()} [bond-pad only]{ending}")
+        if translated:
+            external.append(obligation)
+            generated.extend(translated)
+            for port in obligation.get("ports") or []:
+                direction = models[str(port)].get("direction")
+                if line.lstrip().startswith("set_input_transition"):
+                    covered_inputs.add(str(port))
+                elif direction in ("output", "inout"):
+                    covered_outputs.add(str(port))
+            out.extend(item + "\n" for item in translated)
+        else:
+            errors.append(obligation)
+    if not external and not errors:
+        return text, record
+    required_inputs = {port for port, model in models.items()
+                       if model.get("direction") in ("input", "inout")}
+    required_outputs = {port for port, model in models.items()
+                        if model.get("direction") in ("output", "inout")}
+    missing = {"input_transition": sorted(required_inputs - covered_inputs),
+               "output_load": sorted(required_outputs - covered_outputs)}
+    incomplete = bool(errors or missing["input_transition"] or missing["output_load"])
+    identity = {key: record[key] for key in ("analysis_top", "boundary") if key in record}
+    translated_record: Dict[str, object] = {
+        "schema": PAD_INPUT_DRIVE_SCHEMA,
+        "applies": True,
+        "verdict": "NOT_MEASURED" if incomplete else "PAD_TRANSLATED",
+        "model": "producer-bound pad wrapper core translation",
+        "source": f"design-staged SDC {staged_rel}",
+        "external_pad_obligations": external,
+        "translated_core_sdc_lines": generated,
+        "sdc_lines": generated,
+        "pad_models": models,
+        "pad_model_basis": basis,
+        "missing": missing,
+        **identity,
+    }
+    if incomplete:
+        translated_record["reason"] = (
+            "pad-facing constraints could not be completely translated to the "
+            f"recorded core boundary: errors={errors}; missing={missing}")
+        out.append("# NOT_MEASURED: CORE_PAD_BOUNDARY_TRANSLATION; "
+                   + str(translated_record["reason"]) + "\n")
+    return "".join(out), translated_record
+
+
 def _pdk_io_input_transition(project: Path, container: str = "",
                              to_container_path: Optional[Callable[[str, str], str]] = None
                              ) -> Tuple[Optional[Dict[str, object]], Dict[str, object]]:
@@ -769,6 +1097,11 @@ def staged_sdc_pad_input_drive(project: Path, text: str, staged_rel: str,
     _, record = _pad_input_drive(project, {}, container, to_container_path,
                                  analysis_top=analysis_top)
     if not record.get("applies"):
+        boundary = record.get("boundary")
+        if (isinstance(boundary, dict)
+                and boundary.get("classification") == "CORE"):
+            return _translate_core_pad_boundary(
+                project, text, staged_rel, record, container, to_container_path)
         return text, record
     own = [ln.strip() for ln in text.splitlines()
            if re.match(r"\s*(set_input_transition|set_driving_cell)\b", ln)]

@@ -570,6 +570,137 @@ def test_a_staged_sdc_that_sets_its_own_drive_is_declared(tmp_path):
     assert rec["sdc_lines"] == ["set_input_transition 0.3 [all_inputs]"]
 
 
+def _core_wrapper_project(tmp_path, *, related_pin="PAD"):
+    project = _die(tmp_path)
+    liberty = tmp_path / "pdk" / "neutral_io.lib"
+    liberty.parent.mkdir(parents=True)
+    liberty.write_text(f'''library (neutral_io) {{
+      delay_model : table_lookup;
+      time_unit : "1ns";
+      capacitive_load_unit (1, pf);
+      lu_table_template (tiny) {{
+        variable_1 : input_net_transition;
+        variable_2 : total_output_net_capacitance;
+        index_1 ("0.01, 25"); index_2 ("0.01, 5");
+      }}
+      cell (neutral_pad) {{
+        pin (PAD) {{ direction : inout; is_pad : true; }}
+        pin (IN) {{ direction : output; function : "PAD";
+          timing () {{ related_pin : "{related_pin}"; timing_sense : positive_unate;
+            cell_rise (tiny) {{ values ("0.1, 0.1", "0.1, 0.1"); }}
+            cell_fall (tiny) {{ values ("0.1, 0.1", "0.1, 0.1"); }}
+            rise_transition (tiny) {{ values ("0.1, 0.1", "0.1, 0.1"); }}
+            fall_transition (tiny) {{ values ("0.1, 0.1", "0.1, 0.1"); }}
+          }}
+        }}
+        pin (OUT) {{ direction : input; capacitance : 0.04; }}
+      }}
+      cell (neutral_buf) {{
+        pin (A) {{ direction : input; capacitance : 0.01; }}
+        pin (Y) {{ direction : output; function : "A";
+          timing () {{ related_pin : "A"; timing_sense : positive_unate;
+            cell_rise (tiny) {{ values ("0.1, 0.1", "0.1, 0.1"); }}
+            cell_fall (tiny) {{ values ("0.1, 0.1", "0.1, 0.1"); }}
+            rise_transition (tiny) {{ values ("0.1, 0.1", "0.1, 0.1"); }}
+            fall_transition (tiny) {{ values ("0.1, 0.1", "0.1, 0.1"); }}
+          }}
+        }}
+      }}
+    }}''')
+    _io_record(project, [liberty], core_module="neutral_core",
+               chip_top_module="neutral_chip")
+    path = project / "reports/phase3/io_pad_chip_top.json"
+    doc = json.loads(path.read_text())
+    doc["pad_instances"] = {
+        "u_pad_a": {"port": "a", "master": "neutral_pad",
+                    "terminal": "PAD", "core_pin": "IN", "direction": "input"},
+        "u_pad_y": {"port": "y", "master": "neutral_pad",
+                    "terminal": "PAD", "core_pin": "OUT", "direction": "output"},
+    }
+    path.write_text(json.dumps(doc))
+    return project
+
+
+def test_issue3427_core_boundary_translates_external_pad_constraints(tmp_path):
+    """25 ns / 5 pF stay external facts; the core sees the selected pad."""
+    import sdc_environment as SE
+    project = _core_wrapper_project(tmp_path)
+    staged = (
+        "create_clock -period 10 [get_ports clk]\n"
+        "set_input_transition -max 25.0 [get_ports {a}]\n"
+        "set_input_transition -min 0.01 [get_ports {a}]\n"
+        "set_load -max 5.0 [get_ports {y}]\n"
+        "set_load -min 0.0 [get_ports {y}]\n")
+    text, rec = SE.staged_sdc_pad_input_drive(
+        project, staged, "input/constraints/external.sdc",
+        analysis_top="neutral_core")
+    active = [line for line in text.splitlines()
+              if line.strip() and not line.lstrip().startswith("#")]
+    assert rec["verdict"] == "PAD_TRANSLATED"
+    assert not any(line.startswith("set_input_transition") for line in active)
+    assert "set_load -max 5.0 [get_ports {y}]" not in active
+    assert "set_load -min 0.0 [get_ports {y}]" not in active
+    assert any(line == ("set_driving_cell -lib_cell neutral_pad -from_pin PAD -pin IN "
+                        "-input_transition_rise 25 -input_transition_fall 25 "
+                        "-max [get_ports {a}]") for line in active)
+    assert "set_load -max 0.04 [get_ports {y}]" in active
+    assert "set_load -min 0.04 [get_ports {y}]" in active
+    assert len(rec["pad_model_basis"]["record_sha256"]) == 64
+    assert len(rec["pad_model_basis"]["views"][0]["sha256"]) == 64
+    assert {item["external_value"] for item in rec["external_pad_obligations"]} == {
+        25.0, 0.01, 5.0, 0.0}
+
+
+def test_issue3427_missing_pad_arc_disables_external_core_commands(tmp_path):
+    """Reverse control: a named pad without the recorded arc cannot translate."""
+    import sdc_environment as SE
+    project = _core_wrapper_project(tmp_path, related_pin="WRONG")
+    staged = ("create_clock -period 10 [get_ports clk]\n"
+              "set_input_transition -max 25 [get_ports {a}]\n"
+              "set_load -max 5 [get_ports {y}]\n")
+    text, rec = SE.staged_sdc_pad_input_drive(
+        project, staged, "input/constraints/external.sdc",
+        analysis_top="neutral_core")
+    active = [line for line in text.splitlines()
+              if line.strip() and not line.lstrip().startswith("#")]
+    assert rec["verdict"] == "NOT_MEASURED"
+    assert active == ["create_clock -period 10 [get_ports clk]"]
+    assert "PAD->IN" in rec["reason"]
+    assert len(rec["refused_staged_sdc_lines"]) == 2
+
+
+def test_issue3427_native_opensta_reads_the_translated_core_deck(tmp_path):
+    """The exact emitted set_driving_cell shape is accepted by OpenSTA."""
+    import sdc_environment as SE
+    tool = shutil.which("sta")
+    assert tool, "this native consumer test requires the EDA image"
+    project = _core_wrapper_project(tmp_path)
+    staged = ("set_input_transition -max 25 [get_ports {a}]\n"
+              "set_input_transition -min 0.01 [get_ports {a}]\n"
+              "set_load -max 5 [get_ports {y}]\n"
+              "set_load -min 0 [get_ports {y}]\n")
+    text, rec = SE.staged_sdc_pad_input_drive(
+        project, staged, "input/constraints/external.sdc",
+        analysis_top="neutral_core")
+    assert rec["verdict"] == "PAD_TRANSLATED"
+    liberty = Path(rec["pad_model_basis"]["views"][0]["liberty"])
+    netlist = tmp_path / "core.v"
+    netlist.write_text("module neutral_core(input a, output y); "
+                       "neutral_buf u_buf(.A(a), .Y(y)); endmodule\n")
+    sdc = tmp_path / "core.sdc"
+    sdc.write_text(text)
+    script = tmp_path / "read.tcl"
+    script.write_text(
+        f"read_liberty {{{liberty}}}\nread_verilog {{{netlist}}}\n"
+        f"link_design neutral_core\nread_sdc {{{sdc}}}\n"
+        "report_checks -path_delay max\nputs CORE_PAD_TRANSLATION_OK\nexit\n")
+    run = subprocess.run([tool, "-no_init", "-exit", str(script)],
+                         capture_output=True, text=True, timeout=120)
+    output = run.stdout + run.stderr
+    assert run.returncode == 0 and "CORE_PAD_TRANSLATION_OK" in output, output
+    assert "Error:" not in output and "STA-" not in output, output
+
+
 def test_an_absent_record_on_a_die_top_is_not_measured(tmp_path):
     import sdc_environment as SE
     assert "never resolved" in SE.pad_input_drive_not_measured(_die(tmp_path))
