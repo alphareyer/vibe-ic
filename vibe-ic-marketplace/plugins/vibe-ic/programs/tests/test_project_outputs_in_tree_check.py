@@ -214,8 +214,11 @@ def test_normal_p0_storage_depends_on_actual_current_encoding_producer(tmp_path,
         return result  # actual native process result, never an authored verdict
     monkeypatch.setattr(flow._watchdog,'run_host_supervised',execute)
     monkeypatch.setattr(flow,'_compliance_workers',lambda _:workers)
-    monkeypatch.setattr(flow,'_STRUCTURAL_RTL_GATES',
-                        ('project_outputs_in_tree_check','interface_encoding_audit'))
+    monkeypatch.setattr(flow, '_STRUCTURAL_RTL_GATES',
+                        ('project_outputs_in_tree_check', 'interface_encoding_audit'))
+    contracts = dict(flow._STRUCTURAL_GATE_INVOCATION_CONTRACTS)
+    contracts['interface_encoding_audit'] = 'interface-encoding'
+    monkeypatch.setattr(flow, '_STRUCTURAL_GATE_INVOCATION_CONTRACTS', contracts)
     records = []
     flow._run_structural_rtl_gates(project,records_out=records)
     assert [r['name'] for r in records] == ['project_outputs_in_tree_check','interface_encoding_audit']
