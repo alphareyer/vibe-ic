@@ -31,6 +31,15 @@ sys.path.insert(0, str(SCRIPT.parent))
 import interface_encoding_audit as iea  # noqa: E402
 
 
+def _enable_interface_encoding_p0(flow, monkeypatch):
+    """Re-enable the historical P0 route with its complete CLI contract."""
+    monkeypatch.setattr(
+        flow, "_STRUCTURAL_RTL_GATES", ("interface_encoding_audit",))
+    contracts = dict(flow._STRUCTURAL_GATE_INVOCATION_CONTRACTS)
+    contracts["interface_encoding_audit"] = "interface-encoding"
+    monkeypatch.setattr(flow, "_STRUCTURAL_GATE_INVOCATION_CONTRACTS", contracts)
+
+
 @pytest.mark.parametrize('body', ["if (flag) seen <= 1'b1;", "if (!flag) seen <= 1'b1;",
                                 "seen <= flag ? 1'b1 : 1'b0;",
                                 "seen <= !flag ? 1'b1 : 1'b0;"])
@@ -258,8 +267,7 @@ endmodule
     docs.mkdir(parents=True)
     (docs / 'L9_INTEGRATION_SPEC.json').write_text(
         json.dumps({'top_module': 'neutral'}))
-    monkeypatch.setattr(flow, '_STRUCTURAL_RTL_GATES',
-                        ('interface_encoding_audit',))
+    _enable_interface_encoding_p0(flow, monkeypatch)
     records = []
     flow._run_structural_rtl_gates(project, records_out=records)
     assert len(records) == 1
@@ -276,7 +284,7 @@ def test_p0_consumes_the_native_predicate_proof_without_a_waiver(tmp_path, monke
     docs = project / 'phase1/generated_docs'
     docs.mkdir(parents=True)
     (docs / 'L9_INTEGRATION_SPEC.json').write_text(json.dumps({'top_module': 'neutral'}))
-    monkeypatch.setattr(flow, '_STRUCTURAL_RTL_GATES', ('interface_encoding_audit',))
+    _enable_interface_encoding_p0(flow, monkeypatch)
     records = []
     flow._run_structural_rtl_gates(project, records_out=records)
     assert len(records) == 1
@@ -1458,7 +1466,7 @@ def test_p0_reads_the_encoding_receipt_instead_of_advisory_rc0(tmp_path, monkeyp
                   "module neutral; wire [5:0] count; producer p(.count(count)); "
                   "consumer c(.count(count)); endmodule\n")
     (rtl / 'neutral.v').write_text(source)
-    monkeypatch.setattr(flow, '_STRUCTURAL_RTL_GATES', ('interface_encoding_audit',))
+    _enable_interface_encoding_p0(flow, monkeypatch)
     records = []
     flow._run_structural_rtl_gates(project, records_out=records)
     assert len(records) == 1
@@ -1481,7 +1489,7 @@ def test_p0_encoding_receipt_survives_dispatch_and_storage_gate(tmp_path, monkey
         ") begin end endmodule\n"
         "module neutral; wire [5:0] count; generate if (1) begin : active "
         "producer p(.count(count)); consumer c(.count(count)); end endgenerate endmodule\n")
-    monkeypatch.setattr(flow, '_STRUCTURAL_RTL_GATES', ('interface_encoding_audit',))
+    _enable_interface_encoding_p0(flow, monkeypatch)
     records = []
     flow._run_structural_rtl_gates(project, records_out=records)
     assert records[0]['verdict'] == verdict
@@ -1511,7 +1519,7 @@ def test_p0_encoding_receipt_refuses_outside_project_state_alias(tmp_path, monke
     outside = tmp_path / 'outside'
     outside.mkdir()
     (project / '.vibeic-state').symlink_to(outside, target_is_directory=True)
-    monkeypatch.setattr(flow, '_STRUCTURAL_RTL_GATES', ('interface_encoding_audit',))
+    _enable_interface_encoding_p0(flow, monkeypatch)
     with pytest.raises(ValueError, match='AUDIT_RECEIPT_OUTSIDE_PROJECT'):
         flow._run_structural_rtl_gates(project, records_out=[])
     assert list(outside.iterdir()) == []

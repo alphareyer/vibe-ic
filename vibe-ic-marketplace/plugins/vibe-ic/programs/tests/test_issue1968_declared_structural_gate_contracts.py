@@ -2,11 +2,11 @@
 """Issue #1968: applicability is a design verdict, never an argv crash.
 
 The production break these tests catch is deleting (or bypassing) a declared
-invocation contract for one of the 36 P0 gates that rejected the umbrella's
+invocation contract for one of the 35 active P0 gates that rejected the umbrella's
 generic positional argv at the measured base revision.  A protocol-free design
 must receive a real verdict or an explicit declaration-derived N/A for each of
 the 36. A protocol design that declares the corresponding inputs must dispatch
-all 36 through their real CLIs, so none can disappear behind
+all 35 through their real CLIs, so none can disappear behind
 ``NOT_INVOCABLE`` or a broad class skip.
 """
 from __future__ import annotations
@@ -46,7 +46,6 @@ ISSUE_1968_GATES = (
     "fpga_async_input_synchronizer_check",
     "fpga_qsf_lint",
     "fresh_agent_provenance_check",
-    "interface_encoding_audit",
     "json_schema_check",
     "l12_sequence_implementation_check",
     "l9_completeness_check",
