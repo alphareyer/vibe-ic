@@ -15,10 +15,18 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 GEN = HERE.parent / "benchmark_verify_report.py"
+SPARE_CHECK = HERE.parent / "spare_cell_preservation_check.py"
 
 
 def _load_mod():
     spec = importlib.util.spec_from_file_location("benchmark_verify_report", GEN)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _load_spare_mod():
+    spec = importlib.util.spec_from_file_location("spare_cell_preservation_check", SPARE_CHECK)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -193,6 +201,61 @@ def test_pillar6_removed_spare_fails(tmp_path):
     p = _make_project(tmp_path, spare_removed=3, spare_keep=False)
     rc, out = _run(p)
     assert rc == 1 and "NOT-COMPLETE" in out
+
+
+@pytest.mark.parametrize('artefact,expected_rc,expected_removed', [
+    ('(* keep *) BUF spare_0 ();', 0, 0),
+    ('module top; endmodule', 1, 1),
+    ('spare_0\nkeep\n', 1, 0),
+])
+def test_pillar6_consumes_the_real_preservation_writer_list(
+        tmp_path, artefact, expected_rc, expected_removed):
+    p = _make_project(tmp_path / 'project')
+    writer = _load_spare_mod()
+    record = writer.evaluate_preservation(
+        {'instances': [{'name': 'spare_0', 'type': 'BUF'}]},
+        {'netlist': artefact})
+    assert isinstance(record['removed'], list)
+    assert len(record['removed']) == expected_removed
+    (p / 'reports/spare_preservation.json').write_text(json.dumps(record))
+
+    rc, out = _run(p)
+
+    report_path = p / 'BENCHMARK_VERIFICATION_REPORT.md'
+    assert rc == expected_rc, out
+    assert report_path.is_file() and report_path.stat().st_size > 0
+    report = report_path.read_text()
+    assert f'removed_count={expected_removed}' in report
+    assert 'instance-records' in report
+    assert ('_Design-for-ECO status: **PASS**' in report) is (expected_rc == 0)
+
+
+def test_pillar6_malformed_removed_list_fails_without_crashing(tmp_path):
+    p = _make_project(tmp_path / 'project')
+    (p / 'reports/spare_preservation.json').write_text(json.dumps({
+        'all_keep_attr_intact': True,
+        'removed': [{'type': 'BUF'}],
+        'verdict': 'PASS',
+    }))
+
+    rc, out = _run(p)
+
+    report = p / 'BENCHMARK_VERIFICATION_REPORT.md'
+    assert rc == 1 and 'NOT-COMPLETE' in out
+    assert report.is_file() and report.stat().st_size > 0
+    assert 'removed_count=None (invalid; must be 0)' in report.read_text()
+
+
+def test_pillar6_missing_preservation_report_still_writes_pending_report(tmp_path):
+    p = _make_project(tmp_path / 'project')
+    (p / 'reports/spare_preservation.json').unlink()
+
+    rc, out = _run(p)
+
+    report = p / 'BENCHMARK_VERIFICATION_REPORT.md'
+    assert rc == 1 and 'NOT-COMPLETE' in out
+    assert report.is_file() and report.stat().st_size > 0
+    assert 'reports/spare_preservation.json MISSING' in report.read_text()
 
 
 def test_unresolved_step_token_fails(tmp_path):

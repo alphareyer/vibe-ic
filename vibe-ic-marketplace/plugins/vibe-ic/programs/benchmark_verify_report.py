@@ -27,7 +27,8 @@ silent PASS):
   reports/hw_test.json               {"verdict":"PASS"|"FAIL", "patterns":N, ...}
   analog/analog_block_list.json      (presence => analog applicable)
   reports/spare_cell_coverage.json   {"status":"PASS"|.., density/distribution/tie-off readiness}
-  reports/spare_preservation.json    {"all_keep_attr_intact":bool, "removed":N}
+  reports/spare_preservation.json    {"all_keep_attr_intact":bool,
+                                      "removed":[{name,type}, ...]}
   cross_check/**/step_<id>.json      machine-verifiable per-step OURS-vs-REF receipt
   SOURCE_MANIFEST.md                 GENERATED vs REUSED-IP tally
 
@@ -471,6 +472,24 @@ def _load_json(p: Path):
         return None
 
 
+def _spare_removed_count(value):
+    """Return (count, schema) for the preservation writer's removed field.
+
+    The current writer emits instance records.  Non-negative integer counts
+    remain supported for older reports.  Every other shape is invalid evidence
+    and must keep Pillar 6 failed rather than raising or looking empty.
+    """
+    if type(value) is int and value >= 0:
+        return value, "legacy-count"
+    if isinstance(value, list) and all(
+            isinstance(row, dict)
+            and isinstance(row.get("name"), str)
+            and bool(row["name"].strip())
+            for row in value):
+        return len(value), "instance-records"
+    return None, "invalid"
+
+
 # Canonical + legacy locations of the full-stack TB result. chip-AGNOSTIC.
 _FULL_STACK_RESULTS = (
     Path("phase2/stage1/sim_full_stack/results.json"),
@@ -776,10 +795,12 @@ def main():
         # campaign exists to remove, so the verdict is now read directly and a
         # report that does not carry one is not silently assumed clean.
         pres_verdict = str((pres or {}).get("verdict", "")).upper()
+        removed_count, removed_schema = _spare_removed_count(
+            (pres or {}).get("removed"))
         pres_intact = (
             bool(pres)
             and bool(pres.get("all_keep_attr_intact"))
-            and int(pres.get("removed", 1) or 0) == 0
+            and removed_count == 0
             and pres_verdict in ("PASS", "VACUOUS_PASS", "")
         )
         if cov is None and pres is None:
@@ -798,13 +819,15 @@ def main():
             dfe_state = "PASS"
             dfe_detail = (f"coverage status={cov.get('status')}, "
                           f"keep_attr_intact={pres.get('all_keep_attr_intact')}, "
-                          f"removed={pres.get('removed')}")
+                          f"removed_count={removed_count} "
+                          f"({removed_schema})")
         else:
             dfe_state = "FAIL"
             dfe_detail = (f"coverage status={cov.get('status')} "
                           f"(PASS required), keep_attr_intact="
-                          f"{pres.get('all_keep_attr_intact')}, removed="
-                          f"{pres.get('removed')} (must be 0), preservation "
+                          f"{pres.get('all_keep_attr_intact')}, removed_count="
+                          f"{removed_count!r} ({removed_schema}; must be 0), "
+                          f"removed={pres.get('removed')!r}, preservation "
                           f"verdict={pres.get('verdict')!r} (PASS required)")
 
     # ── Source highlighting (GENERATED vs REUSED-IP) ──
@@ -923,7 +946,7 @@ def main():
              "density/distribution/tie-off targets met → `status: PASS`.")
     L.append("> - `reports/spare_preservation.json` (from `spare_cell_preservation_check.py`): "
              "no spare/ECO cell/gate/pad was optimized away → `all_keep_attr_intact: true` and "
-             "`removed: 0`.")
+             "`removed: []`.")
     L.append(f"> Applicability: this IC {'reached place-and-route (gate APPLIES)' if dfe_applicable else 'has no place-and-route (gate N/A)'}. "
              "A missing spare report is PENDING (not a silent pass).")
     L.append("")
