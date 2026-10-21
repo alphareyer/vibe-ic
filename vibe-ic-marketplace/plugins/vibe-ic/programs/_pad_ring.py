@@ -188,6 +188,8 @@ distribution path convention, and this flow's own relative paths.
 """
 from __future__ import annotations
 
+import fnmatch
+import glob
 import os
 import re
 from math import gcd
@@ -1415,6 +1417,196 @@ def discover_io_liberty(pdk_root: Optional[str] = None,
     for lib in libs:
         seen.setdefault(str(lib), lib)
     return list(seen.values())
+
+
+# ``PAD_LIBS`` is the PDK's own corner-to-IO-model selection contract.  The
+# direct flow historically ignored it and rediscovered every sibling ``*.lib``
+# instead; that gave the timing consumer an inventory, not a selection.  These
+# patterns deliberately parse only the two forms shipped by the open PDKs:
+# literal paths and one ``[glob ...]`` inside a quoted ``dict set`` value.
+_PAD_LIBS_DICT_RE = re.compile(
+    r'^[ \t]*dict[ \t]+set[ \t]+::env\(PAD_LIBS\)[ \t]+'
+    r'(?P<key>"[^"]+"|[^\s"]+)[ \t]+"(?P<body>(?:[^"\\]|\\.)*)"',
+    re.M | re.S)
+_PAD_LIBS_ENV_RE = re.compile(
+    r'\$::env\((PDK_ROOT|PDK|PAD_CELL_LIBRARY)\)')
+_PAD_LIBS_GLOB_RE = re.compile(r'^\[glob\s+([^\]]+)\]$')
+
+
+def parse_pad_liberty_rosters(text: str, *, config: Path,
+                              pdk_root: str, pdk: str
+                              ) -> List[Dict[str, object]]:
+    """Parse source-declared ``PAD_LIBS`` rows from one PDK config.
+
+    Unknown substitutions and Tcl commands are returned as refused rows.  No
+    Tcl is evaluated and no filename is interpreted as voltage/PVT here: the
+    key is retained as the PDK's own mapping pattern, while model content is
+    validated by the producer that consumes this result.
+    """
+    rows: List[Dict[str, object]] = []
+    values = {"PDK_ROOT": str(pdk_root), "PDK": str(pdk),
+              "PAD_CELL_LIBRARY": config.parent.name}
+    for match in _PAD_LIBS_DICT_RE.finditer(text):
+        key = match.group("key").strip().strip('"')
+        raw = re.sub(r"\\\s*\n\s*", " ", match.group("body")).strip()
+        expanded = _PAD_LIBS_ENV_RE.sub(lambda m: values[m.group(1)], raw)
+        line = text.count("\n", 0, match.start()) + 1
+        paths: List[str] = []
+        refusal = None
+        gm = _PAD_LIBS_GLOB_RE.fullmatch(expanded)
+        if gm:
+            paths = sorted(glob.glob(gm.group(1).strip()))
+            if not paths:
+                refusal = "PAD_LIBS glob selected no files"
+        elif "$" in expanded or "[" in expanded or "]" in expanded:
+            refusal = "PAD_LIBS uses an unsupported Tcl substitution or command"
+        else:
+            paths = [token for token in expanded.split() if token]
+        rows.append({
+            "config": str(config), "line": line, "pattern": key,
+            "paths": paths, "refusal": refusal,
+        })
+    return rows
+
+
+def discover_pad_liberty_rosters(pdk_root: Optional[str] = None,
+                                 pdk: Optional[str] = None
+                                 ) -> List[Dict[str, object]]:
+    """All PDK-declared IO timing rosters, retaining their source config."""
+    if not pdk_root or not pdk:
+        return []
+    out: List[Dict[str, object]] = []
+    for tree in _pdk_trees(pdk_root, pdk):
+        tech = tree / _LIBS_TECH
+        if not tech.is_dir():
+            continue
+        for flow in sorted(path for path in tech.iterdir() if path.is_dir()):
+            for library in sorted(path for path in flow.iterdir()
+                                  if path.is_dir()
+                                  and _IO_LIB_TOKEN in path.name.lower()):
+                config = library / _SITE_DECL_FILE
+                try:
+                    text = config.read_text(errors="replace")
+                except OSError:
+                    continue
+                out.extend(parse_pad_liberty_rosters(
+                    text, config=config, pdk_root=str(pdk_root), pdk=str(pdk)))
+    return out
+
+
+_LIB_MODEL_NAME_RE = re.compile(
+    r'\blibrary\s*\(\s*"?([^"()]+?)"?\s*\)', re.I)
+_LIB_MODEL_TIME_RE = re.compile(
+    r'\btime_unit\s*:\s*"?\s*([-+0-9.eE]+)\s*(fs|ps|ns|us|ms|s)\s*"?\s*;',
+    re.I)
+_LIB_MODEL_CAP_RE = re.compile(
+    r'\bcapacitive_load_unit\s*\(\s*([-+0-9.eE]+)\s*,\s*"?'
+    r'(af|ff|pf|nf|uf)"?\s*\)', re.I | re.S)
+_LIB_MODEL_DEFAULT_OC_RE = re.compile(
+    r'\bdefault_operating_conditions\s*:\s*"?([^";]+?)"?\s*;', re.I)
+_LIB_MODEL_OC_RE = re.compile(
+    r'\boperating_conditions\s*\(\s*"?([^"()]+?)"?\s*\)\s*\{', re.I)
+_LIB_MODEL_NUM_RE = r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?'
+
+
+def _liberty_group_body(text: str, opening: int) -> str:
+    """Return one balanced Liberty group body; strings/comments are opaque."""
+    brace = text.find("{", opening)
+    if brace < 0:
+        return ""
+    depth = 1
+    for token in re.finditer(r'"(?:\\.|[^"\\])*"|/\*.*?\*/|//[^\n]*|[{}]',
+                             text[brace + 1:], re.S):
+        if token.group(0) == "{":
+            depth += 1
+        elif token.group(0) == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace + 1:brace + 1 + token.start()]
+    return ""
+
+
+def _liberty_number(body: str, name: str) -> Optional[float]:
+    hit = re.search(r'\b' + re.escape(name) + r'\s*:\s*('
+                    + _LIB_MODEL_NUM_RE + r')\s*;', body, re.I)
+    return float(hit.group(1)) if hit else None
+
+
+def parse_liberty_model_metadata(text: str) -> Dict[str, object]:
+    """Content-derived identity needed to bind one active timing model.
+
+    No path or filename participates.  The selected operating condition is
+    the declared default, or the sole condition when no default is declared.
+    Multiple conditions without a declared default remain unresolved.
+    """
+    clean = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    clean = re.sub(r"\\\s*\n\s*", " ", clean)
+    name = _LIB_MODEL_NAME_RE.search(clean)
+    time = _LIB_MODEL_TIME_RE.search(clean)
+    cap = _LIB_MODEL_CAP_RE.search(clean)
+    default = _LIB_MODEL_DEFAULT_OC_RE.search(clean)
+    conditions: List[Dict[str, object]] = []
+    for hit in _LIB_MODEL_OC_RE.finditer(clean):
+        body = _liberty_group_body(clean, hit.start())
+        rails = {rail: float(value) for rail, value in re.findall(
+            r'\bpower_rail\s*\(\s*"?([^",()]+?)"?\s*,\s*('
+            + _LIB_MODEL_NUM_RE + r')\s*\)', body, re.I)}
+        conditions.append({
+            "name": hit.group(1).strip(),
+            "process": _liberty_number(body, "process"),
+            "voltage": _liberty_number(body, "voltage"),
+            "temperature": _liberty_number(body, "temperature"),
+            "power_rails": dict(sorted(rails.items())),
+        })
+    selected = None
+    if default:
+        wanted = default.group(1).strip()
+        matches = [row for row in conditions if row["name"] == wanted]
+        selected = matches[0] if len(matches) == 1 else None
+    elif len(conditions) == 1:
+        selected = conditions[0]
+    first_cell = re.search(r'\bcell\s*\(', clean, re.I)
+    header = clean[:first_cell.start()] if first_cell else clean
+    fallback = {
+        "name": None,
+        "process": _liberty_number(header, "nom_process"),
+        "voltage": _liberty_number(header, "nom_voltage"),
+        "temperature": _liberty_number(header, "nom_temperature"),
+        "power_rails": {},
+    }
+    # A scene-invariant stub may carry nominal header defaults even though it
+    # declares no operating_conditions at all (the open GPIO PAD_LIBS rosters
+    # intentionally reuse two such stubs in SS/TT/FF).  Do not turn that header
+    # into a scene election.  Keep it disclosed separately; only an explicitly
+    # selected operating_conditions group is PVT authority.
+    effective = dict(selected or {
+        "name": None, "process": None, "voltage": None,
+        "temperature": None, "power_rails": {},
+    })
+    supply = parse_liberty_supply_view(clean)
+    rails = dict(supply.get("voltage_map") or {})
+    rails.update(effective.get("power_rails") or {})
+    return {
+        "library": name.group(1).strip() if name else None,
+        "time_unit": ({"value": float(time.group(1)),
+                       "unit": time.group(2).lower()} if time else None),
+        "capacitive_load_unit": ({"value": float(cap.group(1)),
+                                  "unit": cap.group(2).lower()} if cap else None),
+        "default_operating_conditions": (
+            default.group(1).strip() if default else None),
+        "operating_conditions": conditions,
+        "nominal_header": fallback,
+        "selected_condition": effective,
+        "named_rails": dict(sorted(rails.items())),
+        "cell_masters": sorted(set(_LIB_CELL_RE.findall(clean))),
+    }
+
+
+def pad_liberty_pattern_matches(pattern: str, core_liberty: str) -> bool:
+    """Apply the PDK's PAD_LIBS key literally to the active core basename."""
+    name = Path(str(core_liberty)).name
+    stem = Path(name).stem
+    return fnmatch.fnmatchcase(name, pattern) or fnmatch.fnmatchcase(stem, pattern)
 
 
 def discover_io_site_declarations(pdk_root: Optional[str] = None,

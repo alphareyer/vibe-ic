@@ -1857,6 +1857,161 @@ def _local_pad_tie_sources(pins, ties, power_connections):
     return result
 
 
+def _pdk_relative_identity(path: Path, pdk_tree: Path) -> Optional[str]:
+    """Lexical PDK-relative identity; staged/non-PDK inputs stay explicit."""
+    try:
+        return str(path.relative_to(pdk_tree))
+    except ValueError:
+        return None
+
+
+def _timing_model_record(path: Path, pdk_tree: Path) -> Dict[str, object]:
+    """Exact bytes plus content declarations for one Liberty input."""
+    try:
+        raw = path.read_bytes()
+        text = raw.decode(errors="replace")
+    except OSError as exc:
+        raise Refusal("IO_TIMING_MODEL_UNREADABLE",
+                      f"cannot read selected Liberty {path}: {exc}") from exc
+    metadata = PR.parse_liberty_model_metadata(text)
+    if not metadata.get("library"):
+        raise Refusal("IO_TIMING_MODEL_UNDECLARED",
+                      f"selected Liberty {path} declares no library name")
+    if not metadata.get("time_unit") or not metadata.get("capacitive_load_unit"):
+        raise Refusal(
+            "IO_TIMING_MODEL_UNIT_UNDECLARED",
+            f"selected Liberty {path} does not declare both time_unit and "
+            "capacitive_load_unit")
+    return {"path": str(path),
+            "pdk_relative_path": _pdk_relative_identity(path, pdk_tree),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            **metadata}
+
+
+def _condition_tuple(model: Dict[str, object]
+                     ) -> Optional[Tuple[float, float, float]]:
+    condition = model.get("selected_condition")
+    if not isinstance(condition, dict):
+        return None
+    values = tuple(condition.get(key) for key in
+                   ("process", "voltage", "temperature"))
+    if all(isinstance(value, (int, float)) and not isinstance(value, bool)
+           for value in values):
+        return tuple(float(value) for value in values)  # type: ignore[arg-type]
+    return None
+
+
+def bind_io_timing_scenes(
+        pdk_root: str, pdk: str, timing_scenes: Dict[str, str],
+        required_masters: Sequence[str], discovered: Sequence[Path]
+        ) -> Dict[str, object]:
+    """Bind each active core scene to the PDK-declared PAD_LIBS roster.
+
+    The PDK's mapping pattern elects the roster. Liberty CONTENT then proves
+    that every PVT-bearing IO model agrees with the active core condition and
+    that every wrapper-reachable master has exactly one model owner. A
+    scene-invariant stub may omit PVT, but it remains byte- and unit-bound.
+    """
+    rows = PR.discover_pad_liberty_rosters(pdk_root, pdk)
+    if not rows:
+        raise Refusal(
+            "IO_TIMING_SCENE_UNDECLARED",
+            "the selected PDK declares no PAD_LIBS corner-to-model roster")
+    discovered_set = {str(path) for path in discovered}
+    pdk_tree = Path(pdk_root) / pdk
+    required = sorted(set(str(master) for master in required_masters if master))
+    scenes: Dict[str, object] = {}
+    for label, core_raw in sorted(timing_scenes.items()):
+        core_path = Path(str(core_raw))
+        core = _timing_model_record(core_path, pdk_tree)
+        core_pvt = _condition_tuple(core)
+        if core_pvt is None:
+            raise Refusal(
+                "IO_TIMING_CORE_PVT_UNDECLARED",
+                f"active core scene {label} ({core_path}) does not declare "
+                "one complete process/voltage/temperature condition")
+        accepted: List[Dict[str, object]] = []
+        declines: List[str] = []
+        for row in rows:
+            if row.get("refusal") or not PR.pad_liberty_pattern_matches(
+                    str(row.get("pattern") or ""), str(core_path)):
+                continue
+            paths = [Path(str(value)) for value in (row.get("paths") or [])]
+            if not paths:
+                declines.append(f"{row.get('config')}:{row.get('line')}: empty roster")
+                continue
+            outside = sorted(str(path) for path in paths
+                             if str(path) not in discovered_set)
+            if outside:
+                declines.append(
+                    f"{row.get('config')}:{row.get('line')}: roster paths are "
+                    f"outside discovered selected-library views: {outside}")
+                continue
+            try:
+                models = [_timing_model_record(path, pdk_tree) for path in paths]
+            except Refusal as exc:
+                declines.append(str(exc))
+                continue
+            bad_pvt = []
+            partial_pvt = []
+            for model in models:
+                condition = model.get("selected_condition") or {}
+                stated = [condition.get(key) for key in
+                          ("process", "voltage", "temperature")]
+                model_pvt = _condition_tuple(model)
+                if model_pvt is not None and model_pvt != core_pvt:
+                    bad_pvt.append((model["path"], model_pvt))
+                elif model_pvt is None and any(value is not None for value in stated):
+                    partial_pvt.append(model["path"])
+            if bad_pvt or partial_pvt:
+                declines.append(
+                    f"{row.get('config')}:{row.get('line')}: incompatible "
+                    f"PVT models={bad_pvt}, partial={partial_pvt}")
+                continue
+            owners = {master: [str(model["path"]) for model in models
+                               if master in (model.get("cell_masters") or [])]
+                      for master in required}
+            wrong_population = {master: paths for master, paths in owners.items()
+                                if len(paths) != 1}
+            if wrong_population:
+                declines.append(
+                    f"{row.get('config')}:{row.get('line')}: reachable master "
+                    f"population is not exactly one model each: {wrong_population}")
+                continue
+            config_path = Path(str(row["config"]))
+            accepted.append({
+                "selection_pattern": row["pattern"],
+                "selection_source": {
+                    "path": str(config_path), "line": row["line"],
+                    "pdk_relative_path": _pdk_relative_identity(
+                        config_path, pdk_tree),
+                    "sha256": _sha256(config_path),
+                },
+                "core": core,
+                "models": models,
+                "reachable_master_owners": owners,
+            })
+        unique: Dict[Tuple[str, ...], Dict[str, object]] = {}
+        for candidate in accepted:
+            key = tuple(str(model["path"]) for model in candidate["models"])
+            unique.setdefault(key, candidate)
+        if len(unique) != 1:
+            raise Refusal(
+                "IO_TIMING_SCENE_AMBIGUOUS" if unique else
+                "IO_TIMING_SCENE_UNRESOLVED",
+                f"active core scene {label} selected {len(unique)} compatible "
+                f"PAD_LIBS roster(s); declines: {'; '.join(declines[:8])}")
+        scenes[str(label)] = next(iter(unique.values()))
+    return {
+        "schema": "io-timing-scene-receipt-v1",
+        "producer": PROGRAM,
+        "pdk": str(pdk),
+        "pdk_tree": str(pdk_tree),
+        "required_masters": required,
+        "scenes": scenes,
+    }
+
+
 def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         power_net: Optional[str] = None, ground_net: Optional[str] = None,
         tie_high_cell: Optional[str] = None,
@@ -1866,6 +2021,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         tie_liberty: Optional[str] = None,
         supply_plan: Optional[Dict[str, object]] = None,
         pad_connect_layers: Optional[Sequence[str]] = None,
+        timing_scenes: Optional[Dict[str, str]] = None,
         ) -> Tuple[int, Dict[str, object]]:
     # Name the run and its files independently of the container's bind mount.
     rec: Dict[str, object] = {"program": PROGRAM, "verdict": "REFUSE",
@@ -2323,6 +2479,14 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         [project / f for f in (rec.get("documents_scanned") or [])])
     lib_paths = PR.discover_io_liberty(pdk_root, pdk)
     rec["io_library_liberty"] = [str(x) for x in lib_paths]
+    if timing_scenes is not None:
+        if not pdk_root or not pdk:
+            raise Refusal("IO_TIMING_PDK_UNRESOLVED",
+                          "timing scenes were supplied without a selected PDK tree")
+        rec["io_timing_scene_receipt"] = bind_io_timing_scenes(
+            str(pdk_root), str(pdk), timing_scenes,
+            [str(value.get("master") or "") for value in chosen.values()],
+            lib_paths)
     lib_cells, lib_conflicts = merge_liberty_pad_cells(lib_paths)
     faces_refused: Dict[str, str] = {}
     aux_defaulted: List[Dict[str, object]] = []
@@ -2614,6 +2778,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="JSON list of the layers the PDN connects pads on "
                          "(the PDK's pdn_ring.connect_to_pad_layers); only "
                          "supply-pad pins on them are measured for strap reach")
+    ap.add_argument("--timing-scenes", default=None,
+                    help="JSON object mapping active core scene labels to "
+                         "their exact Liberty paths")
     ap.add_argument("--json", dest="out_json", default=None)
     args = ap.parse_args(list(argv) if argv is not None else None)
 
@@ -2628,7 +2795,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.tie_high_cell, args.tie_high_pin,
             args.tie_low_cell, args.tie_low_pin, args.tie_liberty, plan,
             json.loads(args.pad_connect_layers)
-            if args.pad_connect_layers else None)
+            if args.pad_connect_layers else None,
+            json.loads(args.timing_scenes) if args.timing_scenes else None)
     except Unavailable as exc:
         rc, rec = 2, {"program": PROGRAM, "verdict": "NOT_AVAILABLE",
                       "rule": exc.rule, "findings": [exc.message]}

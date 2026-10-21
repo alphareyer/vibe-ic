@@ -59,7 +59,7 @@ def test_every_post_route_sta_emitter_consumes_the_shared_resolution():
         assert "_sta_link_top" in inspect.getsource(emitter), emitter.__name__
 
 
-def test_sta_adds_only_the_io_liberty_matching_the_active_pvt(tmp_path):
+def test_sta_does_not_promote_a_discovery_inventory_to_scene_selection(tmp_path):
     rec = tmp_path / "reports/phase3/io_pad_chip_top.json"
     rec.parent.mkdir(parents=True)
     rec.write_text(
@@ -72,7 +72,7 @@ def test_sta_adds_only_the_io_liberty_matching_the_active_pvt(tmp_path):
 
     helper = getattr(R, "_sta_extra_liberties", lambda project, pdk, ref: list(pdk.macro_libs))
     got = helper(tmp_path, Pdk(), "/pdk/sc/lib/sc__ss_125C_4v50.lib")
-    assert got == ["/project/hardmacro.lib", "/pdk/io/lib/io__ss_125C_4v50.lib"]
+    assert got == ["/project/hardmacro.lib"]
 
 
 def test_every_post_route_sta_emitter_loads_pvt_matched_io_timing():
@@ -113,6 +113,15 @@ def test_pnr_loads_each_io_view_only_in_its_exact_process_scene(
     }
     monkeypatch.setattr(R, "_resolve_signoff_corner_libs",
                         lambda project, pdk, container: corners)
+    selected = {
+        corners["SS"]: "/pdk/io/io__ss_125C_4v50.lib",
+        corners["TT"]: "/pdk/io/io__tt_025C_5v00.lib",
+        corners["FF"]: "/pdk/io/io__ff_n40C_5v50.lib",
+    }
+    monkeypatch.setattr(
+        R, "_sta_extra_liberties",
+        lambda project, pdk, reference, container="":
+        [*pdk.macro_libs, selected[reference]])
     got = R._pnr_io_liberties_tcl(
         tmp_path, Pdk(), "container",
         "define_corners ss tt ff\nread_liberty -corner ss slow.lib")
@@ -123,7 +132,7 @@ def test_pnr_loads_each_io_view_only_in_its_exact_process_scene(
     ]
 
 
-def test_pnr_io_view_selector_does_not_cross_pvt_or_duplicate_macro_lib(
+def test_pnr_does_not_promote_discovery_inventory_or_duplicate_macro_lib(
         tmp_path):
     rec = tmp_path / "reports/phase3/io_pad_chip_top.json"
     rec.parent.mkdir(parents=True)
@@ -151,8 +160,7 @@ def test_signoff_repair_loads_only_the_selected_pvt_io_view_before_def(
     class Pdk:
         macro_libs = []
 
-    selected = R._sta_extra_liberties(
-        tmp_path, Pdk(), "/pdk/sc/sc__ss_125C_4v50.lib")
+    selected = ["/pdk/io/io__ss_125C_4v50.lib"]
     tcl = R._ship_signoff_spef_repair_tcl(
         top="chip_top", tech_lef_c="/pdk/tech.lef",
         cell_lef_c="/pdk/cells.lef",
@@ -166,9 +174,9 @@ def test_signoff_repair_loads_only_the_selected_pvt_io_view_before_def(
         "read_def /project/pnr/routed.def")
 
 
-def test_signoff_repair_step_consumes_the_shared_exact_pvt_selector():
+def test_signoff_repair_step_consumes_the_shared_receipt_selector():
     source = inspect.getsource(R.step_signoff_spef_repair)
-    assert "_sta_extra_liberties(project, pdk, ss_lib)" in source
+    assert "_sta_extra_liberties(project, pdk, ss_lib, container)" in source
     assert "extra_liberties_c=extra_liberties_c" in source
     assert "fanout_root_buffer_cell=pdk.clk_buf_root or pdk.clk_buf" in source
 

@@ -440,14 +440,21 @@ _LEDGER = frozenset({
     "_spare_actual_density", "_spare_count_from_density",
     "_sparse_die_fill_threshold_pct", "_spef_has_coupling",
     "_sta_blackboxed_masters",
+    # `_io_timing_path_sha256` hashes one producer-declared input before any
+    # timing tool runs. It binds a receipt to the exact host/container bytes;
+    # it parses no report, derives no PPA value and emits no Row/verdict.
+    # `_ppa/timing.py` consumes already-written STA reports and has no PDK
+    # container/path authority, so moving this pre-invocation identity check
+    # there would make the report reader select its own inputs.
+    "_io_timing_path_sha256",
     # RECORDED with the commit that adds it (the SPM physical-signoff port).
     # `_sta_extra_liberties` returns a LIBRARY LIST -- the local macro libs plus
-    # the one IO library view whose basename carries the same
-    # `__<process>_<temp>_<voltage>` suffix as the standard-cell liberty this
-    # stanza has ALREADY selected. It returns no slack, no WNS/TNS, no row and
-    # no verdict. Its whole purpose is to REFUSE: to decline to guess a nearest
-    # voltage, and to decline to load the mutually incompatible corners the
-    # pad-ring producer recorded in `io_pad_chip_top.json`.
+    # the exact IO model roster bound by the pad-face producer to this core
+    # Liberty scene. The receipt names and hashes the PDK PAD_LIBS declaration,
+    # core and IO model bytes, content-derived PVT/units and the reachable pad
+    # master ownership. It returns no slack, no WNS/TNS, no row and no verdict.
+    # Its whole purpose is to REFUSE stale, missing, ambiguous or incomplete
+    # timing ownership instead of guessing from filenames.
     #
     # WHY IT CANNOT LIVE IN `_ppa/timing.py`, from that module's own rules
     # rather than from convenience. That module is a per-view EXTRACTOR: it

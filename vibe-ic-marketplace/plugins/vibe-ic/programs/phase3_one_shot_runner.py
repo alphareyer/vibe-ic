@@ -37303,6 +37303,29 @@ def step_io_pad_chip_top_gen(project: Path, container: Optional[str] = None,
             "--tie-low-pin", str(_pad_ties.get("lo_pin") or ""),
             "--tie-liberty", str(pdk.liberty),
         ])
+        # The wrapper producer owns the IO-model election. Hand it the active
+        # core scenes resolved by this invocation so it can bind each one to
+        # the selected PDK's PAD_LIBS roster and publish exact model bytes for
+        # every later OpenROAD/OpenSTA consumer. An empty map means this PDK
+        # exposed no process-scene roster; downstream timing will refuse a
+        # pad-wrapped record without the receipt rather than revive discovery.
+        try:
+            _io_core_scenes = _resolve_signoff_corner_libs(
+                project, pdk, container or "")
+        except Exception as exc:  # noqa: BLE001 — this producer cannot guess
+            return StepResult(
+                "io_pad_chip_top_gen", "FAIL", time.time() - t0,
+                f"IO_TIMING_CORE_SCENES_UNRESOLVED: {exc}")
+        if not _io_core_scenes and getattr(pdk, "liberty", None):
+            _nominal = str(pdk.liberty)
+            # Normal production runs use a container path. Host-only synthetic
+            # geometry fixtures may deliberately carry no usable Liberty and
+            # therefore do not claim a timing receipt.
+            if container or Path(_nominal).is_file():
+                _io_core_scenes = {"NOMINAL": _nominal}
+        if _io_core_scenes:
+            extra.extend(["--timing-scenes", json.dumps(_io_core_scenes,
+                                                         sort_keys=True)])
     prog = PROGRAMS_DIR / "io_pad_chip_top_gen.py"
     if not prog.is_file():  # pragma: no cover - shipped tree always has it
         return StepResult("io_pad_chip_top_gen", "NOT_MEASURED",
@@ -40383,7 +40406,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # made every core net behind a pad look artificially light during repair;
     # sign-off then reopened the routed chip with the IO Liberty and exposed
     # the real max-slew/fanout/cap violations too late to fix.  Match each
-    # process scene by exact suffix, exactly as post-route STA does.
+    # process scene from the producer-owned receipt, exactly as post-route STA
+    # does.
     _io_pnr_libs_tcl = _pnr_io_liberties_tcl(
         project, pdk, container, corner_liberty_block)
     if _io_pnr_libs_tcl:
@@ -46990,15 +47014,15 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
             "and no route was promoted")
         return None
     # This fresh repair session reopens the physical chip top and then invokes
-    # repair_design/repair_timing.  It therefore needs the same exact-PVT IO
+    # repair_design/repair_timing.  It therefore needs the same producer-bound IO
     # timing arcs as the sign-off STA that judges its result.  Loading the IO
     # LEF alone defines pad geometry but leaves pad/core paths unlinked in the
     # timing graph: measured on spm x gf180mcuD run5, worst_slack became 1e39,
     # zero instances changed, and twelve real max-fanout violations survived
-    # into SS/max-RC sign-off.  Reuse the shared exact-suffix selector; local
+    # into SS/max-RC sign-off.  Reuse the shared receipt selector; local
     # macro Liberty views remain included because this is a fresh session.
     extra_liberties_c: List[str] = []
-    for liberty in _sta_extra_liberties(project, pdk, ss_lib):
+    for liberty in _sta_extra_liberties(project, pdk, ss_lib, container):
         liberty_c = _to_container_path(str(liberty), container)
         if liberty_c != ss_lib and liberty_c not in extra_liberties_c:
             extra_liberties_c.append(liberty_c)
@@ -62891,7 +62915,7 @@ def _si_mcf_repair_seam(project: Path, top: str, pdk: "PdkConfig",
         shield_body = _si_rep.shield_tcl(victims=list(victims or []))
         repair_body = ""
         extra_liberties_c: List[str] = []
-        for liberty in _sta_extra_liberties(project_, pdk, ss_lib):
+        for liberty in _sta_extra_liberties(project_, pdk, ss_lib, container):
             liberty_c = _to_container_path(str(liberty), container)
             if liberty_c != ss_lib and liberty_c not in extra_liberties_c:
                 extra_liberties_c.append(liberty_c)
@@ -65512,7 +65536,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 corner_libs=_repair_corner_libs,
                 corner_extra_libs_c={
                     label: [_to_container_path(path, container)
-                            for path in _sta_extra_liberties(project, pdk, liberty)]
+                            for path in _sta_extra_liberties(
+                                project, pdk, liberty, container)]
                     for label, liberty in _repair_corner_libs.items()},
                 start_def_c=(_to_container_path(str(_repair_start_def), container)
                              if _repair_start_def is not None else None),
@@ -66582,65 +66607,175 @@ def _sta_link_top(project: Path, logical_top: str, netlist: Path,
     return _streamout_top(def_file, logical_top)[0]
 
 
-def _sta_extra_liberties(project: Path, pdk: PdkConfig,
-                         reference_liberty: object) -> List[str]:
-    """Return local macro libs plus the IO lib at the same exact PVT.
-
-    The pad-ring producer already records every library view it discovered in
-    ``io_pad_chip_top.json``.  STA must not load all of those mutually
-    incompatible corners, or guess a nearest voltage.  A library is added
-    only when its basename carries the same ``__<process>_<temp>_<voltage>``
-    suffix as the standard-cell liberty selected for this stanza.
-    """
-    out = [str(path) for path in (pdk.macro_libs or [])]
-    stem = Path(str(reference_liberty)).stem
-    _sep, marker, suffix = stem.rpartition("__")
-    if not marker or not suffix:
-        return out
-    record = project / "reports" / "phase3" / "io_pad_chip_top.json"
+def _io_timing_path_sha256(path: str, container: str = "") -> Optional[str]:
+    """Hash the exact bytes a timing consumer will open."""
     try:
-        raw = json.loads(record.read_text()).get("io_library_liberty", [])
+        host = Path(path)
+        if host.is_file():
+            return hashlib.sha256(host.read_bytes()).hexdigest()
+        if container:
+            cp = _cex.run_in_container_supervised(
+                container, f"sha256sum {shlex.quote(path)}", ceiling_s=120)
+            if cp.returncode == 0:
+                line = (cp.stdout or "").splitlines()
+                if len(line) == 1:
+                    match = re.fullmatch(r"([0-9a-fA-F]{64})\s+\*?.+", line[0])
+                    if match:
+                        return match.group(1).lower()
+    except Exception:  # noqa: BLE001 — unreadable is a refusal at the caller
+        pass
+    return None
+
+
+def _sta_extra_liberties(project: Path, pdk: PdkConfig,
+                         reference_liberty: object,
+                         container: str = "") -> List[str]:
+    """Return macro libs plus the producer-bound IO roster for this scene.
+
+    ``io_library_liberty`` remains a discovery inventory used by the pad-face
+    producer.  Timing never elects from it.  A WROTE chip wrapper must carry a
+    scene receipt whose PDK config, core Liberty and every IO model still have
+    the exact recorded bytes and whose content still covers every reachable
+    pad/connector master.  Missing, ambiguous or stale evidence refuses.
+    """
+    import _pad_ring as _PR  # flat plugin module; shared producer parser
+
+    out = [str(path) for path in (pdk.macro_libs or [])]
+    record_path = project / "reports" / "phase3" / "io_pad_chip_top.json"
+    try:
+        record = json.loads(record_path.read_text())
     except (OSError, ValueError, AttributeError):
         return out
-    if not isinstance(raw, list):
+    if record.get("verdict") != "WROTE":
         return out
-    for candidate in sorted(str(value) for value in raw
-                            if isinstance(value, str)):
-        if Path(candidate).stem.endswith("__" + suffix) and candidate not in out:
-            out.append(candidate)
+    receipt = record.get("io_timing_scene_receipt")
+    if (not isinstance(receipt, dict)
+            or receipt.get("schema") != "io-timing-scene-receipt-v1"):
+        raise ValueError(
+            "IO_TIMING_SCENE_RECEIPT_MISSING: the WROTE chip wrapper carries "
+            "only a discovered IO Liberty inventory")
+    pdk_tree_raw = receipt.get("pdk_tree")
+    if not isinstance(pdk_tree_raw, str) or not pdk_tree_raw:
+        raise ValueError("IO_TIMING_PDK_TREE_IDENTITY_MISSING")
+    pdk_tree = Path(pdk_tree_raw)
+
+    def validate_identity(row: Dict[str, object], kind: str) -> None:
+        path = Path(str(row.get("path") or ""))
+        try:
+            current = str(path.relative_to(pdk_tree))
+        except ValueError:
+            current = None
+        if row.get("pdk_relative_path") != current:
+            raise ValueError(
+                f"IO_TIMING_{kind}_IDENTITY_CHANGED: {path}")
+
+    scenes = receipt.get("scenes")
+    if not isinstance(scenes, dict) or not scenes:
+        raise ValueError("IO_TIMING_SCENE_RECEIPT_EMPTY")
+    reference = str(reference_liberty)
+    reference_sha = _io_timing_path_sha256(reference, container)
+    if reference_sha is None:
+        raise ValueError(f"IO_TIMING_CORE_UNREADABLE: {reference}")
+    candidates = []
+    for label, scene in scenes.items():
+        if not isinstance(scene, dict) or not isinstance(scene.get("core"), dict):
+            continue
+        core = scene["core"]
+        if (str(core.get("path")) == reference
+                or str(core.get("sha256")) == reference_sha):
+            candidates.append((str(label), scene))
+    populations = {tuple(str(model.get("path")) for model in
+                         (scene.get("models") or []) if isinstance(model, dict))
+                   for _label, scene in candidates}
+    if not candidates or len(populations) != 1:
+        raise ValueError(
+            f"IO_TIMING_SCENE_UNRESOLVED: core={reference} "
+            f"matching_scenes={[label for label, _scene in candidates]}")
+    _label, scene = candidates[0]
+    core = scene["core"]
+    validate_identity(core, "CORE")
+    if core.get("sha256") != reference_sha:
+        raise ValueError(f"IO_TIMING_CORE_BYTES_CHANGED: {reference}")
+    core_text = _read_pdk_text(reference, container)
+    if core_text is None:
+        raise ValueError(f"IO_TIMING_CORE_UNREADABLE: {reference}")
+    core_metadata = _PR.parse_liberty_model_metadata(core_text)
+    recorded_core_metadata = {key: core.get(key) for key in core_metadata}
+    if recorded_core_metadata != core_metadata:
+        raise ValueError(f"IO_TIMING_CORE_METADATA_CHANGED: {reference}")
+    source = scene.get("selection_source")
+    if not isinstance(source, dict):
+        raise ValueError("IO_TIMING_SELECTION_SOURCE_MISSING")
+    source_path = str(source.get("path") or "")
+    validate_identity(source, "SELECTION_SOURCE")
+    source_sha = _io_timing_path_sha256(source_path, container)
+    if source_sha is None or source_sha != source.get("sha256"):
+        raise ValueError(f"IO_TIMING_SELECTION_SOURCE_CHANGED: {source_path}")
+    models = scene.get("models")
+    if not isinstance(models, list) or not models:
+        raise ValueError("IO_TIMING_MODEL_ROSTER_EMPTY")
+    current_models = []
+    for model in models:
+        if not isinstance(model, dict) or not isinstance(model.get("path"), str):
+            raise ValueError("IO_TIMING_MODEL_RECORD_INVALID")
+        path = str(model["path"])
+        validate_identity(model, "MODEL")
+        digest = _io_timing_path_sha256(path, container)
+        if digest is None or digest != model.get("sha256"):
+            raise ValueError(f"IO_TIMING_MODEL_BYTES_CHANGED: {path}")
+        text = _read_pdk_text(path, container)
+        if text is None:
+            raise ValueError(f"IO_TIMING_MODEL_UNREADABLE: {path}")
+        metadata = _PR.parse_liberty_model_metadata(text)
+        recorded = {key: model.get(key) for key in metadata}
+        if metadata != recorded:
+            raise ValueError(f"IO_TIMING_MODEL_METADATA_CHANGED: {path}")
+        current_models.append((path, metadata))
+    required = receipt.get("required_masters")
+    if not isinstance(required, list) or not required:
+        raise ValueError("IO_TIMING_REACHABLE_MASTER_POPULATION_EMPTY")
+    owners = {str(master): [path for path, metadata in current_models
+                            if master in (metadata.get("cell_masters") or [])]
+              for master in required}
+    if owners != scene.get("reachable_master_owners") or any(
+            len(paths) != 1 for paths in owners.values()):
+        raise ValueError(
+            f"IO_TIMING_REACHABLE_MASTER_POPULATION_CHANGED: {owners}")
+    for path, _metadata in current_models:
+        if path not in out:
+            out.append(path)
     return out
 
 
 def _pnr_io_liberties_tcl(project: Path, pdk: PdkConfig, container: str,
                           corner_liberty_block: Optional[str]) -> str:
-    """Load only exact-PVT IO views into PnR's active timing scene(s).
+    """Load only producer-bound IO views into PnR's active timing scene(s).
 
     ``_sta_extra_liberties`` is the shared selector.  Local macro libraries
     are excluded here because the caller already emits them; this helper owns
     only the IO-pad delta.  Under multi-corner analysis every view is qualified
     with the corresponding scene.  A single-corner PDK gets a bare read of the
-    exact suffix matching its selected reference liberty.
+    producer-bound roster for its selected reference liberty.
     """
     local_macro = {str(path) for path in (pdk.macro_libs or [])}
     lines: List[str] = []
     if corner_liberty_block:
-        try:
-            by_label = _resolve_signoff_corner_libs(project, pdk, container)
-        except Exception:
-            return ""
+        by_label = _resolve_signoff_corner_libs(project, pdk, container)
         scene = {"SS": "ss", "TT": "tt", "FF": "ff"}
         for label in ("SS", "TT", "FF"):
             reference = by_label.get(label)
             if not reference:
                 continue
-            for liberty in _sta_extra_liberties(project, pdk, reference):
+            for liberty in _sta_extra_liberties(project, pdk, reference,
+                                                container):
                 if liberty not in local_macro:
                     lines.append(
                         f"read_liberty -corner {scene[label]} {liberty}")
     else:
         reference = getattr(pdk, "liberty", None)
         if reference:
-            for liberty in _sta_extra_liberties(project, pdk, reference):
+            for liberty in _sta_extra_liberties(project, pdk, reference,
+                                                container):
                 if liberty not in local_macro:
                     lines.append(f"read_liberty {liberty}")
     # Preserve first occurrence while making accidental duplicate discovery a
@@ -66843,30 +66978,16 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     for c in required:
         if sum(_classify_corner_from_name(f.name) == c for f in staged.glob('*.lib')) > 1:
             return refuse('ambiguous staged core library for ' + c)
-    io_record = project / 'reports/phase3/io_pad_chip_top.json'
-    io_views = []
-    if io_record.exists():
-        try:
-            io_views = json.loads(io_record.read_text())['io_library_liberty']
-            if not isinstance(io_views, list) or not io_views or not all(isinstance(x, str) and x for x in io_views):
-                raise ValueError('invalid IO inventory')
-        except (OSError, ValueError, KeyError, TypeError):
-            return refuse('invalid declared IO Liberty inventory')
     inventory = {}
     for c in required:
         lib = libs[c]
         if _classify_corner_from_name(Path(lib).name) != c:
             return refuse('core process identity mismatch: ' + c)
-        suffix = Path(lib).stem.partition('__')[2]
-        ios = sorted(set(x for x in io_views if suffix and Path(x).stem.endswith('__' + suffix)))
-        # One view per IO library family; several families are legitimate.
-        families = [Path(x).stem.rpartition('__')[0] for x in ios]
-        if io_views and (not ios or len(set(families)) != len(families)):
-            return refuse('missing or ambiguous exact-PVT IO library for ' + c)
-        declared_families = {Path(x).stem.rpartition('__')[0] for x in io_views}
-        if io_views and set(families) != declared_families:
-            return refuse('incomplete IO family inventory for ' + c)
-        inventory[c] = list(dict.fromkeys([lib] + ios + [str(x) for x in (pdk.macro_libs or [])]))
+        try:
+            selected = _sta_extra_liberties(project, pdk, lib, container)
+        except (OSError, ValueError) as exc:
+            return refuse(str(exc))
+        inventory[c] = list(dict.fromkeys([lib] + selected))
     # Every section names the files it timed AND their sha256, so the record
     # says which bytes a slack describes. The liberty lives inside the EDA
     # image; `_step_pdk_hasher` hashes it where it resolves.
@@ -66887,7 +67008,8 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
             # every other view the same STA run reads (IO-pad and macro
             # liberties), each with its own digest -- review wave 5
             'other_liberties': [
-                {'path': x, 'kind': ('io' if x in io_views else 'macro'),
+                {'path': x, 'kind': ('macro' if x in {
+                    str(path) for path in (pdk.macro_libs or [])} else 'io'),
                  'sha256': _lib_digest.get(x) or None}
                 for x in inventory[c][1:]]}
     failed = None     # (corner, reason) of the first native failure
@@ -66916,7 +67038,10 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
                              f'STA_BASIS_SHA256_SDC: {sources[c]["sdc_sha256"] or "UNAVAILABLE"}',
                              ] + [f'STA_BASIS_SHA256_{o["kind"].upper()}_LIBERTY: {o["sha256"] or "UNAVAILABLE"} {_to_container_path(o["path"], container)}'
                                   for o in sources[c]['other_liberties']] + [
-                             f'OCV_DERATE_APPLIED early={_FLAT_OCV_DERATE_EARLY} late={_FLAT_OCV_DERATE_LATE} flat-OCV'] + [f'STA_BASIS_IO_LIBERTY: {_to_container_path(x, container)}' for x in inventory[c][1:] if x in io_views]:
+                            f'OCV_DERATE_APPLIED early={_FLAT_OCV_DERATE_EARLY} late={_FLAT_OCV_DERATE_LATE} flat-OCV'] + [
+                                f'STA_BASIS_IO_LIBERTY: {_to_container_path(o["path"], container)}'
+                                for o in sources[c]['other_liberties']
+                                if o['kind'] == 'io']:
                     tcl += f'puts $_f {tq(line)}\n'
                 if j == 0:
                     tcl += _sta_link_census_tcl()
@@ -67166,7 +67291,7 @@ def _emit_spef_sta(project: Path, top: str, pdk: PdkConfig, container: str,
             "sign-off (stamped STA_SIGNOFF_CORNER=NOMINAL in the report)")
     macro_libs_tcl = "\n".join(
         f"read_liberty {_to_container_path(str(f), container)}"
-        for f in _sta_extra_liberties(project, pdk, lib_c))
+        for f in _sta_extra_liberties(project, pdk, lib_c, container))
     netlist_c = _to_container_path(str(netlist), container)
     sta_top = _sta_link_top(project, top, netlist,
                             netlist == routed_netlist)
@@ -68222,7 +68347,7 @@ def _emit_multi_corner_sta(project: Path, top: str, pdk: PdkConfig,
         rpt_c = _to_container_path(str(rpt), container)
         macro_libs_tcl = "\n".join(
             f"read_liberty {_to_container_path(str(f), container)}"
-            for f in _sta_extra_liberties(project, pdk, lib)
+            for f in _sta_extra_liberties(project, pdk, lib, container)
         )
         # Annotate the extracted parasitics when we have them — a corner
         # report with no SPEF under-counts interconnect delay at EVERY corner.
@@ -69736,7 +69861,7 @@ def _emit_corner_spef_sta(project: Path, top: str, pdk: PdkConfig,
                         if lbl not in (corner_libs or {})]
     macro_libs_tcl = "\n".join(
         f"read_liberty {_to_container_path(str(f), container)}"
-        for f in _sta_extra_liberties(project, pdk, pdk.liberty))
+        for f in _sta_extra_liberties(project, pdk, pdk.liberty, container))
     netlist_c = _to_container_path(str(netlist), container)
     sdc_c = _to_container_path(str(sdc), container)
     rpt_out.parent.mkdir(parents=True, exist_ok=True)
@@ -70006,7 +70131,7 @@ def _emit_mcorner_ocv_sta(project: Path, top: str, pdk: PdkConfig,
         lib_c = corner_libs[label]
         macro_libs_tcl = "\n".join(
             f"read_liberty {_to_container_path(str(f), container)}"
-            for f in _sta_extra_liberties(project, pdk, lib_c))
+            for f in _sta_extra_liberties(project, pdk, lib_c, container))
         spef_tcl = ""
         spef_disc = "no-SPEF (netlist-only)"
         if spef_host and Path(spef_host).is_file():
@@ -71055,7 +71180,8 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                 "connections from matching producer + final DEF evidence.")
     lib_c = _to_container_path(str(pdk.liberty), container)
     extra_liberties_host = [
-        str(value) for value in _sta_extra_liberties(project, pdk, pdk.liberty)
+        str(value) for value in _sta_extra_liberties(
+            project, pdk, pdk.liberty, container)
         if str(value) != str(pdk.liberty)]
     extra_liberties_c: List[str] = []
     for value in extra_liberties_host:
@@ -72013,7 +72139,7 @@ def _emit_power_report(project: Path, top: str, pdk: PdkConfig,
     spef_disc = spef_path.name if spef_path else "none (netlist-only)"
     macro_libs_tcl = "\n".join(
         f"read_liberty {_to_container_path(str(f), container)}"
-        for f in _sta_extra_liberties(project, pdk, pdk.liberty)
+        for f in _sta_extra_liberties(project, pdk, pdk.liberty, container)
     )
     link_top = _sta_link_top(project, top, netlist,
                              netlist == routed_netlist)
@@ -72575,7 +72701,8 @@ def _ir_supply_from_psm_log(log: str,
     return v, v > 0.0
 
 
-def _step24_basis_inputs(project: Path, def_file: Path, pdk: PdkConfig) -> Dict[str, Any]:
+def _step24_basis_inputs(project: Path, def_file: Path, pdk: PdkConfig,
+                         container: str = "") -> Dict[str, Any]:
     """F20 — THE ONE POWER BASIS step 24's two tiers solve on.
 
     The static session (`_emit_ir_em_reports`) and the transient emitter
@@ -72607,7 +72734,8 @@ def _step24_basis_inputs(project: Path, def_file: Path, pdk: PdkConfig) -> Dict[
         spef_reason = "the step-22 SPEF is older than the routed DEF"
     liberty = str(pdk.liberty) if getattr(pdk, "liberty", None) else None
     try:
-        extra = _sta_extra_liberties(project, pdk, pdk.liberty) if liberty else []
+        extra = (_sta_extra_liberties(project, pdk, pdk.liberty, container)
+                 if liberty else [])
     except AttributeError:  # a duck-typed PDK stub with no library lists
         extra = []
     # Once the primary ran, both static EM and the transient tier consume its
@@ -72639,7 +72767,7 @@ def _step24_transient_argv(project: Path, def_file: Path, pdk: PdkConfig,
     metal prefix, and the Step-24 record to report beside it. Every input is
     explicit — no `--project` auto-discovery, which would add an SDC the
     static session did not read, or pick another DEF."""
-    basis = _step24_basis_inputs(project, def_file, pdk)
+    basis = _step24_basis_inputs(project, def_file, pdk, container)
     argv = [sys.executable, str(PROGRAMS_DIR / "dynamic_ir_vectored_emit.py"),
             "--out", str(out_json),
             "--def", str(basis["def"]),
@@ -72825,13 +72953,13 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     # 15.0 mV. On this one basis: 21.9 mW, 7.41/8.39 mV static, 14.8/16.8 mV
     # quasi-static, and every record carries the same basis id.
     import dynamic_ir_vectored_emit as _dyn_basis
-    _basis = _step24_basis_inputs(project, def_file, pdk)
+    _basis = _step24_basis_inputs(project, def_file, pdk, container)
     _primary_ir_mode = _step24_primary_mode(project)
     if _primary_ir_mode != "direct":
         if not em_only:
             _librelane_step24_record(project, top, pdk, _primary_ir_mode,
                                       _basis["spef"] or (_pl.extracted_dir(project) / f"{top}.spef"), [])
-        _basis = _step24_basis_inputs(project, def_file, pdk)
+        _basis = _step24_basis_inputs(project, def_file, pdk, container)
         liberty_c = _to_container_path(_basis["liberty"], container)
         _oc = _liberty_operating_condition(_basis["liberty"], container)
         _oc_tcl = (f"catch {{set_operating_conditions {_oc}}}\n" if _oc else "")

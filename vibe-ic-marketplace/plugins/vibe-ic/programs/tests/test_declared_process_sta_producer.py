@@ -22,6 +22,13 @@ def scene(tmp_path, monkeypatch):
         f=tmp_path/f'io__{c}_25C_1v00.lib';f.write_text('library(io) {}');ios.append(str(f))
     record=tmp_path/'reports/phase3/io_pad_chip_top.json';record.parent.mkdir(parents=True)
     record.write_text(json.dumps({'io_library_liberty':ios}))
+    io_mode={'refuse':False}
+    def select_io(project,pdk,reference,container=''):
+        if io_mode['refuse']:
+            raise ValueError('IO_TIMING_SCENE_UNRESOLVED')
+        corner=next(c for c,path in by.items() if path==reference)
+        return [str(x) for x in (pdk.macro_libs or [])]+[ios[['SS','TT','FF'].index(corner)]]
+    monkeypatch.setattr(p3,'_sta_extra_liberties',select_io)
     monkeypatch.setattr(p3,'_resolve_signoff_corner_libs',lambda *a:by)
     monkeypatch.setattr(p3,'_to_container_path',lambda x,*a:str(x))
     monkeypatch.setattr(p3,'_sta_link_top',lambda *a:'dut')
@@ -70,7 +77,7 @@ def test_all_declared_process_roles_and_input_binding(scene):
 def test_missing_declared_input_refused(scene,missing):
     s=scene
     if missing=='core':s['by'].pop('TT')
-    elif missing=='io':s['record'].write_text(json.dumps({'io_library_liberty':s['ios'][:1]}))
+    elif missing=='io':s['io_mode']['refuse']=True
     else:{'sdc':s['pnr']/'constraint.sdc','spef':s['spef'],'netlist':s['pnr']/'dut_pnr.v'}[missing].unlink()
     assert not s['emit']();assert not s['calls']
 
@@ -87,9 +94,8 @@ def test_negative_measurement_preserved(scene):
     assert scene['emit']()
     assert '-1' in scene['rpt'].read_text()
 
-def test_ambiguous_io_refused(scene):
-    s=scene;other=s['tmp_path']/'duplicate/io__tt_25C_1v00.lib';other.parent.mkdir();other.write_text('library(io) {}')
-    s['record'].write_text(json.dumps({'io_library_liberty':s['ios']+[str(other)]}))
+def test_io_scene_selector_refusal_propagates(scene):
+    s=scene;s['io_mode']['refuse']=True
     assert not s['emit']();assert not s['calls']
 
 

@@ -2,7 +2,6 @@
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
@@ -14,15 +13,12 @@ from eda_report_audit import _check_antenna  # noqa: E402
 
 
 def test_repair_reads_exact_io_liberty_in_each_signoff_scene(tmp_path):
-    report = tmp_path / "reports/phase3/io_pad_chip_top.json"
-    report.parent.mkdir(parents=True)
-    report.write_text(json.dumps({"io_library_liberty": [
-        "/io__ss.lib", "/io__tt.lib", "/io__ff.lib"]}))
-    pdk = SimpleNamespace(macro_libs=[])
     corners = {"SS": "/core__ss.lib", "TT": "/core__tt.lib",
                "FF": "/core__ff.lib"}
-    extras = {c: runner._sta_extra_liberties(tmp_path, pdk, lib)
-              for c, lib in corners.items()}
+    # This unit owns scene-to-Tcl wiring. Producer receipt selection is
+    # exercised separately against real Liberty contents.
+    extras = {"SS": ["/io__ss.lib"], "TT": ["/io__tt.lib"],
+              "FF": ["/io__ff.lib"]}
     deck = runner._build_postroute_timing_repair_tcl(
         "chip", "/tech.lef", "/cell.lef", corners["TT"],
         "/pnr", "/repair", "M", corner_libs=corners,
