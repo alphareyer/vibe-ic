@@ -26944,7 +26944,19 @@ def main() -> int:
     # and NOT a flow gate clause: the flow's own Step-1 `required_outputs`
     # comment records why a clause cannot own this — `required_outputs` is
     # unconditional and the digest is staged only at an authoring WAIVE.
-    plan.append(step_lesson_consumption(project))
+    # A bounded continuation must not re-run this advisory reader when its
+    # owning RTL-validation span is outside the declared window.  Apart from
+    # doing work the invocation did not request, the reader can carry absolute
+    # paths from an earlier project's scoring record into the new report.  The
+    # report writer correctly refuses such relocated references, so keep that
+    # refusal strict and prevent the out-of-window producer from authoring the
+    # row in the first place.
+    if _before_entry("rtl_validate", _entry_site):
+        plan.append(_entry_sentinel("lesson_consumption"))
+    elif _after_exit("rtl_validate"):
+        plan.append(_exit_sentinel("lesson_consumption"))
+    else:
+        plan.append(step_lesson_consumption(project))
 
     # Flow Step 2, clause 1 — cross-layer rewrite fidelity. Unconditional: the
     # judge itself decides applicability and WRITES the verdict, so a design

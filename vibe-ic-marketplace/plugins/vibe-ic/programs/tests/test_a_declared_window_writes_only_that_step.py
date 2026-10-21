@@ -1056,10 +1056,10 @@ def test_refresh_only_dispatches_no_step():
 @pytest.mark.parametrize("entry,exit_step,expected", [
     ("7", "9", []),
     ("9", "9", []),
-    ("2", "2", ["crosslayer", "lint", "pad_budget", "arith_decl", "frontend"]),
+    ("2", "2", ["lesson", "crosslayer", "lint", "pad_budget", "arith_decl", "frontend"]),
     ("4", "4", ["reference", "functional", "arith_decl", "coverage", "frontend"]),
-    (None, None, ["crosslayer", "lint", "pad_budget", "reference", "functional", "qsf", "fpga_sdc", "arith_decl", "coverage", "frontend"]),
-    ("1", "13", ["crosslayer", "lint", "pad_budget", "reference", "functional", "qsf", "fpga_sdc", "arith_decl", "coverage", "frontend"]),
+    (None, None, ["lesson", "crosslayer", "lint", "pad_budget", "reference", "functional", "qsf", "fpga_sdc", "arith_decl", "coverage", "frontend"]),
+    ("1", "13", ["lesson", "crosslayer", "lint", "pad_budget", "reference", "functional", "qsf", "fpga_sdc", "arith_decl", "coverage", "frontend"]),
 ])
 def test_main_dispatch_respects_selected_frontend_ownership(
         tmp_path, entry, exit_step, expected, board_requested=False):
@@ -1094,6 +1094,7 @@ def test_main_dispatch_respects_selected_frontend_ownership(
         'step_otp_image_check': 'otp', 'step_fpga_compile': 'compile',
         'step_fpga_burn': 'burn', 'step_usb_hid_tester_verify': 'board_test',
         'step_crosslayer_rewrite_fidelity': 'crosslayer',
+        'step_lesson_consumption': 'lesson',
         'step_slot_pad_budget': 'pad_budget', 'step_arith_declaration_emit': 'arith_decl',
     }
     helper_names = {'_site_order', '_before_entry', '_after_exit',
