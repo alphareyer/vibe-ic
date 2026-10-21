@@ -3,12 +3,15 @@
 Historical comparisons are not declarations. Conflicting explicit values remain
 unknown; no corpus-global name/value join or generated-artifact inference.
 """
+import hashlib
+import math
 import re
 from pathlib import Path
 
 _NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_$]*\Z')
 _PHASE_COLUMNS = ('clock', 'reset', 'polarity', 'assertion', 'release',
                   'release synchronizer stages')
+_GUARD_COLUMNS = ('deassertion guard ns', 'release guard ns')
 
 
 def _current_phase_authority(text):
@@ -45,6 +48,10 @@ def _phase_table_rows(text):
         names = tuple(cell.lower() for cell in cells)
         if set(_PHASE_COLUMNS).issubset(names):
             columns = {key: names.index(key) for key in _PHASE_COLUMNS}
+            for key in _GUARD_COLUMNS:
+                if key in names:
+                    columns['deassertion guard ns'] = names.index(key)
+                    break
             continue
         if columns is None or all(re.fullmatch(r'[-:\s]+', cell) for cell in cells):
             continue
@@ -68,6 +75,12 @@ def phase_declarations(text):
         release = re.fullmatch(r'(asynchronous|synchronous)(?:\s+to\s+`?([A-Za-z_][\w$]*)`?)?',
                                values['release'], re.I)
         polarity = values['polarity'].lower().replace('-', '_')
+        try:
+            guard = float(values.get('deassertion guard ns', 'unknown'))
+        except ValueError:
+            guard = 'unknown'
+        if isinstance(guard, float) and not math.isfinite(guard):
+            guard = 'unknown'
         yield {'reset': reset,
                'clock': values['clock'] if _NAME.fullmatch(values['clock']) else 'unknown',
                'assertion': assertion,
@@ -75,6 +88,7 @@ def phase_declarations(text):
                'release_clock': release[2] if release and release[2] else 'unknown',
                'release_stages': int(values['release synchronizer stages'])
                    if re.fullmatch(r'[1-9]\d*', values['release synchronizer stages']) else 'unknown',
+               'deassertion_guard_ns': guard,
                'polarity': polarity if polarity in ('active_low', 'active_high') else 'unknown',
                'line': number, 'quote': raw.strip()}
 
@@ -83,17 +97,20 @@ def reset_domain_bindings(name, extracted):
     """Merge the same explicit domain declaration without choosing a conflict."""
     groups = {}
     for source, text in extracted.items():
+        source_sha256 = hashlib.sha256(text.encode()).hexdigest()
         for row in phase_declarations(text):
             if row['reset'] == name:
-                groups.setdefault(row['clock'], []).append((source, row))
+                groups.setdefault(row['clock'], []).append((source, source_sha256, row))
     result = []
     for clock, rows in groups.items():
         binding = {'clock': clock}
-        for field in ('assertion', 'release', 'release_clock', 'release_stages', 'polarity'):
-            values = {row[field] for _, row in rows}
+        for field in ('assertion', 'release', 'release_clock', 'release_stages',
+                      'deassertion_guard_ns', 'polarity'):
+            values = {row[field] for _, _, row in rows}
             binding[field] = next(iter(values)) if len(values) == 1 else 'unknown'
-        binding['basis'] = [{'file': source, 'line': row['line'], 'quote': row['quote']}
-                            for source, row in rows]
+        binding['basis'] = [{'file': source, 'line': row['line'], 'quote': row['quote'],
+                             'sha256': source_sha256}
+                            for source, source_sha256, row in rows]
         result.append(binding)
     # A phase table is not allowed to overrule an independent declaration.
     # Compare assertion and release separately, including any explicit target
@@ -159,7 +176,12 @@ def admit_reset_phases(project, documents, surface=None):
                     or b['release'] not in ('asynchronous', 'synchronous')
                     or b['release_clock'] != b['clock']
                     or b['polarity'] not in ('active_low', 'active_high')
-                    or type(b['release_stages']) is not int or b['release_stages'] <= 0):
+                    or type(b['release_stages']) is not int or b['release_stages'] <= 0
+                    or (b['assertion'] == 'asynchronous'
+                        and b['release'] == 'synchronous'
+                        and (type(b['deassertion_guard_ns']) not in (int, float)
+                             or not math.isfinite(b['deassertion_guard_ns'])
+                             or b['deassertion_guard_ns'] <= 0))):
                 refuse(f'{name}: incomplete, conflicting or unbound source phase')
 
     def same_bindings(actual, wanted):
@@ -168,12 +190,14 @@ def admit_reset_phases(project, documents, surface=None):
         by_clock = {b.get('clock'): b for b in actual if isinstance(b, dict)}
         if len(by_clock) != len(actual):
             return False
-        keys = ('clock', 'assertion', 'release', 'release_clock', 'release_stages', 'polarity')
+        keys = ('clock', 'assertion', 'release', 'release_clock', 'release_stages',
+                'deassertion_guard_ns', 'polarity')
         def basis(b):
             rows = b.get('basis')
             if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
                 return None
-            return sorted((str(r.get('file')), str(r.get('line')), str(r.get('quote'))) for r in rows)
+            return sorted((str(r.get('file')), str(r.get('line')), str(r.get('quote')),
+                           str(r.get('sha256'))) for r in rows)
         for w in wanted:
             a = by_clock.get(w['clock'], {})
             if (any(a.get(k) != w[k] for k in keys)

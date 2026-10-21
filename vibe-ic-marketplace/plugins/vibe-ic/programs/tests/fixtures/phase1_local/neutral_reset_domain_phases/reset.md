@@ -11,10 +11,10 @@ The module **`reset_bridge`** has the following hardware interfaces defined.
 
 ## Reset phase and domain contract
 
-| Clock | Reset | Polarity | Assertion | Release | Release synchronizer stages |
-|---|---|---|---|---|---:|
-| clk_i | rst_n | active-low | asynchronous | synchronous to clk_i | 2 |
-| clk_aux_i | rst_n | active-low | asynchronous | synchronous to clk_aux_i | 2 |
+| Clock | Reset | Polarity | Assertion | Release | Release synchronizer stages | Deassertion guard ns |
+|---|---|---|---|---|---:|---:|
+| clk_i | rst_n | active-low | asynchronous | synchronous to clk_i | 2 | 0.7 |
+| clk_aux_i | rst_n | active-low | asynchronous | synchronous to clk_aux_i | 2 | 0.9 |
 
 The same external reset asserts both domains. Each domain releases reset only
 after its own two rising clock edges. Activity in one domain cannot release

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import ast
+import shutil
 import sys
 import subprocess
 from pathlib import Path
@@ -12,6 +13,7 @@ import pytest
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 import phase1_doc_one_shot_runner as D
+import _path_layout as PL
 
 FIXTURE = Path(__file__).parent / 'fixtures/phase1_local/neutral_reset_domain_phases/reset.md'
 
@@ -48,13 +50,16 @@ def test_explicit_per_domain_assertion_and_release_reach_normal_consumers(tmp_pa
     assert reset['polarity'] == 'active_low'
     expected = {clock: {'clock': clock, 'assertion': 'asynchronous',
                        'release': 'synchronous', 'release_clock': clock,
-                       'release_stages': 2, 'polarity': 'active_low'}
+                       'release_stages': 2,
+                       'deassertion_guard_ns': 0.7 if clock == 'clk_i' else 0.9,
+                       'polarity': 'active_low'}
                 for clock in ['clk_i', 'clk_aux_i']}
     actual = {row['clock']: row for row in reset['domain_bindings']}
     for clock, fields in expected.items():
         assert {key: actual[clock][key] for key in fields} == fields
         assert actual[clock]['basis'][0]['file'] == 'input/docs/reset.md'
         assert actual[clock]['basis'][0]['quote'] in FIXTURE.read_text().splitlines()
+        assert len(actual[clock]['basis'][0]['sha256']) == 64
     for layer in docs.values():
         domains = {row['name']: row for row in layer.get('clock_domains', [])}
         for clock, fields in expected.items():
@@ -75,7 +80,8 @@ def test_explicit_per_domain_assertion_and_release_reach_normal_consumers(tmp_pa
 ])
 def test_phase_values_stay_bound_to_the_explicit_domain(tmp_path, change, field, expected):
     text = FIXTURE.read_text()
-    row = '| clk_aux_i | rst_n | active-low | asynchronous | synchronous to clk_aux_i | 2 |'
+    row = ('| clk_aux_i | rst_n | active-low | asynchronous | '
+           'synchronous to clk_aux_i | 2 | 0.9 |')
     replacement = row
     if change == 'missing_stages':
         replacement = row.replace('| 2 |', '| unspecified |')
@@ -139,6 +145,10 @@ def test_current_source_phase_admission_positive(tmp_path, depth):
         assert 'set_false_path' not in text
         assert f'release=synchronous to clk_i stages={depth}' in text
         assert f'release=synchronous to clk_aux_i stages={depth}' in text
+        assert 'set_input_delay -clock clk_i -min 0.7 [get_ports {rst_n}]' in text
+        assert ('set_input_delay -clock clk_aux_i -min -add_delay 0.9 '
+                '[get_ports {rst_n}]') in text
+        assert 'set_input_delay  -clock clk_i -min 0.0 [get_ports {rst_n}]' not in text
     # Exercise the real common-header consumer without a simulator, DUT or
     # reference TB: its selected-clock post-release wait must use this depth.
     import professional_tb_gen as T
@@ -149,8 +159,9 @@ def test_current_source_phase_admission_positive(tmp_path, depth):
     assert reset.body[-1].iter.args[0].value == depth
 
 
-@pytest.mark.parametrize('mutation', ['assertion', 'depth', 'missing', 'source', 'release_clock',
-                                     'float_depth', 'projection_empty', 'basis', 'direction_and_missing'])
+@pytest.mark.parametrize('mutation', ['assertion', 'depth', 'guard', 'missing', 'source',
+                                     'release_clock', 'float_depth', 'projection_empty',
+                                     'basis', 'basis_sha', 'direction_and_missing'])
 def test_current_source_phase_admission_refuses(tmp_path, mutation):
     import professional_tb_gen as T
     docs = _emit(tmp_path, FIXTURE.read_text())
@@ -161,6 +172,8 @@ def test_current_source_phase_admission_refuses(tmp_path, mutation):
                 if 'sync' in value: value['sync'] = 'synchronous'
             if mutation in ('depth', 'float_depth') and 'release_stages' in value:
                 value['release_stages'] = 3 if mutation == 'depth' else 2.0
+            if mutation == 'guard' and value.get('deassertion_guard_ns') == 0.7:
+                value['deassertion_guard_ns'] = 0.8
             if mutation in ('missing', 'direction_and_missing'):
                 value.pop('domain_bindings', None); value.pop('reset_bindings', None)
             if mutation == 'direction_and_missing' and value.get('name') == 'rst_n':
@@ -170,6 +183,8 @@ def test_current_source_phase_admission_refuses(tmp_path, mutation):
                 value['reset_bindings'] = []
             if mutation == 'basis' and 'basis' in value:
                 value['basis'][0]['quote'] = 'unrelated current input'
+            if mutation == 'basis_sha' and 'basis' in value:
+                value['basis'][0]['sha256'] = '0' * 64
             if mutation == 'release_clock' and 'release_clock' in value:
                 value['release_clock'] = 'clk_aux_i'
             for child in value.values(): visit(child)
@@ -190,6 +205,50 @@ def test_current_source_phase_admission_refuses(tmp_path, mutation):
     with pytest.raises(ValueError, match='RESET_PHASE_SOURCE_ADMISSION_REFUSED'):
         T._load_clock_reset(tmp_path, docs['L9_INTEGRATION_SPEC.json']['ports'])
     assert all(p.read_bytes() == data for p, data in before.items())
+
+
+@pytest.mark.parametrize('old,guard', [
+    ('| 2 | 0.7 |', '0'),
+    ('| 2 | 0.7 |', 'unspecified'),
+    ('| 2 | 0.9 |', '0'),
+    ('| 2 | 0.9 |', 'unspecified'),
+])
+def test_async_assert_sync_release_requires_each_domain_guard_before_sdc(
+        tmp_path, old, guard):
+    text = FIXTURE.read_text().replace(old, old.replace(old.split()[-2], guard))
+    docs = _emit(tmp_path, text)
+    cp = subprocess.run([sys.executable, str(PROGRAMS / 'sdc_gen.py'), str(tmp_path), '--force'],
+                        capture_output=True, text=True)
+    assert cp.returncode == 1, cp.stdout + cp.stderr
+    assert 'RESET_PHASE_SOURCE_ADMISSION_REFUSED' in cp.stdout + cp.stderr
+    gate = json.loads(PL.report_path(tmp_path, 'phase2/gates/sdc_gen.json').read_text())
+    assert gate['exception_admission'] == 'REFUSED'
+    assert not list((tmp_path / 'phase2/stage1/fpga').glob('*.sdc'))
+
+
+def test_native_opensta_reads_each_domain_reset_guard(tmp_path):
+    tool = shutil.which('sta')
+    assert tool, 'this native consumer test requires the EDA image'
+    docs = _emit(tmp_path, FIXTURE.read_text())
+    rtl = tmp_path / 'rtl/reset_bridge.v'
+    rtl.parent.mkdir()
+    rtl.write_text('module reset_bridge(input clk_i, input clk_aux_i, input rst_n, '
+                   'output ready_o); assign ready_o = rst_n; endmodule\n')
+    cp = subprocess.run([sys.executable, str(PROGRAMS / 'sdc_gen.py'), str(tmp_path), '--force'],
+                        capture_output=True, text=True)
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    deck = next(PL.fpga_early_dir(tmp_path).glob('*.sdc'))
+    script = tmp_path / 'read_reset_guard.tcl'
+    script.write_text('proc derive_pll_clocks {} {}\n'
+                      'proc derive_clock_uncertainty {} {}\n'
+                      f'read_verilog {{{rtl}}}\nlink_design reset_bridge\n'
+                      f'read_sdc {{{deck}}}\nputs RESET_GUARD_SDC_OK\nexit\n')
+    run = subprocess.run([tool, '-no_init', '-exit', str(script)],
+                         capture_output=True, text=True, timeout=120)
+    output = run.stdout + run.stderr
+    assert run.returncode == 0 and 'RESET_GUARD_SDC_OK' in output, output
+    assert 'Error:' not in output and 'STA-' not in output, output
+    assert docs['L9_INTEGRATION_SPEC.json']['reset_domains'][0]['name'] == 'rst_n'
 
 
 _NONCURRENT_PHASE_INPUTS = {'denied_note': '# NeutralCore\n\nThe module **`reset_bridge`** has the following hardware interfaces defined.\n\n| Signal | Direction | Type | Width | Description |\n|---|---|---|---:|---|\n| clk_i | input | logic | 1 | Main rising-edge clock, period 20 ns. |\n| clk_aux_i | input | logic | 1 | Auxiliary rising-edge clock, period 32 ns. |\n| rst_n | input | logic | 1 | System-supplied active-low global reset for both clock domains. |\n| ready_o | output | logic | 1 | Ready output. |\n\n## Current legacy reset contract\n\nrst_n is an active-low asynchronous reset. Separate release stages are not specified.\n\n## Non-binding comparison table\n\n| Clock | Reset | Polarity | Assertion | Release | Release synchronizer stages | Note |\n|---|---|---|---|---|---:|---|\n| clk_i | rst_n | active-low | asynchronous | synchronous to clk_i | 2 | Not a current implementation requirement |\n| clk_aux_i | rst_n | active-low | asynchronous | synchronous to clk_aux_i | 2 | Not a current implementation requirement |\n', 'historical_heading': '# NeutralCore\n\nThe module **`reset_bridge`** has the following hardware interfaces defined.\n\n| Signal | Direction | Type | Width | Description |\n|---|---|---|---:|---|\n| clk_i | input | logic | 1 | Main rising-edge clock, period 20 ns. |\n| clk_aux_i | input | logic | 1 | Auxiliary rising-edge clock, period 32 ns. |\n| rst_n | input | logic | 1 | System-supplied active-low global reset for both clock domains. |\n| ready_o | output | logic | 1 | Ready output. |\n\n## Current legacy reset contract\n\nrst_n is an active-high synchronous reset. Separate release stages are not specified.\n\n## Historical comparison\n\nThe following obsolete alternative is not the current implementation.\n\n| Clock | Reset | Polarity | Assertion | Release | Release synchronizer stages | Note |\n|---|---|---|---|---|---:|---|\n| clk_i | rst_n | active-low | asynchronous | synchronous to clk_i | 2 | Alternative only |\n| clk_aux_i | rst_n | active-low | asynchronous | synchronous to clk_aux_i | 2 | Alternative only |\n'}

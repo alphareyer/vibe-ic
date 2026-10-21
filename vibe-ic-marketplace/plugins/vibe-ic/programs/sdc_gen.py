@@ -760,6 +760,43 @@ def _reset_contract(l9: dict, wave: dict, surface: Optional[set] = None) -> dict
     return out
 
 
+def _bind_reset_deassertion_guards(
+        resets: dict, emitted_clocks: List[Tuple[str, str, float]]) -> None:
+    """Bind each async-assert/sync-release guard to one emitted clock.
+
+    A guard is external environment authority, never a value inferred from a
+    failing removal slack.  The source admission has already bound its quote
+    and SHA-256; this step proves the clock named by that source is present in
+    the exact SDC being emitted.
+    """
+    clock_labels = {}
+    for label, port, _period in emitted_clocks:
+        clock_labels.setdefault(label, set()).add(label)
+        clock_labels.setdefault(port, set()).add(label)
+    for reset, rec in resets.items():
+        bindings = rec.get("domain_bindings") or []
+        for binding in bindings:
+            if (binding.get("assertion"), binding.get("release")) != (
+                    "asynchronous", "synchronous"):
+                continue
+            guard = binding.get("deassertion_guard_ns")
+            if (type(guard) not in (int, float) or not math.isfinite(guard)
+                    or guard <= 0):
+                raise ValueError(
+                    f"SDC_RESET_DEASSERTION_GUARD_NOT_MEASURED: {reset}/"
+                    f"{binding.get('clock')}: current source must declare a "
+                    "positive deassertion guard ns; zero/absent and a value "
+                    "inferred from STA slack are not authority")
+            labels = clock_labels.get(binding.get("release_clock"), set())
+            if len(labels) != 1:
+                raise ValueError(
+                    f"SDC_RESET_DEASSERTION_CLOCK_REFUSED: {reset}/"
+                    f"{binding.get('clock')}: release clock "
+                    f"{binding.get('release_clock')!r} binds to "
+                    f"{sorted(labels)} in the emitted SDC")
+            binding["sdc_clock"] = next(iter(labels))
+
+
 def _source_backed_record(project: Path, rec: dict) -> bool:
     """A producer source anchor must resolve to the supplied design input."""
     source = rec.get("source")
@@ -886,7 +923,10 @@ def _render_sdc(top: str, clock_port: str, period_ns: float,
         for binding in rec.get("domain_bindings", []):
             lines.append(f"# Reset {name}/{binding['clock']}: assertion={binding['assertion']} "
                          f"release={binding['release']} to {binding['release_clock']} "
-                         f"stages={binding['release_stages']}; sync summarizes assertion only")
+                         f"stages={binding['release_stages']} "
+                         f"deassertion_guard_ns={binding.get('deassertion_guard_ns')} "
+                         f"source_sha256={(binding.get('basis') or [{}])[0].get('sha256')}; "
+                         "sync summarizes assertion only")
     if reset_contract:
         lines.append("")
     # Pick a short user-friendly clock name
@@ -932,6 +972,21 @@ def _render_sdc(top: str, clock_port: str, period_ns: float,
     if inputs:
         lines.append("# Synchronous data inputs (moderate setup/hold)")
         for sig in inputs:
+            reset = (reset_contract or {}).get(sig)
+            guarded = [binding for binding in (reset or {}).get("domain_bindings", [])
+                       if (binding.get("assertion"), binding.get("release")) ==
+                       ("asynchronous", "synchronous")]
+            if guarded:
+                lines.append(f"# {sig}: source-authorized deassertion guard per release domain")
+                for index, binding in enumerate(guarded):
+                    clock = binding["sdc_clock"]
+                    add = " -add_delay" if index else ""
+                    lines.append(f"set_input_delay -clock {clock} -max{add} {io_max} "
+                                 f"[get_ports {{{sig}}}]")
+                    lines.append(f"set_input_delay -clock {clock} -min{add} "
+                                 f"{float(binding['deassertion_guard_ns']):g} "
+                                 f"[get_ports {{{sig}}}]")
+                continue
             lines.append(f"set_input_delay  -clock {clock_label} -max {io_max} "
                          f"[get_ports {{{sig}}}]")
             lines.append(f"set_input_delay  -clock {clock_label} -min 0.0 "
@@ -1316,6 +1371,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             label = ("clk_50" if "50" in clock_port else
                      "clk_100" if "100" in clock_port else "clk_main")
             emitted_clocks = [(label, clock_port, period_ns)]
+        _bind_reset_deassertion_guards(resets, emitted_clocks)
         exceptions = _bound_exceptions(project, l19, top_ports, emitted_clocks)
         # A design-authored full directional cut can replace that I/O role.
         # Partial clock/pin exceptions remain additive: do not enlarge them.
