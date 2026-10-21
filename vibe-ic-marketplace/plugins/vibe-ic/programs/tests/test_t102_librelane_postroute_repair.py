@@ -358,6 +358,15 @@ def test_the_repair_actuator_and_its_domains_are_executable_and_in_the_tree():
         assert reg.controllers[cid].actuator_id == 'timing.repair_setup'
     # Every actuator parameter reaches a variable the plugin step declares.
     assert set(act.parameters) == set(prr.PARAM_VARS)
+    assert reg.controllers['postroute.repair_drv'].plan == (
+        {'bounded_drive_strength': True},)
+
+
+def test_bounded_drive_strength_cli_is_strict_boolean():
+    assert prr._bool_arg('true') is True
+    assert prr._bool_arg('0') is False
+    with pytest.raises(prr.argparse.ArgumentTypeError, match='expected true/false'):
+        prr._bool_arg('maybe')
 
 
 def test_the_hold_buffer_budget_above_the_guardrail_is_refused_not_clamped():
@@ -1124,6 +1133,28 @@ def test_every_variable_the_script_reads_is_declared_by_the_step():
                                                            '_PLACEMENT_REFUSED'))}
     assert used <= declared, sorted(used - declared)
     assert set(prr.PARAM_VARS.values()) <= declared
+
+
+def test_bounded_strength_is_only_the_drv_noop_recovery_and_keeps_existing_judges():
+    main = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    helper = (STEP_DIR / 'bounded_drive_strength.tcl').read_text()
+    assert 'VIBEIC_PRR_BOUNDED_DRIVE_STRENGTH' in main
+    gate = main.index('&& $::vic_native_changed == 0')
+    assert main.index('[sta::max_slew_violation_count] > 0', gate) > gate
+    assert main.index('vic_bounded_drive_strength', gate) > gate
+    # Target and candidate identity come from the running EDA session.
+    for required in ('report_check_types -max_slew -violators',
+                     'sta::find_equiv_cells', 'get_lib_cells -quiet',
+                     'get_property $cell dont_use', 'isDoNotTouch',
+                     '_PNR_EXCLUDED_CELLS', 'swapMaster'):
+        assert required in helper
+    # A candidate is still judged by the already-shipping route and signoff
+    # chain after the helper changes a master.
+    assert main.index('vic_bounded_drive_strength', gate) < main.index(
+        '# ---- 5. what changed')
+    assert 'vic_eco_route ::vic_dirty eco_route' in main
+    assert 'vic_annotate after' in main
+    assert 'check_antennas' in main
 
 
 def test_the_step_is_registered_with_every_earlier_plugin_step():

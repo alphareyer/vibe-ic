@@ -138,6 +138,14 @@ class PostRouteRepair(ResizerStep):
                 units="%",
             ),
             Variable(
+                "VIBEIC_PRR_BOUNDED_DRIVE_STRENGTH",
+                bool,
+                "After an exact native no-op with measured max-slew residue, "
+                "try the smallest legal functionally-equivalent linked-Liberty "
+                "master that measurably improves the violating net.",
+                default=False,
+            ),
+            Variable(
                 "VIBEIC_PRR_MAX_FANOUT",
                 Optional[int],
                 "The fanout cap sign-off judges: the strictest set_max_fanout "

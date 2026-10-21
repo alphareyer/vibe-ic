@@ -114,6 +114,7 @@ PARAM_VARS = {
     "setup_max_buffer_pct": "VIBEIC_PRR_SETUP_MAX_BUFFER_PCT",
     "hold_max_buffer_pct": "VIBEIC_PRR_HOLD_MAX_BUFFER_PCT",
     "repair_tns_pct": "VIBEIC_PRR_SETUP_REPAIR_TNS_PCT",
+    "bounded_drive_strength": "VIBEIC_PRR_BOUNDED_DRIVE_STRENGTH",
 }
 
 #: `measure` exits with this when the adopted state cannot answer; the
@@ -1557,6 +1558,15 @@ def handoff(project: Path, report: Dict[str, Any], targets: Dict[str, Path]) -> 
                                  project / "reports/phase3/librelane_postroute_repair_handoff.json")
 
 
+def _bool_arg(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes"}:
+        return True
+    if normalized in {"0", "false", "no"}:
+        return False
+    raise argparse.ArgumentTypeError(f"expected true/false, got {value!r}")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1566,7 +1576,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     a = sub.add_parser("actuate", help="one repair candidate from the adopted state")
     for name in PARAM_VARS:
         a.add_argument("--" + name.replace("_", "-"),
-                       type=str if name == "setup_sequence" else float,
+                       type=(str if name == "setup_sequence" else
+                             _bool_arg if name == "bounded_drive_strength" else float),
                        default=None)
     args = parser.parse_args(argv)
     impl = Path.cwd()

@@ -352,6 +352,8 @@ actuators:
         - "{hold_max_buffer_pct}"
         - "--repair-tns-pct"
         - "{repair_tns_pct}"
+        - "--bounded-drive-strength"
+        - "{bounded_drive_strength}"
     parameters:
       setup_margin_ns: {type: number, unit: ns, minimum: 0, maximum: 1.0, default: 0}
       setup_sequence:
@@ -379,6 +381,12 @@ actuators:
           The hold-fix skill's 5 % guardrail is the ceiling; above it is
           REFUSED, not clamped.
       repair_tns_pct: {type: number, unit: percent, minimum: 0, maximum: 100, default: 100}
+      bounded_drive_strength:
+        type: boolean
+        default: false
+        description: >-
+          Only after native repair made no netlist change, try a measured
+          linked-Liberty equivalent master on actual max-slew violator nets.
     preconditions:
       - {kind: file_nonempty, path: "current.json"}
       - {kind: file_nonempty, path: "context.json"}
@@ -484,7 +492,7 @@ controllers:
     objective_domain: timing.drv
     actuator: timing.repair_setup
     plan:
-      - {}
+      - {bounded_drive_strength: true}
     stop:
       max_iterations: 1
       plateau_patience: 1

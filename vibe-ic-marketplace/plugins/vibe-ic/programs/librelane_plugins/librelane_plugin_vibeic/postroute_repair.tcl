@@ -21,6 +21,7 @@ proc vic_say {line} { puts "PRR: $line" }
 proc vic_metric {name value} {
     if {[string is double -strict $value]} { utl::metric_float $name $value }
 }
+source [file join [file dirname [info script]] bounded_drive_strength.tcl]
 
 # ---- route census ------------------------------------------------------------
 # A signal net that needs a wire: two or more terminals, not joined by
@@ -307,6 +308,32 @@ set ::vic_fo_repaired [vic_fanout_over]
 # STAPostPNR census decides whether every DRV row closed before adoption.
 log_cmd repair_design {*}$rd_args
 vic_census after_timing_drv_recheck
+
+# OpenROAD can leave a short, high-capacitance routed net unchanged even when
+# the linked library has a legal stronger equivalent.  The DRV controller owns
+# one bounded candidate for that exact plateau.  It does not run during the
+# ordinary setup/hold candidates, and it never runs after a native edit.
+set ::vic_native_changed 0
+set ::vic_native_kept 0
+foreach inst [$::block getInsts] {
+    set name [$inst getName]
+    if {[dict exists $::vic_before $name]} {
+        incr ::vic_native_kept
+        if {[dict get $::vic_before $name] ne [[$inst getMaster] getName]} {
+            incr ::vic_native_changed
+        }
+    } elseif {[[$inst getMaster] getType] ni {CORE_SPACER}} {
+        incr ::vic_native_changed
+    }
+}
+incr ::vic_native_changed [expr {[dict size $::vic_before] - $::vic_native_kept}]
+if {[info exists ::env(VIBEIC_PRR_BOUNDED_DRIVE_STRENGTH)]
+    && $::env(VIBEIC_PRR_BOUNDED_DRIVE_STRENGTH)
+    && $::vic_native_changed == 0
+    && [sta::max_slew_violation_count] > 0} {
+    vic_say "native no-op with residual max slew: trying bounded linked-Liberty drive strength"
+    vic_bounded_drive_strength
+}
 
 # ---- 5. what changed -------------------------------------------------------
 set ::vic_created [list]
