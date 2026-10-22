@@ -79796,6 +79796,34 @@ def _default_ic_release_docs(project: Path, top: str, pdk: PdkConfig,
             'canonical_consumer': consumer}
 
 
+def _refresh_default_step32_sdc(project: Path, top: str, pdk: PdkConfig,
+                                container: str) -> Path:
+    """Derive the analysis SDC before Step32 binds its inputs.
+
+    Re-authoring constraints is not synthesis or physical implementation. Keep
+    both prior copies, including Step7 files its canonical author may refresh,
+    so an interrupted or refused derivation cannot erase the earlier evidence.
+    """
+    import tempfile
+    constraints = _pl.constraints_dir(project)
+    pnr = _pl.pnr_dir(project)
+    archive_root = project / 'reports/phase3/sdc_resume_history'
+    archive_root.mkdir(parents=True, exist_ok=True)
+    archive = Path(tempfile.mkdtemp(
+        prefix=time.strftime('%Y%m%dT%H%M%SZ-', time.gmtime()), dir=archive_root))
+    previous = [pnr / 'constraint.sdc', pnr / 'constraint_sdc_provenance.json',
+                constraints / _ppa_timing.ASIC_SDC_RECORD,
+                *sorted(constraints.glob('*.sdc'))]
+    for source in previous:
+        if source.is_file():
+            destination = archive / source.relative_to(project)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+    record = _ppa_timing.asic_sdc_for_pnr(
+        sys.modules[__name__], project, top, pdk, container)
+    return _ppa_timing.publish_pnr_sdc(record, pnr)
+
+
 def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                       step_ids: List[str], *, die_um: Optional[str] = None,
                       util: Optional[float] = None,
@@ -79863,6 +79891,27 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
             continue
         started = time.time()
         print(f'[default] step {sid} START: {row_def["name"]}', flush=True)
+        if sid == '32':
+            # The working PNR copy may predate a repaired Step7 author. Refresh
+            # before _fixed_inputs hashes it, never from inside the bound worker.
+            try:
+                _refresh_default_step32_sdc(project, top, pdk, container)
+            except (modes.Refusal, ll.Refusal, OSError, ValueError, TypeError) as exc:
+                detail = f'canonical SDC preparation refused: {type(exc).__name__}: {exc}'
+                rows.append(StepResult(
+                    f'default_step_{sid}', 'NOT_MEASURED', time.time() - started,
+                    detail, extras={'step_id': sid},
+                    reason_class=_V.ReasonClass.UPSTREAM_REFUSED))
+                attempt = step_versions.begin_step(project, sid)
+                receipt = {'step_id': sid, 'verdict': 'NOT_MEASURED',
+                           'detail': detail, 'native_started': False, 'outputs': {}}
+                receipt_path = project / f'reports/phase3/default_steps/{sid}/backend_result.json'
+                receipt_path.parent.mkdir(parents=True, exist_ok=True)
+                _aa.write_json(receipt_path, receipt)
+                step_versions.finish_step(project, attempt, verdict='NOT_MEASURED',
+                                          result=receipt)
+                _publish_in_progress_steps(project, rows)
+                break
         if sid in BACKEND_IDS:
             # Reuse the issuer's current producer dependencies, including
             # checkpoint directory contents. Row gate inputs alone can be

@@ -1378,9 +1378,12 @@ def test_the_main_flow_replaces_the_direct_repair_producers_only_when_selected()
     src = (PROGRAMS / 'phase3_one_shot_runner.py').read_text()
     at = src.index('_prr_on_librelane = _librelane_postroute_repair_mode(project) != "direct"')
     block = src[at:at + 3000]
-    assert 'if _chain_ok and _prr_on_librelane:' in block
+    # Default owns Step32 through its canonical row; the enclosing legacy
+    # arms must stay disabled there to avoid a duplicate repair invocation.
+    legacy_guard = "_chain_ok and _execution.request()['mode'] != 'default'"
+    assert f'if {legacy_guard} and _prr_on_librelane:' in block
     assert block.index('step_postroute_repair_librelane') < block.index('step_signoff_spef_repair')
-    assert block.count('if _chain_ok and not _prr_on_librelane:') == 2
+    assert block.count(f'if {legacy_guard} and not _prr_on_librelane:') == 2
 
 
 # --------------------------------------------- r2: inside the LL21 chain, dual ---

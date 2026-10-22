@@ -518,7 +518,8 @@ proc vic_eco_route {varname tag} {
         dict for {name net} $dirty {
             set wire [$net getWire]
             if {$wire ne "NULL"} { odb::dbWire_destroy $wire }
-            $net setWireOrdered 0
+            # Destroying the wire clears its ordering state. Current OpenDB
+            # stores that state on dbWire, not dbNet (upstream 6c9cd45711).
         }
         source $::env(SCRIPTS_DIR)/openroad/common/grt.tcl
         set grt_lost [vic_lost_routes $expected]

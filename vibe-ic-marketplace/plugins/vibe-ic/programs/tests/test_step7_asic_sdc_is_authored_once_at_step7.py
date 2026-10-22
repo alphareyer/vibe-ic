@@ -1263,3 +1263,33 @@ def test_normal_step7_and_backend_share_selected_liberty_binding(
         assert refusal or '@liberty' in why, observation
     assert (proj / CONS / T.ASIC_SDC_RECORD).read_bytes() == record_before
     assert (proj / _record(proj)['path']).read_bytes() == sdc_before
+
+
+def test_step32_resume_uses_real_canonical_author_and_retains_both_sdc_versions(
+        tmp_path, monkeypatch):
+    proj = _project(tmp_path)
+    pdk = _pdk(monkeypatch)
+    T.emit_step7_asic_sdc(R, proj, TOP, pdk, 'some-container')
+    R._refresh_default_step32_sdc(proj, TOP, pdk, 'some-container')
+    working = R._pl.pnr_dir(proj) / 'constraint.sdc'
+    record_path = R._pl.constraints_dir(proj) / T.ASIC_SDC_RECORD
+    source = proj / _record(proj)['path']
+    before = {path.relative_to(proj): path.read_bytes() for path in (
+        working, working.with_name('constraint_sdc_provenance.json'), source, record_path)}
+    assert '-period 25' in working.read_text()
+    l8 = proj / 'phase1/generated_docs/L8_TIMING_WAVEFORM.json'
+    l8.write_text(l8.read_text().replace('25.0', '40.0'))
+    # The actual canonical author updates only constraints. Synthesis is not
+    # needed to remeasure a retained route against changed design intent.
+    monkeypatch.setattr(R, 'step_synth', lambda *_a, **_k: pytest.fail('unexpected synthesis'))
+    R._refresh_default_step32_sdc(proj, TOP, pdk, 'some-container')
+    assert '-period 40' in working.read_text()
+    current, why = T.read_step7_asic_sdc(R, proj, TOP, pdk)
+    assert current is not None, why
+    provenance = json.loads(working.with_name('constraint_sdc_provenance.json').read_text())
+    assert provenance['step7_sha256'] == current['sha256']
+    assert provenance['deck_sha256'] == hashlib.sha256(working.read_bytes()).hexdigest()
+    archives = list((proj / 'reports/phase3/sdc_resume_history').iterdir())
+    assert len(archives) == 2
+    assert any(all((folder / rel).is_file() and (folder / rel).read_bytes() == data
+                   for rel, data in before.items()) for folder in archives)

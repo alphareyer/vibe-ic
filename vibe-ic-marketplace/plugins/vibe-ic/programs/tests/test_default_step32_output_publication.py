@@ -48,9 +48,19 @@ def test_current_step32_publishes_before_its_output_receipt(tmp_path, monkeypatc
     monkeypatch.setattr(contract, "resolve_image", lambda *_: "SOURCE_CONTROL_ONLY")
     monkeypatch.setattr(contract, "pdk_root_resolution", lambda *_a, **_k: {"path": str(tmp_path)})
     monkeypatch.setattr(runner, "_docker_exec", lambda *_a, **_k: (0, "", ""))
+    # Supply the constraint author's neutral output; the real refresh,
+    # history, binding, producer and consumers remain in the exercised path.
+    from _ppa import timing
+    deck = 'create_clock -period 25 [get_ports clk]\nset_max_transition 1.5 [current_design]\n'
+    monkeypatch.setattr(timing, 'asic_sdc_for_pnr', lambda *_: {
+        'text': deck, 'path': 'phase2/stage2/constraints/spm.asic.sdc',
+        'step7_sha256': 'source-control-step7', 'deck_sha256': hashlib.sha256(deck.encode()).hexdigest(),
+        'regenerated': None, 'derivation': None})
     native_calls, native_raw = [], []
 
     def controlled_native(root, **_kwargs):
+        if case != 'policy_reject':  # that control calls policy directly, outside Default
+            assert (root / 'phase3/stage3/pnr/constraint.sdc').read_text() == deck
         native_calls.append("native_child_transport")
         adopted = "neutral-candidate" if case == "adopted" else None
         folder = "phase3/librelane/32-neutral/04-openroad-stapostpnr"

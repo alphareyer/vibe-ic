@@ -1194,3 +1194,79 @@ def test_downstream_spec_rebuild_preserves_upstream_and_unknown_refusals(tmp_pat
         identity.start(project, continue_steps=[changed[5:] if changed.startswith('entry') else '15'])
     assert (project / identity.RECORD).read_bytes() == original
     assert receipts.abc_script_path(project).read_bytes() == abc
+
+
+@pytest.mark.parametrize('native_rc', [0, 1])
+def test_retained_backend_synth_census_mounts_staged_pdk(tmp_path, monkeypatch, native_rc):
+    """A host-only staged Liberty reaches the native deck without resynthesis."""
+    from types import SimpleNamespace
+    import execution_backend_producers as backend
+    import phase3_one_shot_runner as runner
+    project = tmp_path / 'project'
+    project.mkdir()
+    receipts.claim(project)
+    synth = runner._pl.synth_dir(project)
+    synth.mkdir(parents=True, exist_ok=True)
+    netlist = synth / 'neutral_synth.v'
+    netlist.write_text('module neutral(input clk); endmodule\n')
+    pnr = project / backend.PNR
+    pnr.mkdir(parents=True)
+    sdc = pnr / 'constraint.sdc'
+    sdc.write_text('create_clock -period 10 [get_ports clk]\n')
+    route = pnr / 'routed.def'
+    route.write_text('DESIGN neutral ; END DESIGN\n')
+    root = tmp_path / 'host-only-pdk'
+    root.mkdir()
+    liberty = root / 'neutral.lib'
+    liberty.write_text('library(neutral) {}\n')
+    evidence = receipts.abc_script_path(project).parent
+    evidence.mkdir(parents=True, exist_ok=True)
+    (evidence / 'census.log').write_text('old missing-Liberty failure\n')
+    (evidence / 'behavior.rpt').write_text('old behavior must not become current\n')
+    before = {p: p.read_bytes() for p in (netlist, route, sdc)}
+    calls = []
+
+    def transport(argv, *, supervised, log):
+        calls.append(argv)
+        assert supervised is True
+        assert log == evidence / 'census.log'
+        assert argv[argv.index('test-image') + 1] == '--skip'
+        assert 'sta' in argv and not any('yosys' in a for a in argv)
+        assert f'{root}:{root}:ro' in argv
+        assert f'{project}:{project}' in argv
+        deck = Path(argv[-1]).read_text()
+        assert f'read_liberty {{{liberty}}}' in deck
+        assert f'read_verilog {{{netlist}}}' in deck
+        assert f'read_sdc {{{sdc}}}' in deck
+        if native_rc == 0:
+            (evidence / 'behavior.rpt').write_text('native measurement\n')
+        return SimpleNamespace(returncode=native_rc, stdout='', stderr='')
+
+    monkeypatch.setattr(ll, 'run_container', transport)
+    monkeypatch.setattr(ll, 'native_tool_command', lambda image, cmd: ('none', cmd))
+    receipt = backend._retained_synth_census(
+        project, {'top': 'neutral', 'pdk_root': str(root), 'image_id': 'test-image'},
+        runner, ll, SimpleNamespace(liberty=liberty))
+    result = json.loads(receipt.read_text())
+    assert len(calls) == 1
+    assert ('behavior_report' in result) == (native_rc == 0)
+    assert result['ran'] is False  # no ABC evidence: measurement cannot invent synthesis proof
+    assert {p: p.read_bytes() for p in before} == before
+    archives = list((project / 'reports/phase3/drv_stage_history').glob('retained-synth-census-*'))
+    assert len(archives) == 1
+    assert (archives[0] / 'evidence/synth/census.log').read_text() == 'old missing-Liberty failure\n'
+    assert (archives[0] / 'evidence/synth/behavior.rpt').read_text() == 'old behavior must not become current\n'
+
+
+def test_bounded_step32_refreshes_retained_census_before_native_consumer(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import execution_backend_producers as backend
+    calls = []
+    runner = SimpleNamespace(step_postroute_repair_librelane=lambda *_: (
+        calls.append('step32') or SimpleNamespace(status='FAIL', detail='real design failure')))
+    monkeypatch.setattr(backend, '_parameters', lambda *_: (runner, ll, object(), 'unused'))
+    monkeypatch.setattr(backend, '_retained_synth_census', lambda *_: calls.append('retained_census'))
+    result = backend.produce_signoff(tmp_path, {
+        'step_id': '32', 'top': 'neutral', 'pdk_root': str(tmp_path), 'image_id': 'test-image'})
+    assert calls == ['retained_census', 'step32']
+    assert result == {'verdict': 'FAIL', 'detail': 'real design failure'}

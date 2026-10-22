@@ -433,6 +433,46 @@ def _parameters(project, params):
     return R, ll, pdk, container
 
 
+def _retained_synth_census(project, params, R, ll, pdk):
+    """Measure the retained mapped netlist, without invoking synthesis.
+
+    The staged Liberty is a host path, not a mount of the legacy persistent
+    container. Give this short native measurement its explicit project/PDK
+    mounts, with identical paths so its generated Tcl and receipt agree.
+    """
+    import drv_stage_receipts as drv_stages
+    import uuid
+    if drv_stages.current_run(project) is None:
+        return None
+    evidence = drv_stages.abc_script_path(project).parent
+    receipt = project / drv_stages.RECEIPT_DIR / 'synth.json'
+    if evidence.is_dir() or receipt.is_file():
+        archive = project / 'reports/phase3/drv_stage_history' / (
+            'retained-synth-census-' + uuid.uuid4().hex)
+        archive.mkdir(parents=True)
+        if evidence.is_dir():
+            shutil.copytree(evidence, archive / 'evidence' / 'synth')
+        if receipt.is_file():
+            shutil.copy2(receipt, archive / receipt.name)
+    root = Path(params['pdk_root']).resolve()
+    project = Path(project).resolve()
+    image = params['image_id']
+
+    def execute(cmd, marker, log_path):
+        network, command = ll.native_tool_command(image, shlex.split(cmd))
+        result = ll.run_container([
+            'docker', 'run', '--rm', '--network', network,
+            '-v', f'{project}:{project}', '-v', f'{root}:{root}:ro',
+            image, '--skip', *command], supervised=True, log=log_path)
+        return result.returncode, result.stdout, result.stderr
+
+    return drv_stages.synth_stage_supervised(
+        project, netlist=R._pl.synth_dir(project) / f"{params['top']}_synth.v",
+        top=params['top'], liberties=[str(pdk.liberty)],
+        sdc=project / PNR / 'constraint.sdc', to_container=str,
+        execute=execute)
+
+
 def _views(project, top, predecessor):
     import phase3_one_shot_runner as R
     nl, _, _ = R.pnr_input_netlist(project, top)
@@ -1149,14 +1189,7 @@ def produce_pnr(project, params):
         timing.publish_pnr_sdc(current_sdc, project / PNR)
         # Complete the existing synthesis receipt under Step 7's current SDC.
         # Default does not enter the enclosing step_pnr that used to do this.
-        import drv_stage_receipts as drv_stages
-        if drv_stages.current_run(project) is not None:
-            drv_stages.synth_stage_supervised(
-                project, netlist=R._pl.synth_dir(project) / f'{top}_synth.v', top=top,
-                liberties=[str(pdk.liberty)], sdc=project / PNR / 'constraint.sdc',
-                to_container=lambda path: R._to_container_path(str(path), container),
-                execute=lambda cmd, marker, log_path: R._docker_exec(
-                    container, cmd, marker=marker, log_path=log_path))
+        _retained_synth_census(project, params, R, ll, pdk)
         if R._chip_path_requests_pad_ring(project):
             # The accepted ring-pinned producer retains its tap coverage,
             # master free-run exclusion, pad connection and PDN semantics.
@@ -1514,6 +1547,9 @@ def produce_signoff(project, params):
         if result.get('verdict') != 'PASS':
             return {'verdict': result.get('verdict', 'NOT_MEASURED'), 'detail': str(result.get('reason', ''))}
     elif sid == '32':
+        # A bounded resume can retain synthesis while refreshing its missing
+        # DRV measurement under the current deck. Never resynthesize here.
+        _retained_synth_census(project, params, R, ll, pdk)
         row = R.step_postroute_repair_librelane(project, top, pdk, container)
         if row.status == 'PASS':
             # The current receipt is checked before the legacy all-step

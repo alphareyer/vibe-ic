@@ -1063,6 +1063,12 @@ def test_full_default_prestream_uses_the_existing_canonical_row_driver(tmp_path,
 def test_full_default_prestream_stops_on_the_actual_failed_row(
         tmp_path, monkeypatch, status):
     calls = []
+    from _ppa import timing
+    monkeypatch.setattr(timing, 'asic_sdc_for_pnr', lambda *_: {
+        'text': 'create_clock -period 25 [get_ports clk]\n',
+        'path': 'phase2/stage2/constraints/unit.asic.sdc',
+        'step7_sha256': 'neutral-step7', 'deck_sha256': 'neutral-deck',
+        'regenerated': None, 'derivation': None})
     monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
     monkeypatch.setattr(runner, '_ordinary_phase3_row', lambda *args: None)
     monkeypatch.setattr(runner, '_backend_parameter_values',
@@ -1738,3 +1744,71 @@ def test_default_route_supplies_required_post_grt_policy_to_native_chain(
                             'stages': [], 'pins': {}, 'scenes': []})
         assert judged['verdict'] == 'FAIL'
         assert 'post_grt_repair: required stage absent' in judged['failures']
+
+
+@pytest.mark.parametrize('refuse', [False, True])
+def test_step32_refreshes_sdc_before_input_binding_without_upstream_rerun(
+        tmp_path, monkeypatch, refuse):
+    """Exercise the real front door, publisher and retained output history.
+
+    The canonical author is the controlled edge; binding observes actual new
+    bytes. A refusal must stop before binding or any native producer.
+    """
+    import hashlib
+    from _ppa import timing
+    from test_backend_input_contract_sdc import _project
+    project = _project(tmp_path)
+    pnr = project / 'phase3/stage3/pnr'
+    protected = [project / 'phase2/stage2/synth/netlist.v',
+                 pnr / 'routed.def', pnr / 'unit_pnr.v']
+    protected[1].write_text('retained routed DEF\n')
+    protected[2].write_text('retained routed netlist\n')
+    before = {path: path.read_bytes() for path in protected}
+    provenance = pnr / 'constraint_sdc_provenance.json'
+    provenance.write_text('{"old_provenance":true}\n')
+    constraints = project / 'phase2/stage2/constraints'
+    old = {path.relative_to(project): path.read_bytes() for path in (
+        pnr / 'constraint.sdc', provenance, constraints / 'spm.asic.sdc',
+        constraints / timing.ASIC_SDC_RECORD)}
+    deck = 'create_clock -period 24 [get_ports clk]\nset_max_transition 3 [current_design]\n'
+    calls = []
+    def derive(rt, root, top, pdk, container):
+        calls.append('canonical_sdc')
+        assert root == project and top == 'unit'
+        # The canonical author can refresh its own files before it discovers
+        # an invalid physical derivation; the earlier evidence must survive.
+        (constraints / 'spm.asic.sdc').write_text(deck)
+        if refuse:
+            raise ValueError('physical SDC source refused')
+        return {'text': deck, 'path': 'phase2/stage2/constraints/spm.asic.sdc',
+                'step7_sha256': hashlib.sha256(deck.encode()).hexdigest(),
+                'deck_sha256': hashlib.sha256(deck.encode()).hexdigest(),
+                'regenerated': 'source changed', 'derivation': None}
+    receipt_path = project / 'reports/phase3/default_steps/32/backend_result.json'
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text('{"verdict":"PASS","old_result":true}')
+    monkeypatch.setattr(timing, 'asic_sdc_for_pnr', derive)
+    monkeypatch.setattr(runner, '_backend_parameter_values', lambda *_: {})
+    def bind(context, sid, *, parameters):
+        calls.append('bind')
+        assert sid == '32' and (pnr / 'constraint.sdc').read_text() == deck
+        assert json.loads(provenance.read_text())['deck_sha256'] == hashlib.sha256(deck.encode()).hexdigest()
+        # Stop at the actual input binding boundary: no native tool needed to
+        # prove that it receives the current deck rather than the retained one.
+        parameters['resolved_input_manifest'] = {'files': {}, 'missing': ['controlled native boundary']}
+    monkeypatch.setattr(execution_policy, '_fixed_inputs', bind)
+    monkeypatch.setattr(producers, 'produce', lambda *_a, **_k: pytest.fail('native producer unexpectedly started'))
+    result = runner._default_pnr_rows(project, 'unit', SimpleNamespace(name='unit'), '', ['32'])
+    assert result.status == 'NOT_MEASURED'
+    assert calls == (['canonical_sdc'] if refuse else ['canonical_sdc', 'bind'])
+    assert {path: path.read_bytes() for path in protected} == before
+    archives = list((project / 'reports/phase3/sdc_resume_history').iterdir())
+    assert len(archives) == 1
+    assert {rel: (archives[0] / rel).read_bytes() for rel in old} == old
+    if refuse:
+        assert 'physical SDC source refused' in result.detail
+        receipt = json.loads(receipt_path.read_text())
+        assert receipt['verdict'] == 'NOT_MEASURED' and receipt['native_started'] is False
+        assert 'old_result' not in receipt and receipt['outputs'] == {}
+        assert (pnr / 'constraint.sdc').read_bytes() == old[Path('phase3/stage3/pnr/constraint.sdc')]
+        assert provenance.read_bytes() == old[Path('phase3/stage3/pnr/constraint_sdc_provenance.json')]
