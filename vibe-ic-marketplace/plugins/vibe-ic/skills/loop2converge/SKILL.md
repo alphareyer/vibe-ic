@@ -31,13 +31,12 @@ the subject's own target, never on "we ran out of findings".
 
 ## 1 — RUN, through the ONE front door
 
-### 1.0 — Upgrade FIRST, and prove the upgrade took
+### 1.0 — Bind the runtime version and preserve valid checkpoints
 
-**Before any run: upgrade the vibe-ic plugin AND the vibeic-eda MCP to the newest
-version, then prove BOTH are actually serving it.** This is step ZERO of every tick,
-including the re-entry from step 6 — a loop that converges against last tick's binaries
-is measuring a tree that no longer exists, and its findings are re-discoveries of things
-already fixed.
+Before a new invocation, identify the actual plugin source and EDA image. Adopt
+published fixes relevant to the failure and verify the runtime binding. A version
+change alone does not invalidate previously accepted checkpoints or authorize a
+broader rerun. Keep each retained result attributed to the version that produced it.
 
     /plugin update vibe-ic          # plugin: pull the newest marketplace version
     docker pull <vibeic-eda image>  # tool:   pull the newest fork image
@@ -80,9 +79,36 @@ RULE 0).
 | IP-cell (doc→LEF) | same runner, IP route | LEF + GDS emitted, the 37.5 gate reached |
 | open benchmark | `/vibe-ic-benchmark <bench>` | the highest HONEST pass@1 |
 
-Stage the INPUT ONLY. §4.05: the design documents and nothing else — no oracle, no
-golden, no prior run's results. A staging that carries a result is not a clean run and
-its number means nothing.
+For an explicitly requested fresh benchmark, stage the INPUT ONLY under §4.05:
+no oracle, golden, or prior results. For continuation, retain the existing project's
+valid checkpoints and report the result as a continuation, with its original evidence
+and version attribution. Do not turn an ordinary continuation into a fresh benchmark.
+
+### 1.2 — Establish the smallest necessary continuation
+
+Before launching native work, inspect the failed consumer's actual input paths and
+bytes and the existing checkpoint records. State the steps to execute, the concrete
+reason for each, and the PASS checkpoints to reuse. Do not expand the window based
+only on a plugin upgrade, a repaired read path, or a suspicion of stale evidence.
+
+- If a corrected path resolves to the same valid bytes, revalidate the affected
+  reader/handoff; do not rerun upstream synthesis or physical design.
+- If constraints changed, first revalidate retained artifacts against those constraints
+  where supported. Regenerate the earliest proven invalid producer and its affected
+  descendants only. A genuine producer correctness defect can invalidate old output
+  even when input hashes match; cite the evidence proving that defect.
+- If provenance is insufficient, inspect it before scheduling a broader native window.
+  Unknown impact is neither PASS nor permission to restart an entire phase.
+- Use the existing canonical bounded entry and dependency records. Preserve timestamped
+  prior outputs and historical verdicts; do not delete them to force freshness.
+- Execute only the declared continuation window. An explicit user-requested full rerun
+  is allowed and must be recorded as such.
+
+Example: an SDC reader repair requires comparing the deck actually consumed by the
+failed signoff step with the current canonical deck. It does not by itself justify
+repeating synthesis, floorplan, or placement. Program enforcement of this continuation
+selection is tracked separately in #3480; this guidance is not a claim that enforcement
+has already shipped.
 
 **Long runs must survive your turn.** `setsid nohup … &` with a done-file, then poll.
 A turn that ends takes the run's reader with it and the deliverable is never written.
@@ -226,10 +252,11 @@ right program/skill and the next blind run auto-recovers it.
 
 ## 6 — RE-RUN, and the termination rule
 
-Upgrade the plugin (and the EDA image if that was the layer), **restart the session so
-the MCP re-registers** — MEASURED: an MCP server keeps serving the plugin version it
-booted with, so an un-restarted session measures the OLD plugin while reporting the new
-version — then re-run the same subject from a clean staging.
+Bind the repaired published plugin/tool runtime and verify which source it executes.
+If MCP still serves an older version, reconnect it before invoking the repaired code.
+Then resume through the canonical entry using the evidence-based scope in section 1.2.
+Use clean staging only for an explicitly requested fresh benchmark; ordinary recovery
+retains valid checkpoints and all historical outputs.
 
 **Terminate on the subject's target, not on effort:**
 
