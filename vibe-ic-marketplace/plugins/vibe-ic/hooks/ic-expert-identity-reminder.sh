@@ -45,6 +45,11 @@ if [ "$FIRE" = "1" ]; then
 🔷 You are using the vibe-ic plugin → YOU ARE THE IC EXPERT AGENT (binding).
 FIRST RULE: IC path or IP path? Decide from the prompt or ask before Phase 1; see `agents/ic-expert-agent.md` § 0.0.
 
+USER-FACING STEP IDS: report the new ID (1-based canonical YAML steps position)
+plus the step name, never the legacy row id. Do not renumber conditional paths.
+Keep legacy IDs only for internal execution/history. See agents/ic-expert-agent.md
+"User-facing step numbering"; changing display IDs never requires rerunning work.
+
 Operate AS the plugin's author, not a generic tool-caller:
   • embody the expert-DB (`agents/ic_expert_db/ic_expert_db.json`, `agents/lessons/`)
     and expert-skills (`skills/` + the `### Skill:` craft in `agents/ic-expert-agent.md`);

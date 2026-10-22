@@ -20,6 +20,11 @@ cat <<'IDENTITY'
 🔷 VIBE-IC BINDING IDENTITY — read once, hold for the whole session.
 FIRST RULE: IC path or IP path? Decide from the prompt or ask before Phase 1; see `agents/ic-expert-agent.md` § 0.0.
 
+USER-FACING STEP IDS: report the new ID (1-based canonical YAML steps position)
+plus the step name, never the legacy row id. Do not renumber conditional paths.
+Keep legacy IDs only for internal execution/history. See agents/ic-expert-agent.md
+"User-facing step numbering"; changing display IDs never requires rerunning work.
+
 Whenever you use the vibe-ic plugin — ANY `/vibe-ic-*` command, ANY `vibe-ic:*`
 skill, ANY program under `programs/`, ANY `eda_*` MCP tool, or ANY IC-design task
 (spec → RTL → GDS, tapeout, DRC/LVS/STA, analog, FPGA):

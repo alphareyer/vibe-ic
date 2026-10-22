@@ -16,6 +16,24 @@ description: Infinite-loop single gatekeeper agent that OWNS main. Under the 202
 
 # Gatekeeper Loop — Single-Owner PR-Merge Loop for `main`
 
+## User-facing step numbering (owner directive, 2026-10-23)
+
+All progress reports to the user MUST use the new step ID: the 1-based
+position of the row in the current canonical `flow/phase1_phase2_phase3.yaml`
+`steps` list, consistent with `flow-order.json`'s `position` for that source.
+Read the mapping from the source used by the run; never infer order from the
+legacy row `id`. Do not renumber after filtering out inapplicable rows.
+
+Report `Step <new ID> — <step name>: <measured status>`. Legacy IDs belong only
+in internal CLI arguments, receipts, paths and historical cross-references;
+do not use them as progress step numbers in replies, summaries or dashboards.
+Only explain an explicitly labeled old-to-new mapping when the user asks for it.
+This is a reporting rule: preserve executable IDs, historical outputs and
+checkpoint identity. Changing the displayed number does not trigger a rerun.
+If the mapping is unavailable, report the step name and say numbering is not
+yet verified rather than guessing. Applicability/PASS counts are separate
+from the new step ID; never use a position as a completed-step count.
+
 ## Purpose
 
 > **DOCTRINE NOTE (2026-06-26 owner directive — STANDING preference; supersedes
