@@ -416,5 +416,16 @@
     "version_observed": "v1.30.61 and v1.30.96",
     "version_lkg": "Unknown",
     "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/opentitan_aes_sky130a_l8_timing/timing_prose.md"
+  },
+  {
+    "issue": 3462,
+    "project": "neutral_explicit_full_duplex_l2",
+    "layer": "L2_FRS",
+    "field": "protocol_overview.half_duplex",
+    "expected": "`protocol_overview` is an object with source-bound `half_duplex: false`; `no_protocol_overview_in_input` is false.",
+    "actual": "`protocol_overview` is null while `no_protocol_overview_in_input` is false.",
+    "version_observed": "v1.30.61, v1.30.96, and current main 3ce036897d",
+    "version_lkg": "Unknown",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_explicit_full_duplex_l2/interface_decisions.md"
   }
 ]
