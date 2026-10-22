@@ -179,6 +179,77 @@ def test_normal_runner_invocation_hands_active_scenes_to_the_producer(
     assert json.loads(captured[index + 1]) == {"TT": str(core)}
 
 
+def test_container_runner_rebases_host_staged_core_liberty_with_same_bytes(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    host = _liberty(
+        tmp_path / "cache/testpdk/libs.ref/std/lib/core.lib",
+        library="core", cells=("stdcell",))
+    runtime = "/foss/pdks/testpdk/libs.ref/std/lib/core.lib"
+    digest = __import__('hashlib').sha256(host.read_bytes()).hexdigest()
+    captured: list[str] = []
+
+    monkeypatch.setattr(runner, "_padring_pdk_root_and_tree",
+                        lambda *_args: ("/foss/pdks", "testpdk"))
+    monkeypatch.setattr(runner, "_design_supply_nets",
+                        lambda *_args: ({"VDD"}, {"VSS"}))
+    monkeypatch.setattr(runner, "_v1_6_596_discover_tie_cells",
+                        lambda *_args: {})
+    monkeypatch.setattr(runner, "_resolve_signoff_corner_libs",
+                        lambda _project, pdk, _container:
+                        {"TT": str(pdk.liberty)})
+    monkeypatch.setattr(
+        runner, "_current_synth_liberty_sha256",
+        lambda path, _container: digest if str(path) == runtime else None)
+    monkeypatch.setattr(runner, "_to_container_path", lambda path, _c: path)
+
+    def fake_exec(_container, command, **_kwargs):
+        captured.append(command)
+        return 0, "producer ok\n", ""
+
+    monkeypatch.setattr(runner, "_docker_exec", fake_exec)
+    pdk = SimpleNamespace(liberty=str(host), pdn_ring={}, name="testpdk")
+
+    result = runner.step_io_pad_chip_top_gen(tmp_path, "container", pdk)
+
+    assert result.status == "PASS"
+    assert captured
+    assert runtime in captured[0]
+    assert str(host) not in captured[0]
+
+
+def test_container_runner_refuses_runtime_pdk_file_with_different_bytes(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    host = _liberty(
+        tmp_path / "cache/testpdk/libs.ref/std/lib/core.lib",
+        library="core", cells=("stdcell",))
+    runtime = "/foss/pdks/testpdk/libs.ref/std/lib/core.lib"
+    monkeypatch.setattr(
+        runner, "_current_synth_liberty_sha256",
+        lambda path, _container: "0" * 64 if str(path) == runtime else None)
+
+    with pytest.raises(ValueError, match="PADRING_PDK_FILE_BYTES_CHANGED"):
+        runner._padring_runtime_pdk_file(
+            str(host), "/foss/pdks", "testpdk", "container")
+
+
+def test_container_hash_readers_ignore_image_entrypoint_banner(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    digest = "a" * 64
+    stdout = ("[INFO] Final PATH variable: /tools\n"
+              "[INFO] Final PYTHONPATH variable: /python\n"
+              f"{digest}  /foss/pdks/testpdk/core.lib\n")
+    monkeypatch.setattr(runner._cex, "no_container_route", lambda: False)
+    monkeypatch.setattr(
+        runner._cex, "run_in_container_supervised",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            _args, 0, stdout, ""))
+
+    assert runner._current_synth_liberty_sha256(
+        "/foss/pdks/testpdk/core.lib", "container") == digest
+    assert runner._io_timing_path_sha256(
+        "/foss/pdks/testpdk/core.lib", "container") == digest
+
+
 def test_normal_runner_refuses_when_active_scenes_cannot_be_resolved(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(runner, "_padring_pdk_root_and_tree",

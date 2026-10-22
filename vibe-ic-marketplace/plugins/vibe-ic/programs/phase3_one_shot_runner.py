@@ -62,6 +62,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 
 import argparse
+import copy
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import functools
@@ -20503,9 +20504,11 @@ def _current_synth_liberty_sha256(liberty_path: str, container: str) -> Optional
         cp = _cex.run_in_container_supervised(
             container, f"sha256sum {shlex.quote(liberty_path)}", ceiling_s=120)
         if cp.returncode == 0:
-            line = (cp.stdout or "").splitlines()
-            if len(line) == 1:
-                match = re.fullmatch(r"([0-9a-fA-F]{64})\s+\*?.+", line[0])
+            # The image entrypoint writes PATH/PYTHONPATH banners before the
+            # command.  Parse the sha256sum record itself instead of requiring
+            # it to be the process's only output line.
+            for line in reversed((cp.stdout or "").splitlines()):
+                match = re.fullmatch(r"([0-9a-fA-F]{64})\s+\*?.+", line.strip())
                 if match:
                     return match.group(1).lower()
     except Exception:  # noqa: BLE001 — an unavailable probe cannot elect a recipe
@@ -36997,6 +37000,46 @@ def _padring_pdk_root_and_tree(pdk: PdkConfig,
     return root, tree_path.name
 
 
+def _padring_runtime_pdk_file(path: str, pdk_root: str, pdk_tree: str,
+                              container: Optional[str]) -> str:
+    """Return the exact same PDK file at the path visible to the pad producer.
+
+    A canonical synthesis run can stage its PDK at a host cache path while the
+    long-lived EDA container exposes the same distribution at ``/foss/pdks``.
+    ``io_pad_chip_top_gen`` runs inside that container, so handing it the host
+    spelling makes an existing Liberty look absent.  Rebase only within the
+    selected PDK tree and require the runtime bytes to match the host bytes;
+    this is path translation, never library/corner fallback.
+    """
+    if not container:
+        return str(path)
+    raw = str(path)
+    if _current_synth_liberty_sha256(raw, container) is not None:
+        return raw
+    host = Path(raw)
+    if not host.is_file():
+        # Preserve the producer's existing named unreadable/scene-resolution
+        # refusal when no host bytes exist from which a safe rebase can be
+        # proven.  Only a present host file authorizes translation.
+        return raw
+    positions = [i for i, part in enumerate(host.parts) if part == pdk_tree]
+    if len(positions) != 1:
+        raise ValueError(
+            f"PADRING_PDK_FILE_IDENTITY_AMBIGUOUS: {raw} is not uniquely "
+            f"inside {pdk_tree}")
+    relative = Path(*host.parts[positions[0] + 1:])
+    if not relative.parts or '..' in relative.parts:
+        raise ValueError(f"PADRING_PDK_FILE_IDENTITY_INVALID: {raw}")
+    runtime = str(Path(pdk_root) / pdk_tree / relative)
+    expected = hashlib.sha256(host.read_bytes()).hexdigest()
+    actual = _current_synth_liberty_sha256(runtime, container)
+    if actual != expected:
+        raise ValueError(
+            f"PADRING_PDK_FILE_BYTES_CHANGED: host={raw} runtime={runtime} "
+            f"expected={expected} actual={actual or 'UNREADABLE'}")
+    return runtime
+
+
 def _discover_padring_io_views(pdk: PdkConfig,
                                container: str) -> Tuple[List[str], List[str]]:
     """Ask the shipped pad library resolver for the IO LEF/GDS views.
@@ -37332,6 +37375,14 @@ def step_io_pad_chip_top_gen(project: Path, container: Optional[str] = None,
     # multiple candidates is not guessed and leaves the producer's explicit
     # ``not_written.power_pads`` record in force.
     if pdk:
+        try:
+            _pad_runtime_liberty = _padring_runtime_pdk_file(
+                str(pdk.liberty), str(pdk_root), str(pdk_tree), container)
+        except ValueError as exc:
+            return StepResult("io_pad_chip_top_gen", "FAIL",
+                              time.time() - t0, str(exc))
+        _pad_runtime_pdk = copy.copy(pdk)
+        _pad_runtime_pdk.liberty = _pad_runtime_liberty
         _pad_power, _pad_ground = _design_supply_nets(pdk)
         if len(_pad_power) == 1 and len(_pad_ground) == 1:
             extra.extend(["--power-net", sorted(_pad_power)[0],
@@ -37351,13 +37402,14 @@ def step_io_pad_chip_top_gen(project: Path, container: Optional[str] = None,
         # and spare tie-off, then pass the concrete masters/output pins to the
         # wrapper producer.  The producer refuses only if a level it actually
         # needs has no derived cell; nothing is guessed or PDK-named here.
-        _pad_ties = _v1_6_596_discover_tie_cells(pdk.liberty, container or "")
+        _pad_ties = _v1_6_596_discover_tie_cells(
+            _pad_runtime_liberty, container or "")
         extra.extend([
             "--tie-high-cell", str(_pad_ties.get("hi_cell") or ""),
             "--tie-high-pin", str(_pad_ties.get("hi_pin") or ""),
             "--tie-low-cell", str(_pad_ties.get("lo_cell") or ""),
             "--tie-low-pin", str(_pad_ties.get("lo_pin") or ""),
-            "--tie-liberty", str(pdk.liberty),
+            "--tie-liberty", _pad_runtime_liberty,
         ])
         # The wrapper producer owns the IO-model election. Hand it the active
         # core scenes resolved by this invocation so it can bind each one to
@@ -37367,13 +37419,13 @@ def step_io_pad_chip_top_gen(project: Path, container: Optional[str] = None,
         # pad-wrapped record without the receipt rather than revive discovery.
         try:
             _io_core_scenes = _resolve_signoff_corner_libs(
-                project, pdk, container or "")
+                project, _pad_runtime_pdk, container or "")
         except Exception as exc:  # noqa: BLE001 — this producer cannot guess
             return StepResult(
                 "io_pad_chip_top_gen", "FAIL", time.time() - t0,
                 f"IO_TIMING_CORE_SCENES_UNRESOLVED: {exc}")
         if not _io_core_scenes and getattr(pdk, "liberty", None):
-            _nominal = str(pdk.liberty)
+            _nominal = _pad_runtime_liberty
             # Normal production runs use a container path. Host-only synthetic
             # geometry fixtures may deliberately carry no usable Liberty and
             # therefore do not claim a timing receipt.
@@ -66681,9 +66733,9 @@ def _io_timing_path_sha256(path: str, container: str = "") -> Optional[str]:
             cp = _cex.run_in_container_supervised(
                 container, f"sha256sum {shlex.quote(path)}", ceiling_s=120)
             if cp.returncode == 0:
-                line = (cp.stdout or "").splitlines()
-                if len(line) == 1:
-                    match = re.fullmatch(r"([0-9a-fA-F]{64})\s+\*?.+", line[0])
+                for line in reversed((cp.stdout or "").splitlines()):
+                    match = re.fullmatch(
+                        r"([0-9a-fA-F]{64})\s+\*?.+", line.strip())
                     if match:
                         return match.group(1).lower()
     except Exception:  # noqa: BLE001 — unreadable is a refusal at the caller

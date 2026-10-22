@@ -1101,6 +1101,44 @@ def produce_pnr(project, params):
             raise em.Refusal('BACKEND_FLOORPLAN_OBJECTIVES_UNSTATED', sid)
         prep = R.step_prepnr(project, top, pdk, container,
                             params['die_um'], params['util'])
+        # The pad producer is part of Step 15, but its electrical record is an
+        # input to Step 7's ASIC SDC.  On the first chip-path invocation the
+        # preparation has therefore completed all of its own physical work
+        # while its read-only Step-7 seam quite correctly reports stale.  Heal
+        # that one typed seam here, in this same Default invocation, through
+        # Step 7's canonical author; requiring an external 7..14 rerun creates
+        # a permanent 7 -> 15 -> 7 cycle whenever the pad plan changes.
+        #
+        # Do not turn any other NOT_MEASURED result into a retry.  The
+        # producer, floorplan and pad assignment must all have completed, and
+        # the only absent item must be the input-bound SDC path.
+        _prep_extras = prep.extras if isinstance(prep.extras, dict) else {}
+        _prep_chip = _prep_extras.get('chip_top') or {}
+        _prep_sdc = _prep_extras.get('sdc') or {}
+        _prep_floorplan = _prep_extras.get('floorplan')
+        _prep_assign = _prep_extras.get('pad_assignment') or {}
+        _sdc_only_pending = (
+            prep.status == 'NOT_MEASURED'
+            and _prep_chip.get('status') == 'PASS'
+            and _prep_sdc.get('path') is None
+            and str(_prep_sdc.get('basis', '')).startswith('SDC_SEAM_PENDING:')
+            and isinstance(_prep_floorplan, dict)
+            and (not R._chip_path_requests_pad_ring(project)
+                 or _prep_assign.get('status') == 'PASS'))
+        if _sdc_only_pending:
+            from _ppa import timing
+            current_sdc = timing.asic_sdc_for_pnr(
+                R, project, top, pdk, container)
+            timing.publish_pnr_sdc(current_sdc, project / PNR)
+            seam_path, seam_basis = R._prepnr_constraint_file(
+                project, top, pdk)
+            if seam_path is not None:
+                prep.status = 'PASS'
+                prep.reason_class = ''
+                prep.extras['sdc'] = {'path': str(seam_path),
+                                      'basis': seam_basis}
+                prep.detail = (prep.detail.rsplit('; ', 1)[0] +
+                               '; ' + seam_basis)
         if prep.status != 'PASS':
             return {'verdict': prep.status, 'detail': prep.detail}
         # Preparation can refresh the chip wrapper.  Resolve Step 7's deck

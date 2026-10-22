@@ -317,6 +317,61 @@ def test_default_floorplan_records_synthesis_under_the_current_sdc_before_native
         producers.produce_pnr(tmp_path, {"step_id": "15", "top": "unit", "die_um": "100,100", "util": .2})
 
 
+def test_default_floorplan_closes_pad_record_sdc_cycle_in_one_invocation(
+        tmp_path, monkeypatch):
+    """A successful pad/floorplan preparation must not require the caller to
+    run Step 7 in a second top-level invocation merely because the newly
+    written pad record made Step 7's prior input digest stale."""
+    from _ppa import timing
+
+    pdk = SimpleNamespace(name='unit', liberty='unit.lib')
+    monkeypatch.setattr(producers, '_parameters',
+                        lambda *a: (runner, None, pdk, 'unit-image'))
+    prep = runner.StepResult(
+        'prepnr', 'NOT_MEASURED', 0.0,
+        'die 100x100 um; chip top PASS; SDC_SEAM_PENDING: pad record changed',
+        extras={
+            'chip_top': {'status': 'PASS', 'detail': 'written'},
+            'sdc': {'path': None,
+                    'basis': 'SDC_SEAM_PENDING: pad record changed'},
+            'floorplan': {'die_w': 100, 'die_h': 100},
+            'pad_assignment': {'status': 'PASS', 'detail': 'assigned'},
+        }, reason_class='upstream_refused')
+    monkeypatch.setattr(runner, 'step_prepnr', lambda *a: prep)
+    monkeypatch.setattr(runner, '_chip_path_requests_pad_ring', lambda *a: True)
+    calls = []
+
+    def author(*args):
+        calls.append('step7_author')
+        return {'source': 'current pad record'}
+
+    def publish(record, folder):
+        calls.append('publish')
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / 'constraint.sdc').write_text('current deck\n')
+
+    seam = tmp_path / 'phase2/stage2/constraints/unit.sdc'
+    seam.parent.mkdir(parents=True)
+    seam.write_text('current deck\n')
+    monkeypatch.setattr(timing, 'asic_sdc_for_pnr', author)
+    monkeypatch.setattr(timing, 'publish_pnr_sdc', publish)
+    monkeypatch.setattr(runner, '_prepnr_constraint_file',
+                        lambda *a: (seam, 'current step-7 SDC'))
+
+    def native(*args, **kwargs):
+        calls.append('native')
+        return runner.StepResult('pnr', 'PASS', 0.0, 'floorplan complete'), {}
+
+    monkeypatch.setattr(runner, '_prepare_librelane_floorplan_for_route', native)
+    monkeypatch.setattr(producers, '_publish_step15_bounded_state', lambda *a: None)
+    result = producers.produce_pnr(tmp_path, {
+        'step_id': '15', 'top': 'unit', 'die_um': '100,100', 'util': .2})
+    assert result['verdict'] == 'PASS'
+    assert calls == ['step7_author', 'publish', 'step7_author', 'publish', 'native']
+    assert prep.status == 'PASS'
+    assert prep.extras['sdc']['path'] == str(seam)
+
+
 def test_backend_consumers_use_the_same_canonical_flow_as_default():
     import _flow_yaml
     from execution_provider_catalog import BACKEND_ROWS
