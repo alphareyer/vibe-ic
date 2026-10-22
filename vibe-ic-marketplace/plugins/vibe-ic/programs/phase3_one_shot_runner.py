@@ -17626,6 +17626,20 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     every yosys command below is byte-identical to what it was, so a run that
     never overflows its die cannot tell this parameter exists.
     """
+    import reset_sync_structural_exception as _reset_source
+    try:
+        _reset_source.admit_current_project_source(project)
+    except ValueError as exc:
+        if not str(exc).startswith("RESET_PHASE_SOURCE_ADMISSION_REFUSED:"):
+            raise
+        receipt = project / "reports/phase2/reset_source_admission.json"
+        _aa.write_json(receipt, {
+            "schema": "vibe-ic/reset-source-admission/1", "step": "7",
+            "verdict": "FAIL", "reason": str(exc),
+            "native_synthesis_started": False,
+        })
+        return StepResult("synth", "FAIL", 0.0, str(exc),
+                          [str(receipt)], reason_class="input_absent")
     # Issued Default/Ultra execution prepares Step9 from current producer
     # outputs here. Phase-2's Default placeholder can pass an opaque,
     # request-bound handoff for this producer scope; the recursive area retry

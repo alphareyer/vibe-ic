@@ -259,20 +259,26 @@ def build_structural_exception(netlist: str, liberty: str,
                   "proven_domains": proven}
 
 
-def apply_current_project(project: Path, liberty_path: Path,
-                          sdc_text: str) -> tuple[str, dict | None]:
-    """Apply current source policy to the current mapped netlist, if present."""
+def admit_current_project_source(project: Path) -> dict:
+    """Check source reset policy before native synthesis; no netlist required."""
     project = Path(project)
     docs_dir = PL.generated_docs_dir(project)
     try:
         l9 = json.loads((docs_dir / "L9_INTEGRATION_SPEC.json").read_text())
         l8 = json.loads((docs_dir / "L8_TIMING_WAVEFORM.json").read_text())
     except (OSError, ValueError) as exc:
-        return sdc_text, None
+        return {}
     ports = {row.get("name") for row in l9.get("ports", [])
              if isinstance(row, dict) and isinstance(row.get("name"), str)}
     from _reset_input_semantics import admit_reset_phases
-    phases = admit_reset_phases(project, [l9, l8], ports)
+    return admit_reset_phases(project, [l9, l8], ports)
+
+
+def apply_current_project(project: Path, liberty_path: Path,
+                          sdc_text: str) -> tuple[str, dict | None]:
+    """Apply current source policy to the current mapped netlist, if present."""
+    project = Path(project)
+    phases = admit_current_project_source(project)
     policies = {name: rows for name, rows in phases.items()
                 if any(row.get("deassertion_policy") ==
                        "structural_sync_release" for row in rows)}
