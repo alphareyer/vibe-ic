@@ -251,10 +251,14 @@ def _current_tool_handoff(tmp_path, pdk="pdk_neutral"):
     cfg = {'meta': {'step': 'Yosys.Synthesis'}, 'PDK': pdk, 'PDK_ROOT': '/pdk',
            'DESIGN_NAME': 'top', 'VERILOG_FILES': [str(rtl.resolve())],
            'CELL_LIBS': {'*': ['/pdk/' + str(lib.relative_to(root))]},
-           'SYNTH_TIEHI_CELL': 'selected_hi/Z', 'SYNTH_TIELO_CELL': 'selected_lo/ZN'}
+           'SYNTH_TIEHI_CELL': 'selected_hi/Z', 'SYNTH_TIELO_CELL': 'selected_lo/ZN',
+           'SYNTH_ELABORATE_ONLY': False, 'SYNTH_CHECKS_ALLOW_TRISTATE': False,
+           'TRISTATE_CELLS': []}
     put(folder / 'state_out.json', {'nl': str(raw), 'metrics': {
         'design__instance_unmapped__count': 0, 'synthesis__check_error__count': 0}})
     put(folder / 'reports/stat.json', {'modules': {'\\top': {'num_cells': 1, 'num_submodules': 0}}})
+    (folder / 'reports/pre_synth_chk.rpt').write_text('')
+    (folder / 'reports/chk.rpt').write_text('')
     put(folder / 'pdk_root.json', {'cli_pdk_root': '/pdk',
                                   'mounts_under_it': [[str(root), '/pdk']],
                                   'stated_by': 'run_chain(pdk_root=...)'})
@@ -284,6 +288,40 @@ def test_current_librelane_handoff_selects_exact_mapped_library(tmp_path, pdk):
     got, source = _effective(_mod(), p, visible=lambda x: x == _mod().DEFAULT_LIBERTY or Path(x).is_file())
     assert got == str(lib), f'current bound mapping requires {lib}; actual selection was {got}'
     assert source == 'run_synth'
+
+
+def test_current_handoff_rebases_library_to_the_proof_container_pdk_root(tmp_path):
+    import inspect
+    import librelane_contract as LC
+    p, lib, _, _, _ = _current_tool_handoff(tmp_path, 'pdk_neutral')
+    mod = _mod()
+    expected = '/proof-pdks/pdk_neutral/libs.ref/cells/typ.lib'
+    kwargs = {}
+    if 'container_pdk_root' in inspect.signature(mod.resolve_liberty).parameters:
+        kwargs = {
+            'container_pdk_root': '/proof-pdks',
+            'container_digest': lambda path: (
+                'sha256:' + LC.digest(lib) if path == expected else None),
+        }
+    try:
+        got, source = mod.resolve_liberty(
+            p, mod.DEFAULT_LIBERTY, lambda path: path == expected, **kwargs)
+    except ValueError as exc:
+        got, source = str(exc), 'refused'
+    assert got == expected
+    assert source == 'run_synth'
+
+
+def test_current_handoff_refuses_rebased_library_with_different_bytes(tmp_path):
+    p, _, _, _, _ = _current_tool_handoff(tmp_path, 'pdk_neutral')
+    mod = _mod()
+    expected = '/proof-pdks/pdk_neutral/libs.ref/cells/typ.lib'
+    with pytest.raises(ValueError, match='LL_LEC_LIB_INVISIBLE'):
+        mod.resolve_liberty(
+            p, mod.DEFAULT_LIBERTY,
+            lambda path: path == expected,
+            '/proof-pdks',
+            lambda path: 'sha256:' + '0' * 64)
 
 
 @pytest.mark.parametrize('damage', ['missing', 'invisible', 'foreign', 'stale_config',

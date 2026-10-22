@@ -3250,6 +3250,20 @@ def _container_file_exists(container: str, path: str) -> bool:
         return False
 
 
+def _container_pdk_root(container: str) -> Optional[str]:
+    """Return the proof environment's declared absolute PDK root, if usable."""
+    rc, out, _ = _docker_exec_raw(
+        container, "printf '%s\\n' \"${PDK_ROOT:-}\"", timeout=30)
+    lines = _strip_login_banner(out or "").strip().splitlines()
+    if rc != 0 or not lines:
+        return None
+    root = lines[-1].strip()
+    path = Path(root)
+    if not root or not path.is_absolute() or '..' in path.parts:
+        return None
+    return str(path)
+
+
 def _container_dir_writable(container: str, path: str) -> Tuple[bool, str]:
     """Can the TOOL write into this directory? Measured, never assumed.
 
@@ -4907,7 +4921,7 @@ def _discover_run_liberty(project: Path) -> Optional[str]:
     return None
 
 
-def _bound_synthesis_liberty(project: Path) -> Optional[str]:
+def _bound_synthesis_liberty(project: Path) -> Optional[Dict[str, str]]:
     """Map the current tool handoff's selected cell library through its mounts.
 
     The handoff already binds the declared PDK, current RTL/netlist and resolved
@@ -4983,13 +4997,20 @@ def _bound_synthesis_liberty(project: Path) -> Optional[str]:
         current = LC.config_file_hashes({'cell_library': str(library)}, mounts)
         if not recorded or current.get(str(library)) != recorded:
             raise ValueError('selected synthesis cell library hash is missing or changed')
-        return str(target)
+        return {
+            'host': str(target),
+            'synthesis_guest': str(library),
+            'pdk': pdk,
+            'pdk_relative': str(library.relative_to(pdk_guest)),
+            'sha256': recorded,
+        }
     except (OSError, ValueError, KeyError, TypeError, AttributeError, LC.Refusal) as exc:
         raise ValueError(f'LL_LEC_LIB_UNBOUND: {exc}') from exc
 
 
 def resolve_liberty(project: Path, cli_liberty: Optional[str],
-                    container_has) -> "Tuple[Optional[str], str]":
+                    container_has, container_pdk_root: Optional[str] = None,
+                    container_digest=None) -> "Tuple[Optional[str], str]":
     """`(liberty, source)` — the Liberty this LEC will read, and WHY (PURE).
 
     DEGRADE LOUDLY: the source is returned, recorded in `reports/lec.json` as
@@ -5006,13 +5027,28 @@ def resolve_liberty(project: Path, cli_liberty: Optional[str],
     invisible choices. Without that contract, the existing cli > staged >
     recorded synthesis > default order remains. `container_has` is a predicate
     so visibility remains testable without a container."""
-    bound_liberty = _bound_synthesis_liberty(project)
-    if bound_liberty is not None:
-        if cli_liberty and cli_liberty != DEFAULT_LIBERTY and Path(cli_liberty).resolve() != Path(bound_liberty):
+    bound = _bound_synthesis_liberty(project)
+    if bound is not None:
+        candidates = [bound['host'], bound['synthesis_guest']]
+        if container_pdk_root:
+            runtime_root = Path(container_pdk_root)
+            if (not runtime_root.is_absolute() or '..' in runtime_root.parts):
+                raise ValueError('LL_LEC_LIB_UNBOUND: proof PDK root is not absolute or contains traversal')
+            candidates.append(str(runtime_root / bound['pdk'] / bound['pdk_relative']))
+        allowed = {str(Path(path)) for path in candidates}
+        if cli_liberty and cli_liberty != DEFAULT_LIBERTY and str(Path(cli_liberty)) not in allowed:
             raise ValueError('LL_LEC_LIB_CONFLICT: --liberty differs from current synthesis mapping')
-        if not container_has(bound_liberty):
-            raise ValueError('LL_LEC_LIB_INVISIBLE: selected synthesis library is not visible to the proof tool')
-        return bound_liberty, 'run_synth'
+        for candidate in dict.fromkeys(candidates):
+            if not container_has(candidate):
+                continue
+            if container_digest is not None:
+                runtime_digest = container_digest(candidate)
+                expected = bound['sha256'].removeprefix('sha256:').lower()
+                actual = (runtime_digest or '').removeprefix('sha256:').lower()
+                if actual != expected:
+                    continue
+            return candidate, 'run_synth'
+        raise ValueError('LL_LEC_LIB_INVISIBLE: selected synthesis library is not visible to the proof tool with the recorded hash')
     if cli_liberty and cli_liberty != DEFAULT_LIBERTY and container_has(cli_liberty):
         return cli_liberty, "cli"
     staged = _discover_project_liberty(project)
@@ -5488,7 +5524,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         liberty, liberty_source = resolve_liberty(
             project, args.liberty,
-            lambda pth: _container_file_exists(container, pth))
+            lambda pth: _container_file_exists(container, pth),
+            _container_pdk_root(container),
+            lambda pth: _container_file_sha256(container, pth))
     except ValueError as exc:
         # Replace any old PASS before returning: the current declared mapping
         # was refused and no proof was attempted against a substitute library.
