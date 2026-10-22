@@ -473,13 +473,88 @@ def _retained_synth_census(project, params, R, ll, pdk):
         execute=execute)
 
 
-def _views(project, top, predecessor):
+def _current_physical_sdc(project, params):
+    """Read the SDC already adopted by placement, without redoing that work.
+
+    Native write_sdc may rewrite the deck. Its state lineage proves adoption;
+    only the canonical source is compared to the accepted bridge's hash.
+    """
+    import step_output_collector as versions
+    import librelane_contract as ll
+    project = Path(project).resolve()
+    accepted = versions.latest_pass(project, '17') if params.get('execution_mode') == 'default' else None
+    if not accepted or not any(row.get('rel', '').endswith('/sdc_derivation.json')
+                               for row in accepted.get('written_files', [])):
+        return _step15_sdc(project)
+    try:
+        if not accepted or not accepted.get('canonical_pass'):
+            raise ValueError('placement has not accepted a current bridge')
+        written = {row['rel']: row['sha256'] for row in accepted['written_files']}
+        def adopted(path):
+            path = _require(project / path)
+            if written.get(str(path.relative_to(project))) != snap.sha(path):
+                raise ValueError('placement did not adopt these bytes: ' + str(path))
+            return path
+        ledger_path = adopted(project / RPT / 'execution-backend-17.json')
+        ledger = json.loads(ledger_path.read_text())
+        initial = _require(project / ledger['initial_state'])
+        derivation_path = adopted(initial.parent / 'sdc_derivation.json')
+        derivation = json.loads(derivation_path.read_text())
+        bound = _read_step15_bounded_state(project)
+        if (derivation['schema'] != 'vibeic/step17-sdc-derivation/1'
+                or derivation['step15_record_sha256'] != snap.sha(project / PNR / 'step15_state.json')
+                or derivation['retained_views'] != bound['record']['views']):
+            raise ValueError('retained floorplan changed after placement adoption')
+        current = derivation['current_sdc']
+        sdc = _require(project / PNR / 'constraint.sdc')
+        provenance_path = sdc.parent / 'constraint_sdc_provenance.json'
+        provenance = json.loads(provenance_path.read_text())
+        import _path_layout as layout
+        step7 = json.loads((layout.constraints_dir(project) / 'asic_sdc.json').read_text())
+        # Refresh may change author diagnostics/code fingerprints while the
+        # consumed deck is identical. Validate material source/deck identity,
+        # not transient regenerated_by_step7_producer metadata.
+        if (current['path'] != str(sdc.relative_to(project)) or current['sha256'] != snap.sha(sdc)
+                or provenance['deck_sha256'] != current['sha256']
+                or provenance['step7_sdc'] != step7['path']
+                or provenance['step7_sha256'] != step7['sha256']
+                or provenance['step7_deck_sha256'] != step7['deck_sha256']
+                or step7['sha256'] != snap.sha(_require(project / step7['path']))):
+            raise ValueError('adopted canonical SDC source changed')
+        previous = snap.sha(initial)
+        if (ledger['initial_sha256'] != previous or derivation['state']['sha256'] != previous
+                or (project / derivation['state']['path']).resolve() != initial.resolve()):
+            raise ValueError('placement initial state changed')
+        states = ledger['states']
+        if not states or [row['step'] for row in states] != ledger['ordered_steps']:
+            raise ValueError('placement native chain is absent')
+        for row in states:
+            state = _require(project / row['state'])
+            receipt = ll.validate_step_receipt(state.parent, row['step'])
+            if (receipt['input']['state'] != previous or receipt['input']['image'] != params['image_id']
+                    or row['sha256'] != snap.sha(state)):
+                raise ValueError('placement native chain changed')
+            for name, expected in receipt['input'].get('config_files', {}).items():
+                path = Path(name)
+                if path.is_relative_to(ll.PDK_GUEST_ROOT):
+                    host = Path(params['pdk_root']) / path.relative_to(ll.PDK_GUEST_ROOT)
+                    if snap.sha(_require(host)) != expected:
+                        raise ValueError('placement PDK input changed: ' + name)
+            previous = snap.sha(state)
+        if snap.sha(_predecessor_state(project, 'placed.def')) != previous:
+            raise ValueError('placement handoff does not belong to this bridge')
+        return sdc
+    except (OSError, ValueError, KeyError, TypeError, em.Refusal, ll.Refusal) as exc:
+        raise em.Refusal('BACKEND_CURRENT_SDC_UNBOUND', str(exc)) from exc
+
+
+def _views(project, top, predecessor, params=None):
     import phase3_one_shot_runner as R
     nl, _, _ = R.pnr_input_netlist(project, top)
     routed = project / PNR / f'{top}_pnr.v'
     return {'def': _require(project / PNR / predecessor),
             'nl': _require(routed if routed.is_file() else nl),
-            'sdc': _step15_sdc(project)}
+            'sdc': _current_physical_sdc(project, params) if params is not None else _step15_sdc(project)}
 
 
 def _predecessor_state(project, predecessor):
@@ -695,7 +770,7 @@ def _state_chain(project, params, ids, predecessor, overlay=None, *, respect_flo
             snap.dump(bridge_dir / 'sdc_derivation.json', derivation)
     else:
         state = ll.state_from_direct(project, image, configs[ids[0]],
-                _views(project, params['top'], predecessor),
+                _views(project, params['top'], predecessor, params),
                 project / 'phase3/librelane' / (lane + '-config/bridge'),
                 chain=[configs[s] for s in ids[1:]], mounts=mounts)
     folders = ll.run_chain(project, image, [(s, configs[s], state) for s in ids],
@@ -1111,7 +1186,7 @@ def _cts_split(project, params, R, ll, pdk, overlay):
     lane = 'execution-backend-' + sid
     ids = (['OpenROAD.CTS', 'Vibeic.ClockPathDriveSizing', 'Vibeic.ExternalCaptureLaunchRetap']
            if sid == '19' else ['OpenROAD.ResizerTimingPostCTS'])
-    scene = ch.signoff_scene_sdc(R, _step15_sdc(project),
+    scene = ch.signoff_scene_sdc(R, _current_physical_sdc(project, params),
                                 project / 'phase3/librelane' / (lane + '-config'))
     overlay['PNR_SDC_FILE'] = (str(scene), 'selected SDC + accepted signoff OCV scene')
     configs = ll.resolve_step_configs(project, image, pdk.name, ids + ['OpenROAD.STAMidPNR'],
@@ -1584,7 +1659,7 @@ def produce_signoff(project, params):
     elif sid == '27':
         import si_mcf_sta as mcf
         nl = _require(pnr / (top + '_pnr.v'))
-        sdc = _step15_sdc(project)
+        sdc = _current_physical_sdc(project, params)
         voltage = R._pdk_nominal_voltage(pdk, container)
         if voltage is None:
             raise em.Refusal('BACKEND_SI_VOLTAGE_UNSTATED', sid)

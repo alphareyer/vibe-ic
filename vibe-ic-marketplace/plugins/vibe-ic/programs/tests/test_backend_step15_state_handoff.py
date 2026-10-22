@@ -293,7 +293,8 @@ def _resume_project(tmp_path, monkeypatch):
     (folder / 'outputs.json').write_text(json.dumps(retained))
     deck = 'create_clock -period 12 [get_ports clk]\nset_max_transition 3 [current_design]\n'
     (project / sdc_rel).write_text(deck)
-    current = {'path': sdc_rel, 'sha256': producers.snap.sha(project / sdc_rel)}
+    current = {'path': sdc_rel, 'sha256': producers.snap.sha(project / sdc_rel),
+               'deck_sha256': producers.snap.sha(project / sdc_rel)}
     (project / rec_rel).write_text(json.dumps(current))
     (pnr / 'constraint.sdc').write_text(deck)
     _write(pnr / 'constraint_sdc_provenance.json', json.dumps({
@@ -367,3 +368,158 @@ def test_actual_step17_chain_uses_derivative_state_without_modifying_step15(tmp_
     receipt = json.loads((seen[0].parent / 'sdc_derivation.json').read_text())
     assert receipt['state']['sha256'] == producers.snap.sha(seen[0])
     assert (project / producers.PNR / 'step15_state.json').read_bytes() == old
+
+
+def _accepted_placement_bridge(tmp_path, monkeypatch):
+    project, params, _, _ = _resume_project(tmp_path, monkeypatch)
+    pnr = project / producers.PNR
+    provenance_path = pnr / 'constraint_sdc_provenance.json'
+    provenance = json.loads(provenance_path.read_text())
+    provenance['step7_sdc'] = 'phase2/stage2/constraints/bounded.asic.sdc'
+    provenance['step7_deck_sha256'] = producers.snap.sha(project / provenance['step7_sdc'])
+    provenance_path.write_text(json.dumps(provenance))
+    _, derivation = producers._step17_current_sdc_bridge(
+        project, params, producers._read_step15_bounded_state(project))
+    initial = _write(project / 'phase3/librelane/17-config/bridge/state_in.json', json.dumps({
+        'sdc': str(pnr / 'constraint.sdc'), 'odb': str(pnr / 'librelane_floorplan.odb')}))
+    derivation['state'] = {'path': str(initial.relative_to(project)), 'sha256': producers.snap.sha(initial)}
+    derivative = _write(initial.parent / 'sdc_derivation.json', json.dumps(derivation))
+    folder = project / 'phase3/librelane/17/01-detailed-placement'
+    native_sdc = _write(folder / 'bounded.sdc', '# OpenROAD write_sdc rewrites valid syntax\ncreate_clock -period 12 -name clk [get_ports {clk}]\n')
+    native_def = _write(folder / 'bounded.def', 'VERSION 5.8 ;\nDESIGN bounded ;\n')
+    state = _write(folder / 'state_out.json', json.dumps({'sdc': str(native_sdc), 'def': str(native_def)}))
+    fingerprint = {'step': 'OpenROAD.DetailedPlacement', 'image': 'fixture-image',
+                   'state': producers.snap.sha(initial), 'config_files': {}}
+    _write(folder / 'input_fingerprint.json', json.dumps(fingerprint))
+    _write(folder / 'pdk_root.json', '{}\n')
+    _write(folder / 'invocation.log', 'source-control placement ran\n')
+    _write(folder / 'vibeic_receipt.json', json.dumps({'input': fingerprint,
+        'sha256': {p.name: producers.snap.sha(p) for p in folder.iterdir() if p.is_file()}}))
+    ledger = _write(project / producers.RPT / 'execution-backend-17.json', json.dumps({
+        'initial_state': str(initial), 'initial_sha256': producers.snap.sha(initial),
+        'ordered_steps': ['OpenROAD.DetailedPlacement'], 'states': [{
+            'step': 'OpenROAD.DetailedPlacement', 'state': str(state), 'sha256': producers.snap.sha(state)}]}))
+    shutil.copyfile(native_def, pnr / 'placed.def')
+    _write(project / producers.RPT / 'librelane_placement_handoff.json', json.dumps({
+        'state': str(state), 'state_sha256': producers.snap.sha(state), 'views': {'def': {
+            'dest': str(pnr / 'placed.def'), 'dest_sha256': producers.snap.sha(pnr / 'placed.def')}}}))
+    inputs = {'input/design.v': producers.snap.sha(project / 'input/design.v')}
+    written = [{'rel': str(path.relative_to(project)), 'sha256': producers.snap.sha(path)}
+               for path in (ledger, derivative)]
+    _write(project / 'steps/accepted17/outputs.json', json.dumps({
+        'canonical_pass': True, 'written_files': written, 'inputs': inputs}))
+    latest = json.loads((project / 'steps/latest_pass.json').read_text())
+    latest['steps']['17'] = {'folder': 'accepted17', 'inputs': inputs}
+    (project / 'steps/latest_pass.json').write_text(json.dumps(latest))
+    return project, params, derivative, native_sdc
+
+
+@pytest.mark.parametrize('sid', ['19', '20', '27'])
+def test_downstream_reuses_accepted_sdc_and_native_rewrite_without_upstream_rerun(
+        tmp_path, monkeypatch, sid):
+    project, params, _, native_sdc = _accepted_placement_bridge(tmp_path, monkeypatch)
+    monkeypatch.setattr(producers, '_step17_current_sdc_bridge', lambda *_: pytest.fail('must not rebuild accepted placement bridge'))
+    params['step_id'] = sid
+    current = producers._current_physical_sdc(project, params)
+    assert current == project / producers.PNR / 'constraint.sdc'
+    assert current.read_bytes() != native_sdc.read_bytes()
+    # Later reports are legitimate updates, not changed design inputs.
+    _write(project / 'reports/phase3/downstream.json', '{"current":true}')
+    assert producers._current_physical_sdc(project, params) == current
+
+
+@pytest.mark.parametrize('damage', ['bridge', 'canonical_sdc', 'native_sdc', 'placement_def', 'step7', 'rollback'])
+def test_downstream_rejects_invalid_adopted_bridge(tmp_path, monkeypatch, damage):
+    project, params, derivative, native_sdc = _accepted_placement_bridge(tmp_path, monkeypatch)
+    target = {'bridge': derivative, 'canonical_sdc': project / producers.PNR / 'constraint.sdc',
+              'native_sdc': native_sdc, 'placement_def': project / producers.PNR / 'placed.def',
+              'step7': project / 'phase2/stage2/constraints/bounded.asic.sdc',
+              'rollback': project / producers.PNR / 'constraint.sdc'}[damage]
+    target.write_text('upstream-clock\n' if damage == 'rollback' else 'changed\n')
+    params['step_id'] = '19'
+    with pytest.raises(em.Refusal, match='BACKEND_CURRENT_SDC_UNBOUND'):
+        producers._current_physical_sdc(project, params)
+
+
+@pytest.mark.parametrize('sid', ['19', '20'])
+def test_actual_cts_hold_seam_reads_adopted_sdc_before_native(tmp_path, monkeypatch, sid):
+    import librelane_cts_hold as ch
+    import librelane_contract as ll
+    import phase3_one_shot_runner as R
+    project, params, _, _ = _accepted_placement_bridge(tmp_path, monkeypatch)
+    params['step_id'] = sid
+    class ReachedScene(Exception):
+        pass
+    def scene(rt, sdc, directory):
+        assert sdc == project / producers.PNR / 'constraint.sdc'
+        raise ReachedScene
+    monkeypatch.setattr(ch, 'signoff_scene_sdc', scene)
+    with pytest.raises(ReachedScene):
+        producers._cts_split(project, params, R, ll, SimpleNamespace(name='fixture'), {})
+
+
+def test_same_deck_step32_refresh_does_not_invalidate_step27(tmp_path, monkeypatch):
+    from _ppa import timing
+    import phase3_one_shot_runner as R
+    project, params, _, _ = _accepted_placement_bridge(tmp_path, monkeypatch)
+    sdc = project / producers.PNR / 'constraint.sdc'
+    source = json.loads((project / 'phase2/stage2/constraints/asic_sdc.json').read_text())
+    record = {'text': sdc.read_text(), 'path': source['path'],
+              'step7_sha256': source['sha256'], 'deck_sha256': source['deck_sha256'],
+              'regenerated': None, 'derivation': None}
+    old = sdc.with_name('constraint_sdc_provenance.json').read_bytes()
+    monkeypatch.setattr(timing, 'asic_sdc_for_pnr', lambda *_: record)
+    R._refresh_default_step32_sdc(project, 'bounded', SimpleNamespace(name='fixture'), '')
+    assert sdc.with_name('constraint_sdc_provenance.json').read_bytes() != old
+    source['input_digest'] = 'new-author-metadata-with-identical-material-deck'
+    (project / 'phase2/stage2/constraints/asic_sdc.json').write_text(json.dumps(source))
+    params['step_id'] = '27'
+    assert producers._current_physical_sdc(project, params) == sdc
+
+
+def test_actual_step27_reads_adopted_sdc_before_native(tmp_path, monkeypatch):
+    import phase3_one_shot_runner as R
+    import librelane_contract as ll
+    project, params, _, _ = _accepted_placement_bridge(tmp_path, monkeypatch)
+    params['step_id'] = '27'
+    _write(project / producers.PNR / 'bounded_pnr.v', 'module bounded; endmodule\n')
+    monkeypatch.setattr(producers, '_parameters', lambda *_: (R, ll, SimpleNamespace(name='fixture'), ''))
+    class ReachedVoltage(Exception):
+        pass
+    monkeypatch.setattr(R, '_pdk_nominal_voltage', lambda *_: (_ for _ in ()).throw(ReachedVoltage()))
+    with pytest.raises(ReachedVoltage):
+        producers.produce_signoff(project, params)
+
+
+def test_step21_inherits_hold_native_sdc_without_reading_step15(tmp_path, monkeypatch):
+    import librelane_contract as ll
+    import librelane_route as route
+    import phase3_one_shot_runner as R
+    project, params, _, native_sdc = _accepted_placement_bridge(tmp_path, monkeypatch)
+    params['step_id'] = '21'
+    state = native_sdc.parent / 'state_out.json'
+    hold_def = _write(project / producers.PNR / 'post_hold.def', 'VERSION 5.8 ;\nDESIGN bounded ;\n')
+    _write(project / producers.RPT / 'librelane_cts_hold_handoff.json', json.dumps({
+        'measured_state': str(state), 'measured_state_sha256': producers.snap.sha(state),
+        'views': {'post_hold_def': {'dest': str(hold_def), 'dest_sha256': producers.snap.sha(hold_def)}}}))
+    config = _write(project / 'routing-config.json', '{}\n')
+    monkeypatch.setattr(ll, 'resolve_step_configs', lambda *_a, **_k: {'OpenROAD.DetailedRouting': config})
+    monkeypatch.setattr(R, '_resolved_cell_policy', lambda configs, *_: (configs, []))
+    monkeypatch.setattr(route, 'named_violation_config', lambda *_a, **_k: config)
+    monkeypatch.setattr(producers, '_step15_sdc', lambda *_: pytest.fail('routing must inherit its current native state'))
+    seen = []
+    def run(project, image, tasks, **kwargs):
+        seen.append(tasks[0][2]); return []
+    monkeypatch.setattr(ll, 'run_chain', run)
+    producers._state_chain(project, params, ['OpenROAD.DetailedRouting'], 'post_hold.def')
+    assert seen == [state]
+    assert json.loads(state.read_text())['sdc'] == str(native_sdc)
+
+
+def test_downstream_without_new_bridge_keeps_original_strict_reader(tmp_path):
+    project, _ = _make_published_project(tmp_path)
+    params = {'step_id': '19', 'execution_mode': 'default'}
+    assert producers._current_physical_sdc(project, params) == project / producers.PNR / 'step15.constraint.sdc'
+    (project / producers.PNR / 'constraint.sdc').write_text('unapproved change\n')
+    with pytest.raises(em.Refusal, match='BACKEND_STEP15_SDC_BINDING_CHANGED'):
+        producers._current_physical_sdc(project, params)
