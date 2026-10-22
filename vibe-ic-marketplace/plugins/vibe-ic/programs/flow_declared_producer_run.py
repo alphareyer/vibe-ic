@@ -643,12 +643,36 @@ def _producer_target_has_content(path: Path) -> bool:
     return True
 
 
-def _current_input_identity(project: Path, clauses) -> Dict[str, Any]:
-    """Bind reuse to source and exact input bytes, independent of wall-clock run id."""
+def _current_input_identity(project: Path, clauses, input_manifest=None) -> Dict[str, Any]:
+    """Record source/input bytes; only the legacy complete scan permits reuse."""
     project = project.resolve()
     excluded = {REPORT_REL, *(row["target"] for row in clauses)}
     files = {}
-    for path in sorted(project.rglob("*")):
+    if input_manifest is None:
+        paths = project.rglob("*")
+    else:
+        # The caller already resolved this row's dependencies before native
+        # execution. Re-read those bytes, not the issued (pre-native) hashes.
+        # Sibling outputs are the native evidence consumed by these report
+        # producers (for example placed.def), not unrelated historical rows.
+        if (not isinstance(input_manifest, dict)
+                or not isinstance(input_manifest.get('files'), dict)
+                or input_manifest.get('missing')):
+            raise ValueError('current producer input manifest is incomplete')
+        paths = set()
+        for raw in input_manifest['files']:
+            if (not isinstance(raw, str) or not raw or Path(raw).is_absolute()
+                    or '..' in Path(raw).parts):
+                raise ValueError('current producer input path is invalid')
+            path = project / raw
+            if raw not in excluded and not path.is_file():
+                raise ValueError('current producer input disappeared: ' + raw)
+            paths.add(path)
+        for clause in clauses:
+            for pattern in clause.get('siblings', []):
+                for alternative in pattern.split(' OR '):
+                    paths.update(project.glob(alternative.strip()))
+    for path in sorted(paths):
         relative = path.relative_to(project).as_posix()
         if relative in excluded:
             continue
@@ -670,7 +694,7 @@ def _current_input_identity(project: Path, clauses) -> Dict[str, Any]:
         # Retained versions and auditor receipts describe this invocation;
         # they are not new inputs to its report producers. Canonical aliases
         # above still bind their resolved, live design path exactly once.
-        if (relative == 'steps' or relative.startswith(('steps/',
+        if input_manifest is None and (relative == 'steps' or relative.startswith(('steps/',
                 'reports/step_versions/', '.vibeic-state/audit_receipts/'))):
             continue
         if path.is_file():
@@ -683,12 +707,12 @@ def _current_input_identity(project: Path, clauses) -> Dict[str, Any]:
             # semantic input: it must invalidate reuse when it changes to (or
             # from) empty.  Zero-byte outputs remain excluded by
             # `_is_run_owned_evidence` and cannot prove a producer ran.
-            if path.stat().st_size == 0:
+            if input_manifest is None and path.stat().st_size == 0:
                 if (relative.startswith("reports/audit/") or
                         relative in _flow_gate_json_targets() or
                         _document_role(path) == _ga.ROLE_AUDIT):
                     continue
-            elif not _is_run_owned_evidence(project, path, for_input=True):
+            elif input_manifest is None and not _is_run_owned_evidence(project, path, for_input=True):
                 continue
             files[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
     source_files = {str(path): _target_digest(path) for path in
@@ -704,28 +728,34 @@ def _current_input_identity(project: Path, clauses) -> Dict[str, Any]:
             "clauses": clauses}
 
 
-def run_for_step(project: Path, step_id: str, timeout: int = 900
-                 ) -> Dict[str, Any]:
+def run_for_step(project: Path, step_id: str, timeout: int = 900, *,
+                 input_manifest=None) -> Dict[str, Any]:
     """Run only the producers declared for one current flow step.
 
     This is the pre-consumer seam used by a per-step backend worker.  The
     Filtering by the requested step prevents unrelated producer clauses from
     running or being credited to its evidence. Unlike the final all-step
     refresh, an explicitly selected step also starts its report producers when
-    none of its outputs exists yet. Reuse still requires current-input and
-    content-bound producer evidence.
+    none of its outputs exists yet. Manifest-backed callers regenerate the
+    current report; their bounded identity is bookkeeping, not a complete
+    dynamic-dependency proof. Legacy reuse retains its full input/content check.
     """
     sid = str(step_id)
     project = Path(project)
     clauses = [c for c in declared_producer_clauses()
                if str(c.get("step")) == sid]
-    identity = _current_input_identity(project, clauses)
+    identity = _current_input_identity(project, clauses, input_manifest)
     try:
         prior = json.loads((project / REPORT_REL).read_text())
     except (OSError, ValueError):
         prior = {}
     prior_targets = {}
-    if (isinstance(prior, dict) and prior.get("schema") == "vibeic/current-step-producer-census/1"
+    # A pre-native row manifest is not the full dynamic input closure of its
+    # report readers: they can consume the newly published handoff and its
+    # state references. Run these report producers on the current row. The
+    # scoped identity is bookkeeping, never authority to reuse an older report.
+    # Legacy callers retain their existing complete-input reuse contract.
+    if (input_manifest is None and isinstance(prior, dict) and prior.get("schema") == "vibeic/current-step-producer-census/1"
             and prior.get("step_id") == sid and prior.get("verdict") == "PRODUCED"
             and prior.get("input_identity") == identity):
         for row in prior.get("results", []) + prior.get("skipped", []):
@@ -735,7 +765,10 @@ def run_for_step(project: Path, step_id: str, timeout: int = 900
     rec["schema"] = "vibeic/current-step-producer-census/1"
     rec["step_id"] = sid
     rec["scope"] = "current-step"
-    rec["input_identity"] = _current_input_identity(project, clauses)
+    rec["input_identity"] = _current_input_identity(project, clauses, input_manifest)
+    if input_manifest is not None:
+        rec["input_identity_scope"] = "row_manifest_and_native_siblings"
+        rec["cross_invocation_reuse"] = False
     report = project / REPORT_REL
     report.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(report, json.dumps(rec, sort_keys=True, indent=2) + "\n")

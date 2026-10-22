@@ -470,6 +470,69 @@ def latest_pass(project: Path, step_id: str) -> dict | None:
     return record
 
 
+def continuation_evidence(project: Path, requested_steps) -> dict:
+    """Describe retained bytes before a bounded continuation, without invalidating them.
+
+    This is evidence for choosing a window, not a second freshness verdict.
+    A changed shared report may be a legitimate downstream update; only its
+    owning consumer can decide whether the producer must run again.
+    """
+    project = Path(project).resolve()
+    requested = list(map(str, requested_steps))
+    report = {'requested_steps': requested, 'automatically_added_steps': [],
+              'reason': 'explicit bounded entry/exit request',
+              'checkpoints': [], 'unknown_impact': [],
+              'scope': 'byte comparison only; not a new PASS or rerun decision'}
+    root = _versions_root(project)
+    try:
+        pointers = json.loads((root / 'latest_pass.json').read_text())['steps']
+        if not isinstance(pointers, dict):
+            raise ValueError('checkpoint index is not a mapping')
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        report['unknown_impact'].append('retained checkpoint index unavailable: ' + str(exc))
+        return report
+    hashes = {}
+    def observed(rel):
+        if rel not in hashes:
+            path = project / rel
+            hashes[rel] = _sha(path) if path.is_file() else None
+        return hashes[rel]
+    for sid, pointer in pointers.items():
+        row = {'step_id': str(sid), 'requested': str(sid) in requested,
+               'unchanged_files': 0, 'differences': []}
+        try:
+            saved = json.loads((root / pointer['folder'] / 'outputs.json').read_text())
+            row['historical_status'] = saved.get('status')
+            row['historical_canonical_pass'] = saved.get('canonical_pass', False)
+            inputs = saved.get('inputs') or {}
+            outputs = saved.get('outputs') or []
+            refs = [('input', rel, value.get('sha256') if isinstance(value, dict) else value)
+                    for rel, value in inputs.items()]
+            refs += [('output', item['rel'], item.get('sha256')) for item in outputs]
+            for kind, rel, expected in refs:
+                if not isinstance(rel, str) or not isinstance(expected, str) or not expected:
+                    row['differences'].append({'kind': kind, 'path': rel, 'state': 'unbound'})
+                    continue
+                actual = observed(rel)
+                if actual == expected:
+                    row['unchanged_files'] += 1
+                else:
+                    row['differences'].append({'kind': kind, 'path': rel,
+                        'state': 'missing' if actual is None else 'changed',
+                        'retained_sha256': expected, 'current_sha256': actual})
+            row['observation'] = ('unknown' if not inputs or not outputs
+                                  or not saved.get('canonical_pass') else
+                                  'differences' if row['differences'] else 'unchanged')
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            row.update(observation='unknown', detail=str(exc))
+        if row['observation'] != 'unchanged':
+            report['unknown_impact'].append(str(sid))
+        report['checkpoints'].append(row)
+    report['retained_unchanged_steps'] = [row['step_id'] for row in report['checkpoints']
+        if row['observation'] == 'unchanged' and not row['requested']]
+    return report
+
+
 def current_acceptance(project: Path, started_at: float) -> list:
     """Latest complete consumers since this sequential phase invocation began.
 

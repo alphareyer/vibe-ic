@@ -219,6 +219,18 @@ def _capture_container_image(project: Path, container: str,
     # digest-pinned REFERENCE — see `_propagatable_image`, and #2085 for what
     # exporting the Id instead did to the far end.
     _img, _why_no_img = _propagatable_image(container, rec)
+    # An optional operator pin must not leave an immutable observed image
+    # without the match proof required by ordinary downstream PDK readers.
+    # Ask the existing verifier; never manufacture image_match from PASS.
+    if (not require_image and rec.get("verdict") == "PASS"
+            and _pin.reference_digest(str(_img or ""))):
+        try:
+            rec = _cip.verify(container, str(_img))
+            rec["pin_source"] = "observed_immutable_image"
+        except Exception as exc:
+            rec = {**rec, "verdict": "SKIP", "image_match": False,
+                   "reason": "observed image pin verification failed: "
+                             f"{type(exc).__name__}: {exc}"}
     if _img and not (os.environ.get("VIBEIC_EDA_IMAGE")
                      or os.environ.get("IIC_EDA_IMAGE")):
         os.environ["VIBEIC_EDA_IMAGE"] = str(_img)
@@ -2347,6 +2359,32 @@ ENTRY_STEP_ENTERABLE_RUNNERS = ("phase1_one_shot_runner",
                                 "phase3_one_shot_runner")
 
 
+def _record_continuation_evidence(project: Path, entry: str, exit_: Optional[str]) -> None:
+    """Publish an advisory byte inventory before the existing bounded dispatch."""
+    import _flow_yaml
+    import step_output_collector as versions
+    import datetime
+    order = list(map(str, _flow_yaml.ordered_step_ids()))
+    end = str(exit_) if exit_ is not None else order[-1]
+    try:
+        lo, hi = order.index(str(entry)), order.index(end)
+        if lo > hi:
+            return  # The existing owner reports invalid windows.
+        evidence = versions.continuation_evidence(project, order[lo:hi + 1])
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S_%fZ')
+        path = project / 'reports/orchestrator' / f'continuation_plan-{stamp}.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(evidence, indent=2) + '\n')
+        print(f'[continuation] requested={",".join(evidence["requested_steps"])}; '
+              f'unchanged retained={len(evidence.get("retained_unchanged_steps", []))}; '
+              f'unknown impact={len(evidence["unknown_impact"])}; '
+              f'no automatic expansion; evidence={path}', flush=True)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        # Evidence inspection is advisory; never convert a report failure
+        # into a phase restart or a fabricated checkpoint acceptance.
+        print(f'[continuation] evidence unavailable: {exc}; requested scope unchanged', flush=True)
+
+
 def main() -> int:
     """Canonical CLI contract: fail-closed authority refusal is always rc=2."""
     from execution_modes import Refusal
@@ -2720,6 +2758,7 @@ def _main() -> int:
                   f"1/2 step.", file=sys.stderr)
             return 2
         print(f"[entry] step {args.entry_step} -> {_entry_runner}")
+        _record_continuation_evidence(project, str(args.entry_step), args.exit_step)
         if _sdc_postcheck_entry and str(args.exit_step) != '8':
             print('REFUSED: Default Step8 postcheck needs --exit-step 8', file=sys.stderr)
             lock.release()

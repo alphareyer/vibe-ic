@@ -281,6 +281,59 @@ def test_identity_is_recorded_even_when_no_require_image_given(monkeypatch):
     assert rec["image_ref"] == "vibeic-eda:0.2.30"
 
 
+def test_frontdoor_observed_digest_is_readable_by_pdk_consumer(tmp_path, monkeypatch):
+    import vibe_ic_one_shot_runner as frontdoor
+    import _pdk_layer_authority as authority
+    import _container_exec as cex
+    image = "registry.invalid/tools@sha256:" + "a" * 64
+    monkeypatch.setattr(cip, "inspect_container", lambda _: _ok(image, PINNED_ID))
+    monkeypatch.setattr(cip, "_resolve_image_id", lambda _: PINNED_ID)
+    for name in ("VIBEIC_EDA_IMAGE", "IIC_EDA_IMAGE", "EDA_CONTAINER", "VIBEIC_EDA_CONTAINER"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(cex, "no_container_route", lambda: False)
+    rec = frontdoor._capture_container_image(tmp_path, "vibeic-eda", None)
+    assert rec["image_match"] is True
+    assert rec["require_image"] == image
+    reader, why = authority.reader_the_run_recorded(tmp_path, environ={})
+    assert reader is not None, why
+    assert reader.image == image
+
+
+def test_frontdoor_observed_pin_keeps_real_mismatch(tmp_path, monkeypatch):
+    import vibe_ic_one_shot_runner as frontdoor
+    image = "registry.invalid/tools@sha256:" + "a" * 64
+    calls = []
+    def inspect(_):
+        calls.append(1)
+        return _ok(image, PINNED_ID) if len(calls) == 1 else _ok("other:tag", STALE_ID)
+    monkeypatch.setattr(cip, "inspect_container", inspect)
+    monkeypatch.setattr(cip, "_resolve_image_id", lambda _: PINNED_ID)
+    monkeypatch.setattr(cip, "_repo_digests_of", lambda _: ([], ""))
+    rec = frontdoor._capture_container_image(tmp_path, "vibeic-eda", None)
+    assert rec["verdict"] == "MISMATCH"
+    assert rec["image_match"] is False
+
+
+def test_frontdoor_mutable_unresolved_image_does_not_invent_match(tmp_path, monkeypatch):
+    import vibe_ic_one_shot_runner as frontdoor
+    monkeypatch.setattr(cip, "inspect_container", lambda _: _ok("tools:latest", PINNED_ID))
+    monkeypatch.setattr(frontdoor._pin, "local_repo_digests", lambda _: ([], "not known"))
+    rec = frontdoor._capture_container_image(tmp_path, "vibeic-eda", None)
+    assert rec.get("image_match") is not True
+
+
+def test_frontdoor_explicit_pin_keeps_precedence(tmp_path, monkeypatch):
+    import vibe_ic_one_shot_runner as frontdoor
+    image = "registry.invalid/tools@sha256:" + "a" * 64
+    monkeypatch.setattr(cip, "inspect_container", lambda _: _ok(image, PINNED_ID))
+    monkeypatch.setattr(cip, "_resolve_image_id", lambda _: STALE_ID)
+    monkeypatch.setattr(cip, "_repo_digests_of", lambda _: ([], ""))
+    rec = frontdoor._capture_container_image(tmp_path, "vibeic-eda", "tools:different")
+    assert rec["verdict"] == "MISMATCH"
+    assert rec["require_image"] == "tools:different"
+    assert "pin_source" not in rec
+
+
 # ------------------------------------------------------------------- CLI ----
 @pytest.mark.parametrize("verdict_rec,expected_rc", [
     ({"verdict": "PASS", "reason": "r"}, 0),

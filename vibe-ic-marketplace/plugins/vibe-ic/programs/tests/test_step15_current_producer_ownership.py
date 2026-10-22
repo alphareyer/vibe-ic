@@ -207,7 +207,7 @@ def test_backend_producer_orders_current_declared_outputs_before_consumer(
         events.append("native")
         return {"verdict": "PASS", "detail": "fixture"}
 
-    def fake_declared(project, step_id):
+    def fake_declared(project, step_id, *, input_manifest=None):
         events.append(("declared", str(step_id)))
         return {"scope": "current-step", "step_id": str(step_id),
                 "verdict": "PRODUCED", "executed": 1, "population": 1,
@@ -257,7 +257,7 @@ def test_real_backend_worker_runs_declared_producer_before_consumer(
         return {"status": "PASS", "ledger": []}
 
     monkeypatch.setattr(backend_producers, "produce_pnr", fake_native)
-    def fake_declared(project, step_id):
+    def fake_declared(project, step_id, *, input_manifest=None):
         events.append(("declared", str(step_id)))
         report = project / "reports/phase2/gates/stage2_compliance.json"
         report.parent.mkdir(parents=True, exist_ok=True)
@@ -449,7 +449,7 @@ def test_audit_authored_current_step_blocks_backend_consumer(
         (pnr / 'pdn.done').write_text('pdn complete\n')
         return {"verdict": "PASS", "detail": "native outputs retained"}
 
-    def fake_declared(project, step_id):
+    def fake_declared(project, step_id, *, input_manifest=None):
         if failure == 'exception':
             raise RuntimeError('declared producer failed')
         report = project / "reports/phase2/gates/stage2_compliance.json"
@@ -484,3 +484,89 @@ def test_audit_authored_current_step_blocks_backend_consumer(
     assert result["current_step_declared_producers"]["authority_verdict"] == expected
     assert result['canonical_receipts'][0]['current_step_declared_producers'] == (
         result['current_step_declared_producers'])
+
+
+@pytest.mark.parametrize('mutation', ['history', 'input', 'empty_input', 'native', 'source', 'missing_input', 'hidden_handoff'])
+def test_row_manifest_ignores_history_but_rechecks_current_reports(tmp_path, monkeypatch, mutation):
+    project = tmp_path / 'project'
+    project.mkdir()
+    clause = _reuse_clause()
+    (project / 'native.def').write_text('current native output\n')
+    (project / 'input.sdc').write_text('create_clock -period 10 [get_ports clk]\n')
+    sources = tmp_path / 'current-programs'
+    sources.mkdir()
+    source = sources / 'stage2_compliance.py'
+    source.write_text('# current report producer\n')
+    monkeypatch.setattr(declared, 'PROGRAMS_DIR', sources)
+    calls = []
+
+    def produce(project, row, timeout):
+        calls.append(row['step'])
+        hidden = project / 'native-handoff-state.json'
+        rc = 1 if hidden.is_file() and hidden.read_text() == 'bad' else 0
+        (project / row['target']).write_text(json.dumps(_producer_report()))
+        return {**row, 'rc': rc, 'executed': True,
+                'target_exists_after': True, 'authorship': 'producer'}
+
+    monkeypatch.setattr(declared, 'declared_producer_clauses', lambda: [clause])
+    monkeypatch.setattr(declared, '_run_one', produce)
+    # The identity must re-read the selected input, not trust this stale hash.
+    manifest = {'files': {'input.sdc': 'issued-before-native'}, 'missing': []}
+    first = declared.run_for_step(project, '15', input_manifest=manifest)
+    assert first['verdict'] == 'PRODUCED'
+    assert set(first['input_identity']['files']) == {'input.sdc', 'native.def'}
+    if mutation == 'history':
+        for rel in ('.vibeic/runtime-program-trees/old/plugin/programs/a.py',
+                    'reports/phase3/default_steps/32/backend_result.json'):
+            path = project / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('unrelated historical evidence\n')
+    elif mutation == 'input':
+        (project / 'input.sdc').write_text('create_clock -period 8 [get_ports clk]\n')
+    elif mutation == 'empty_input':
+        (project / 'input.sdc').write_text('')
+    elif mutation == 'native':
+        (project / 'native.def').write_text('changed actual native output\n')
+    elif mutation == 'source':
+        source.write_text('# revised current report producer\n')
+    elif mutation == 'hidden_handoff':
+        (project / 'native-handoff-state.json').write_text('bad')
+    else:
+        (project / 'input.sdc').unlink()
+    # This seam must never enumerate the project to discover dependencies.
+    real_rglob = Path.rglob
+    def no_project_walk(path, pattern):
+        assert path != project, 'scoped producer still traversed the whole project'
+        return real_rglob(path, pattern)
+    monkeypatch.setattr(Path, 'rglob', no_project_walk)
+    if mutation == 'missing_input':
+        with pytest.raises(ValueError, match='input disappeared'):
+            declared.run_for_step(project, '15', input_manifest=manifest)
+        assert calls == ['15']
+        return
+    second = declared.run_for_step(project, '15', input_manifest=manifest)
+    assert second['verdict'] == ('INCOMPLETE' if mutation == 'hidden_handoff' else 'PRODUCED')
+    assert backend_producers._current_step_producer_authority(second)[0] is (mutation != 'hidden_handoff')
+    assert calls == ['15', '15']  # report only; no native/upstream producer called
+    assert second['already_produced_by_the_run'] == 0
+    assert second['cross_invocation_reuse'] is False
+    if mutation in ('history', 'hidden_handoff'):
+        assert second['input_identity'] == first['input_identity']
+    else:
+        assert second['input_identity'] != first['input_identity']
+
+
+def test_backend_passes_resolved_row_manifest_to_declared_producer(tmp_path, monkeypatch):
+    seen = []
+    manifest = {'files': {'input.sdc': 'digest'}, 'missing': []}
+    monkeypatch.setattr(backend_producers, 'produce_pnr', lambda *_: {'verdict': 'PASS'})
+    monkeypatch.setattr(backend_producers, '_native_current_step_output_snapshot', lambda *_: {})
+    monkeypatch.setattr(backend_producers, '_native_current_step_producer', lambda *_: None)
+    def declared_run(project, sid, **kwargs):
+        seen.append(kwargs.get('input_manifest'))
+        return {'verdict': 'INCOMPLETE', 'results': [], 'population': 0}
+    monkeypatch.setattr(declared, 'run_for_step', declared_run)
+    result = backend_producers.produce(tmp_path, {
+        'step_id': '17', 'resolved_input_manifest': manifest})
+    assert seen == [manifest]
+    assert result['verdict'] != 'PASS'  # wiring cannot fabricate producer authority

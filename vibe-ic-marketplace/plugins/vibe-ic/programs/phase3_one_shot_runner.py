@@ -80006,7 +80006,8 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                         # DFM is an existing program-first report producer. It
                         # runs after the finished stream and current fill, without
                         # constructing a release candidate or another scheduler.
-                        current = producers._run_current_step_declared_producers(project, sid)
+                        current = producers._run_current_step_declared_producers(
+                            project, sid, manifest)
                         produced, detail, verdict = producers._current_step_producer_authority(
                             current, project=project)
                         result = {'verdict': verdict, 'detail': detail,

@@ -104,6 +104,15 @@ only on a plugin upgrade, a repaired read path, or a suspicion of stale evidence
 - Execute only the declared continuation window. An explicit user-requested full rerun
   is allowed and must be recorded as such.
 
+The canonical entry prints a `continuation_plan-<timestamp>.json` path before a
+bounded dispatch. Read its input/output byte differences before proposing the next
+window. It preserves historical verdicts and never expands the requested scope.
+`unchanged` means retained bytes match, not that a demonstrated producer defect is
+cleared. Missing paths, changed shared reports and unknown provenance require owner
+inspection; this inventory does not automatically choose upstream reruns. Use the
+existing `step_output_collector.continuation_evidence(project, steps)` for the same
+read-only inventory before launching a proposed window.
+
 Example: an SDC reader repair requires comparing the deck actually consumed by the
 failed signoff step with the current canonical deck. It does not by itself justify
 repeating synthesis, floorplan, or placement. Program enforcement of this continuation

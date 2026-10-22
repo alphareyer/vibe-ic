@@ -1882,7 +1882,7 @@ def produce_signoff(project, params):
     return result
 
 
-def _run_current_step_declared_producers(project, step_id):
+def _run_current_step_declared_producers(project, step_id, input_manifest=None):
     """Materialize this row's flow-declared outputs before its consumer.
 
     The phase runner's final refresh still owns the all-step sweep.  A backend
@@ -1894,7 +1894,8 @@ def _run_current_step_declared_producers(project, step_id):
     """
     try:
         import flow_declared_producer_run as declared
-        result = declared.run_for_step(Path(project), str(step_id))
+        kwargs = ({'input_manifest': input_manifest} if input_manifest is not None else {})
+        result = declared.run_for_step(Path(project), str(step_id), **kwargs)
         if not isinstance(result, dict):
             raise ValueError("current-step producer returned no record")
         return result
@@ -2241,7 +2242,8 @@ def produce(project, params):
         current = _native_current_step_receipt(
             Path(project), sid, params, result, started_ns, prior_outputs)
     else:
-        current = _run_current_step_declared_producers(project, sid)
+        current = _run_current_step_declared_producers(
+            project, sid, params.get('resolved_input_manifest'))
     allowed, reason, authority_verdict = _current_step_producer_authority(
         current, project=Path(project))
     current['consumer_allowed'] = allowed
