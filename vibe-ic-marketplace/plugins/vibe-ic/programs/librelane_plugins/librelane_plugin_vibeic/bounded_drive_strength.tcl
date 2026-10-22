@@ -1,8 +1,8 @@
 # Bounded drive-strength recovery for Vibeic.PostRouteRepair.
 #
 # This is deliberately narrower than repair_design.  It is called only after
-# the native repair made no netlist change and a real max-slew violation still
-# exists.  Targets come from OpenSTA's current violator report; candidates come
+# native design/timing repair and only when a real max-slew violation still
+# exists, including residual slew on a newly inserted buffer input.  Targets come from OpenSTA's current violator report; candidates come
 # from the linked Liberty views and must be physically present, functionally
 # equivalent, allowed by the PNR exclusion policy, and measured to improve the
 # violating net without increasing the whole-design slew count.  The caller's

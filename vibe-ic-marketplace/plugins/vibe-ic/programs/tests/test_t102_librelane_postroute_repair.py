@@ -1135,11 +1135,11 @@ def test_every_variable_the_script_reads_is_declared_by_the_step():
     assert set(prr.PARAM_VARS.values()) <= declared
 
 
-def test_bounded_strength_is_only_the_drv_noop_recovery_and_keeps_existing_judges():
+def test_bounded_strength_is_only_the_drv_recovery_and_keeps_existing_judges():
     main = (STEP_DIR / 'postroute_repair.tcl').read_text()
     helper = (STEP_DIR / 'bounded_drive_strength.tcl').read_text()
     assert 'VIBEIC_PRR_BOUNDED_DRIVE_STRENGTH' in main
-    gate = main.index('&& $::vic_native_changed == 0')
+    gate = main.index('if {[info exists ::env(VIBEIC_PRR_BOUNDED_DRIVE_STRENGTH)]')
     assert main.index('[sta::max_slew_violation_count] > 0', gate) > gate
     assert main.index('vic_bounded_drive_strength', gate) > gate
     # Target and candidate identity come from the running EDA session.
@@ -2064,3 +2064,34 @@ def test_native_sta_consumes_normalized_lib_for_every_declared_scene(tmp_path, m
             name: [line for line in text.splitlines() if line.startswith('read_liberty ')]
             for name, text in scripts.items()}, 'setup': result['setup_ws'],
         'hold': result['hold_ws'], 'neutral_process_leaf_only': True}, indent=2) + '\n')
+
+
+@pytest.mark.parametrize('changed,enabled,slew,expected', [
+    (5, 1, 10, 1), (0, 1, 10, 1), (5, 0, 10, 0),
+    (5, 1, 0, 0), (5, None, 10, 0)])
+def test_bounded_sizing_finishes_native_buffer_repair(changed, enabled, slew, expected):
+    """Execute the shipped Tcl dispatch; native edits must not suppress repair.
+
+    The native EDA calls are controlled here, not the branch under test.
+    Existing adoption tests still judge the final candidate after rerouting.
+    """
+    script = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    start = script.index('if {[info exists ::env(VIBEIC_PRR_BOUNDED_DRIVE_STRENGTH)]')
+    branch = script[start:script.index('# ---- 5. what changed', start)]
+    enable = ('unset -nocomplain ::env(VIBEIC_PRR_BOUNDED_DRIVE_STRENGTH)' if enabled is None
+              else f'set ::env(VIBEIC_PRR_BOUNDED_DRIVE_STRENGTH) {enabled}')
+    harness = f"""
+namespace eval sta {{}}
+set ::vic_native_changed {changed}
+set ::calls 0
+{enable}
+proc sta::max_slew_violation_count {{}} {{return {slew}}}
+proc vic_say {{msg}} {{}}
+proc vic_bounded_drive_strength {{}} {{incr ::calls}}
+{branch}
+puts "CALLED=$::calls"
+"""
+    result = subprocess.run(['tclsh'], input=harness, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert not result.stderr
+    assert result.stdout.strip() == f'CALLED={expected}'

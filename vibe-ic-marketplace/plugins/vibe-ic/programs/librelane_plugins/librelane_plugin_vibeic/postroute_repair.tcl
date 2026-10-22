@@ -311,8 +311,9 @@ vic_census after_timing_drv_recheck
 
 # OpenROAD can leave a short, high-capacitance routed net unchanged even when
 # the linked library has a legal stronger equivalent.  The DRV controller owns
-# one bounded candidate for that exact plateau.  It does not run during the
-# ordinary setup/hold candidates, and it never runs after a native edit.
+# one bounded candidate for residual slew, including on newly inserted buffer
+# inputs. Native repair and equivalent sizing are complementary edits within
+# this candidate; ordinary setup/hold candidates still do not enable it.
 set ::vic_native_changed 0
 set ::vic_native_kept 0
 foreach inst [$::block getInsts] {
@@ -329,9 +330,8 @@ foreach inst [$::block getInsts] {
 incr ::vic_native_changed [expr {[dict size $::vic_before] - $::vic_native_kept}]
 if {[info exists ::env(VIBEIC_PRR_BOUNDED_DRIVE_STRENGTH)]
     && $::env(VIBEIC_PRR_BOUNDED_DRIVE_STRENGTH)
-    && $::vic_native_changed == 0
     && [sta::max_slew_violation_count] > 0} {
-    vic_say "native no-op with residual max slew: trying bounded linked-Liberty drive strength"
+    vic_say "native changes=$::vic_native_changed with residual max slew: trying bounded linked-Liberty drive strength"
     vic_bounded_drive_strength
 }
 

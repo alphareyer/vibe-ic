@@ -537,6 +537,109 @@ def _predecessor_state(project, predecessor):
                          f'{predecessor}: {exc}') from exc
 
 
+def _step17_current_sdc_bridge(project, params, bound):
+    """Adopt current constraints without reclassifying the retained floorplan.
+
+    Only Step7's named SDC/record may differ from the accepted Step15 input
+    set. Its physical handoff and every other project/PDK input remain bound.
+    This authorizes a new placement measurement, never an old timing PASS.
+    """
+    import step_output_collector as versions
+    from _ppa import timing
+    import librelane_contract as ll
+    project = Path(project).resolve()
+    record = bound['record']
+    try:
+        if params.get('step_id') != '17' or params.get('execution_mode') != 'default':
+            raise ValueError('only Default placement may derive this input')
+        retained = versions.latest_pass(project, '15')
+        if not retained or not retained.get('canonical_pass') or not retained.get('inputs'):
+            raise ValueError('accepted Step15 inputs are absent')
+        state_path = project / PNR / 'step15_state.json'
+        saved_state = next(row for row in retained['written_files']
+                           if row['rel'] == str(state_path.relative_to(project)))
+        if saved_state['sha256'] != snap.sha(state_path):
+            raise ValueError('accepted Step15 handoff differs')
+        import phase3_one_shot_runner as R
+        # Match the canonical front-door author's PDK representation. Native
+        # transport's _parameters host-rebases Liberty paths (including source
+        # comments); it must not become a second SDC author here.
+        pdk = R._detect_pdk(project, params['pdk_name'])
+        if pdk is None or str(pdk.name) != params['pdk_name']:
+            raise ValueError('canonical PDK resolution failed')
+        container = params.get('container', '')
+        current, why = timing.read_step7_asic_sdc(R, project, params['top'], pdk)
+        if current is None:
+            raise ValueError('current canonical Step7 SDC required: ' + why)
+        record_rel = str((R._pl.constraints_dir(project) / timing.ASIC_SDC_RECORD).relative_to(project))
+        archive = versions._versions_root(project) / retained['folder'] / 'inputs'
+        previous_record = archive / record_rel
+        def digest(value):
+            return value.get('sha256') if isinstance(value, dict) else value
+        if snap.sha(_require(previous_record)) != digest(retained['inputs'].get(record_rel)):
+            raise ValueError('retained Step7 record is unbound')
+        previous = json.loads(previous_record.read_text())
+        if previous['path'] != current['path']:
+            raise ValueError('canonical Step7 path changed')
+        sdc_rel = current['path']
+        if (previous['sha256'] != digest(retained['inputs'].get(sdc_rel))
+                or snap.sha(_require(archive / sdc_rel)) != previous['sha256']):
+            raise ValueError('retained Step7 SDC is unbound')
+        changed, retained_count = [], 0
+        for rel, identity in retained['inputs'].items():
+            if snap.sha(_require(project / rel)) != digest(identity):
+                if rel not in (record_rel, sdc_rel):
+                    raise ValueError('non-SDC Step15 input changed: ' + rel)
+                changed.append(rel)
+            else:
+                retained_count += 1
+        pnr_sdc = _require(project / PNR / 'constraint.sdc')
+        upstream = record['upstream_sdc']
+        if upstream['path'] != str(pnr_sdc.relative_to(project)):
+            raise ValueError('old physical SDC source is not canonical')
+        # Reuse the canonical derivation read-only: its Step7 record was just
+        # validated, so no author or upstream native producer is invoked.
+        derived = timing.asic_sdc_for_pnr(R, project, params['top'], pdk, container)
+        provenance = json.loads((pnr_sdc.parent / 'constraint_sdc_provenance.json').read_text())
+        if (pnr_sdc.read_text() != derived['text']
+                or provenance['step7_sha256'] != current['sha256']
+                or provenance['deck_sha256'] != snap.sha(pnr_sdc)):
+            raise ValueError('PNR deck is not the current canonical derivation')
+        handoff = json.loads((project / record['handoff']['path']).read_text())
+        native_folder = Path(handoff['views']['odb']['source']).parent
+        native = ll.validate_step_receipt(native_folder, 'OpenROAD.GeneratePDN')
+        if (snap.sha(native_folder / 'state_out.json') != record['raw_state_sha256']
+                or native['input']['image'] != params['image_id']):
+            raise ValueError('native floorplan identity changed')
+        config_inputs = native['input']['config_files']
+        if not config_inputs or not any(Path(name).is_relative_to(ll.PDK_GUEST_ROOT)
+                                        for name in config_inputs):
+            raise ValueError('retained PDK inputs are absent')
+        for name, expected in config_inputs.items():
+            path = Path(name)
+            if path == pnr_sdc:
+                if expected != upstream['sha256']:
+                    raise ValueError('native old SDC differs from Step15 source')
+                continue
+            if path.is_relative_to(ll.PDK_GUEST_ROOT):
+                path = Path(params['pdk_root']) / path.relative_to(ll.PDK_GUEST_ROOT)
+            if snap.sha(_require(path)) != expected:
+                raise ValueError('Step15 PDK/config input changed: ' + name)
+        return pnr_sdc, {
+            'schema': 'vibeic/step17-sdc-derivation/1',
+            'purpose': 'new placement measurement with retained floorplan',
+            'step15_record_sha256': snap.sha(state_path),
+            'retained_input_count': retained_count, 'changed_inputs': sorted(changed),
+            'old_upstream_sdc': upstream, 'old_physical_sdc': record['views']['sdc_derived'],
+            'current_sdc': {'path': str(pnr_sdc.relative_to(project)), 'sha256': snap.sha(pnr_sdc)},
+            'step7_record_sha256': snap.sha(project / record_rel),
+            'pnr_provenance_sha256': snap.sha(pnr_sdc.parent / 'constraint_sdc_provenance.json'),
+            'native_receipt_sha256': snap.sha(native_folder / 'vibeic_receipt.json'),
+            'retained_views': record['views']}
+    except (OSError, ValueError, KeyError, TypeError, StopIteration, em.Refusal, ll.Refusal) as exc:
+        raise em.Refusal('BACKEND_STEP17_SDC_DERIVATION_REFUSED', str(exc)) from exc
+
+
 def _state_chain(project, params, ids, predecessor, overlay=None, *, respect_flow_gates=False):
     import librelane_contract as ll
     import phase3_one_shot_runner as R
@@ -569,13 +672,27 @@ def _state_chain(project, params, ids, predecessor, overlay=None, *, respect_flo
         # The validated LibreLane handoff is now the source of truth for the
         # canonical DEF/ODB targets.  Use the existing state bridge to read
         # those targets, preserving its path mapping and view checks.
+        upstream = bound['record'].get('upstream_sdc') or {}
+        current_sdc = project / PNR / 'constraint.sdc'
+        derivation = None
+        if (params.get('step_id') == '17' and params.get('execution_mode') == 'default'
+                and upstream.get('sha256') and current_sdc.is_file()
+                and upstream['sha256'] != snap.sha(current_sdc)):
+            sdc, derivation = _step17_current_sdc_bridge(project, params, bound)
+        else:
+            sdc = _step15_sdc(project)
+        bridge_dir = project / 'phase3/librelane' / (lane + '-config/bridge')
+        if derivation is not None:
+            bridge_dir = bridge_dir / ('sdc-resume-' + str(time.time_ns()))
         state = ll.state_from_direct(
             project, image, configs[ids[0]],
             {**{name: path for name, path in bound['views'].items()
-                if name != 'sdc_derived'}, 'sdc': _step15_sdc(project)},
-            project / 'phase3/librelane' / (lane + '-config/bridge'),
+                if name != 'sdc_derived'}, 'sdc': sdc}, bridge_dir,
             chain=[configs[s] for s in ids[1:]], mounts=mounts,
             metrics=bound['metrics'], metrics_source=bound['metrics_source'])
+        if derivation is not None:
+            derivation['state'] = {'path': str(state.relative_to(project)), 'sha256': snap.sha(state)}
+            snap.dump(bridge_dir / 'sdc_derivation.json', derivation)
     else:
         state = ll.state_from_direct(project, image, configs[ids[0]],
                 _views(project, params['top'], predecessor),

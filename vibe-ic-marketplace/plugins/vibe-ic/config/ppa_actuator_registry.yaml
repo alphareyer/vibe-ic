@@ -385,8 +385,8 @@ actuators:
         type: boolean
         default: false
         description: >-
-          Only after native repair made no netlist change, try a measured
-          linked-Liberty equivalent master on actual max-slew violator nets.
+          After native repair, try a measured linked-Liberty equivalent master
+          on residual max-slew violator nets, including newly buffered nets.
     preconditions:
       - {kind: file_nonempty, path: "current.json"}
       - {kind: file_nonempty, path: "context.json"}

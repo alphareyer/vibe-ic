@@ -237,3 +237,133 @@ def test_actual_state_chain_bridge_passes_physical_sdc_to_state_from_direct(tmp_
     state = json.loads(Path(captured['state']).read_text())
     assert state['sdc'] == str((isolated / 'phase3/stage3/pnr/step15.constraint.sdc').resolve())
     assert 'sdc_derived' not in state
+
+
+def _resume_project(tmp_path, monkeypatch):
+    import phase3_one_shot_runner as R
+    from _ppa import timing
+    project, _ = _make_published_project(tmp_path)
+    pnr = project / producers.PNR
+    constraints = project / 'phase2/stage2/constraints'
+    sdc_rel = 'phase2/stage2/constraints/bounded.asic.sdc'
+    rec_rel = 'phase2/stage2/constraints/asic_sdc.json'
+    old_sdc = _write(project / sdc_rel, 'old canonical SDC\n')
+    old_record = {'path': sdc_rel, 'sha256': producers.snap.sha(old_sdc)}
+    _write(project / rec_rel, json.dumps(old_record))
+    design = _write(project / 'input/design.v', 'module bounded; endmodule\n')
+    input_hashes = {str(p.relative_to(project)): producers.snap.sha(p)
+                    for p in (old_sdc, project / rec_rel, design)}
+    folder = project / 'steps/retained15'
+    for rel in input_hashes:
+        target = folder / 'inputs' / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(project / rel, target)
+    state_rel = str((pnr / 'step15_state.json').relative_to(project))
+    _write(folder / 'outputs.json', json.dumps({
+        'folder': 'retained15', 'canonical_pass': True, 'inputs': input_hashes,
+        'written_files': [{'rel': state_rel, 'sha256': producers.snap.sha(project / state_rel)}]}))
+    _write(project / 'steps/latest_pass.json', json.dumps({'steps': {'15': {
+        'folder': 'retained15', 'inputs': input_hashes}}}))
+    native = project / 'phase3/librelane/15-floorplan'
+    # The real native receipt validator checks all retained bytes; this
+    # fixture supplies its measurement transport, not an acceptance verdict.
+    pdk_file = _write(tmp_path / 'pdk/fixture/cells.lib', 'library fixture {}\n')
+    pdn_cfg = _write(project / 'input/pdn.tcl', 'set PDN_STRIPE 10\n')
+    fingerprint = {'step': 'OpenROAD.GeneratePDN', 'image': 'fixture-image',
+                   'config_files': {'/pdk/fixture/cells.lib': producers.snap.sha(pdk_file),
+                                    str(pdn_cfg): producers.snap.sha(pdn_cfg),
+                                    str(pnr / 'constraint.sdc'): producers.snap.sha(pnr / 'constraint.sdc')}}
+    _write(native / 'input_fingerprint.json', json.dumps(fingerprint))
+    _write(native / 'pdk_root.json', '{}\n')
+    _write(native / 'invocation.log', 'source-control native invocation\n')
+    _write(native / 'vibeic_receipt.json', json.dumps({'input': fingerprint,
+        'sha256': {p.name: producers.snap.sha(p) for p in native.iterdir() if p.is_file()}}))
+    # Original handoff fixture carries hashes; add its original source pointer
+    # through the publisher so the complete chain remains self-consistent.
+    raw_handoff = project / 'reports/phase3/execution-backend-15-floorplan-handoff.json'
+    handoff = json.loads(raw_handoff.read_text())
+    handoff['views']['odb']['source'] = str(native / 'librelane_floorplan.odb')
+    raw_handoff.write_text(json.dumps(handoff))
+    producers._publish_step15_bounded_state(project, SimpleNamespace(extras={
+        'bounded_state': True, 'native_state': str(native / 'state_out.json'),
+        'pdn_state': str(native / 'pdn-state_out.json'), 'handoff': str(raw_handoff),
+        'floorplan': str(pnr / 'floorplan.def'), 'odb': str(pnr / 'librelane_floorplan.odb')}))
+    retained = json.loads((folder / 'outputs.json').read_text())
+    retained['written_files'][0]['sha256'] = producers.snap.sha(project / state_rel)
+    (folder / 'outputs.json').write_text(json.dumps(retained))
+    deck = 'create_clock -period 12 [get_ports clk]\nset_max_transition 3 [current_design]\n'
+    (project / sdc_rel).write_text(deck)
+    current = {'path': sdc_rel, 'sha256': producers.snap.sha(project / sdc_rel)}
+    (project / rec_rel).write_text(json.dumps(current))
+    (pnr / 'constraint.sdc').write_text(deck)
+    _write(pnr / 'constraint_sdc_provenance.json', json.dumps({
+        'step7_sha256': current['sha256'], 'deck_sha256': producers.snap.sha(pnr / 'constraint.sdc')}))
+    canonical_pdk = SimpleNamespace(name='fixture', liberty='/container/canonical.lib')
+    monkeypatch.setattr(R, '_detect_pdk', lambda *_: canonical_pdk)
+    monkeypatch.setattr(producers, '_parameters', lambda *_: pytest.fail(
+        'native host-rebased PDK must not replace canonical author representation'))
+    monkeypatch.setattr(timing, 'read_step7_asic_sdc', lambda *_: (current, ''))
+    def derive(rt, root, top, pdk, container):
+        assert pdk is canonical_pdk and pdk.liberty == '/container/canonical.lib'
+        return {'text': deck}
+    monkeypatch.setattr(timing, 'asic_sdc_for_pnr', derive)
+    params = {'image_id': 'fixture-image', 'pdk_name': 'fixture',
+              'pdk_root': str(tmp_path / 'pdk'), 'step_id': '17', 'top': 'bounded',
+              'execution_mode': 'default'}
+    return project, params, pdk_file, pdn_cfg
+
+
+@pytest.mark.parametrize('damage', [None, 'def', 'odb', 'nl', 'design', 'pdk', 'pdn_config',
+                                   'current_sdc', 'provenance', 'old_record'])
+def test_step17_derives_current_sdc_only_when_retained_floorplan_inputs_match(
+        tmp_path, monkeypatch, damage):
+    project, params, pdk_file, pdn_cfg = _resume_project(tmp_path, monkeypatch)
+    pnr = project / producers.PNR
+    retained = {p: p.read_bytes() for p in pnr.glob('step15*') if p.is_file()}
+    paths = {'def': pnr / 'floorplan.def', 'odb': pnr / 'librelane_floorplan.odb',
+             'nl': pnr / 'step15.nl.v', 'design': project / 'input/design.v',
+             'pdk': pdk_file, 'pdn_config': pdn_cfg, 'current_sdc': pnr / 'constraint.sdc',
+             'provenance': pnr / 'constraint_sdc_provenance.json',
+             'old_record': project / 'steps/retained15/inputs/phase2/stage2/constraints/asic_sdc.json'}
+    if damage:
+        paths[damage].write_text('changed\n')
+    if damage:
+        with pytest.raises(em.Refusal):
+            bound = producers._read_step15_bounded_state(project)
+            producers._step17_current_sdc_bridge(project, params, bound)
+    else:
+        with pytest.raises(em.Refusal, match='BACKEND_STEP15_SDC_BINDING_CHANGED'):
+            producers._step15_sdc(project)
+        bound = producers._read_step15_bounded_state(project)
+        sdc, receipt = producers._step17_current_sdc_bridge(project, params, bound)
+        assert sdc == pnr / 'constraint.sdc'
+        assert receipt['retained_input_count'] == 1
+        assert receipt['changed_inputs'] == ['phase2/stage2/constraints/asic_sdc.json',
+                                              'phase2/stage2/constraints/bounded.asic.sdc']
+        assert receipt['retained_views'] == bound['record']['views']
+        assert {p: p.read_bytes() for p in retained} == retained
+
+
+def test_actual_step17_chain_uses_derivative_state_without_modifying_step15(tmp_path, monkeypatch):
+    import librelane_contract as ll
+    import phase3_one_shot_runner as R
+    project, params, _, _ = _resume_project(tmp_path, monkeypatch)
+    config = _write(project / 'config.json', json.dumps({
+        'meta': {'step': 'OpenROAD.GlobalPlacementSkipIO'}, 'DESIGN_NAME': 'bounded'}))
+    _write(project / 'config.views.json', json.dumps({'step': 'OpenROAD.GlobalPlacementSkipIO',
+        'inputs': ['def', 'odb', 'nl', 'sdc'], 'outputs': []}))
+    monkeypatch.setattr(ll, 'resolve_step_configs', lambda *_a, **_k: {'OpenROAD.GlobalPlacementSkipIO': config})
+    monkeypatch.setattr(R, '_resolved_cell_policy', lambda configs, *_: (configs, []))
+    seen = []
+    def run(project, image, tasks, **kwargs):
+        seen.append(tasks[0][2]); return []
+    monkeypatch.setattr(ll, 'run_chain', run)
+    old = (project / producers.PNR / 'step15_state.json').read_bytes()
+    producers._state_chain(project, params, ['OpenROAD.GlobalPlacementSkipIO'], 'floorplan.def')
+    assert len(seen) == 1
+    state = json.loads(seen[0].read_text())
+    assert state['sdc'] == str(project / producers.PNR / 'constraint.sdc')
+    assert state['odb'] == str(project / producers.PNR / 'librelane_floorplan.odb')
+    receipt = json.loads((seen[0].parent / 'sdc_derivation.json').read_text())
+    assert receipt['state']['sha256'] == producers.snap.sha(seen[0])
+    assert (project / producers.PNR / 'step15_state.json').read_bytes() == old
