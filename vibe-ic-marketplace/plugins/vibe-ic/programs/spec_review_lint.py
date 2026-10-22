@@ -827,6 +827,28 @@ def _searched_note(docs: List[Tuple[str, str]]) -> str:
     return f"searched all {len(names)} document(s) of the spec corpus: {shown}"
 
 
+def _named_work_reset_covered(text: str) -> bool:
+    """Recognize named-work reset stimulus, not a statement of missing coverage."""
+    stimulus = (
+        r"\breset\s+(?:assertion|(?:(?:may|can)\s+be\s+|is\s+)?"
+        r"(?:asserted|applied)(?:\s+at\s+startup\s+or)?)\s+during\s+"
+        r"(?:(?:an?|the)\s+)?(?:(?:active|ongoing)\s+)?"
+        r"(?:multiplication|calculation|computation|processing|execution|operation|transaction|transfer)\b"
+    )
+    missing = (r"\b(?:unspecified|undefined|undocumented|unknown|tbd|"
+               r"not\s+(?:specified|defined|documented|covered|addressed))\b")
+    # Never join different documents/sentences to invent a reset scenario.
+    for clause in re.split(r"[\n.!?;]", text):
+        for match in re.finditer(stimulus, clause):
+            prefix, suffix = clause[:match.start()], clause[match.end():]
+            if re.search(r"\b(?:no|without)\s+(?:a\s+)?$", prefix):
+                continue
+            if re.search(missing, prefix) or re.search(missing, suffix):
+                continue
+            return True
+    return False
+
+
 def _check_corner_cases_corpus(docs: List[Tuple[str, str]]) -> List[Finding]:
     """Evaluate the four-item checklist ONCE over the whole corpus.
 
@@ -841,6 +863,8 @@ def _check_corner_cases_corpus(docs: List[Tuple[str, str]]) -> List[Finding]:
     for cid, label, syns in _CORNER_CASES:
         # COVERED when ANY document of the corpus addresses it.
         covered = any(re.search(s, low) for s in syns)
+        if not covered and cid == "reset-during-operation":
+            covered = _named_work_reset_covered(low)
         # An item whose PRECONDITION is absent from the WHOLE corpus self-skips,
         # VISIBLY. Coverage is still decided FIRST: a corpus that addresses the
         # item has thereby shown the item applies to it, and is never downgraded
