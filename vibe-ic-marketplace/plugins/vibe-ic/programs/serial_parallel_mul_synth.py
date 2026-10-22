@@ -90,21 +90,56 @@ def _reset_style(gd: Path, rst_name: str) -> Tuple[Optional[Tuple[str, bool]], s
         doc = _find_doc(gd, stem)
         if not doc:
             continue
-        doc_text = json.dumps(doc, ensure_ascii=False)
-        if (re.search(r"\basynchronous\b", doc_text, re.I)
-                and re.search(r"\bsynchronous\b", doc_text, re.I)):
-            return None, "reset mode is contradictory; defer to spec-to-rtl AI"
-        mode, polarity, _ = _detect_reset(doc_text)
-        if mode:
-            modes.add(mode)
-        if polarity:
-            polarities.add(polarity)
-        rst = doc.get("reset")
-        if isinstance(rst, dict):
-            if rst.get("mode") in ("synchronous", "asynchronous"):
-                modes.add(rst["mode"])
-            if rst.get("polarity") in ("active-high", "active-low"):
-                polarities.add(rst["polarity"])
+        # Read values as prose, not a JSON serialization: JSON escaping erases
+        # sentence boundaries and unrelated data signals are not reset modes.
+        def strings(value):
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, dict):
+                for child in value.values():
+                    yield from strings(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from strings(child)
+
+        for text in strings(doc):
+            for sentence in re.split(r"[.!?;]+", text):
+                if not re.search(r"\b(?:reset|rst|" + re.escape(rst_name) + r")\b", sentence, re.I):
+                    continue
+                # A negative declaration supplies no positive reset mode.
+                sentence = re.sub(
+                    r"\b(?:no|not|without)\s+(?:an?\s+)?(?:a?synchronous)\s+reset\b",
+                    "", sentence, flags=re.I)
+                if not re.search(r"\b(?:reset|rst|" + re.escape(rst_name) + r")\b", sentence, re.I):
+                    continue
+                mode, polarity, _ = _detect_reset(sentence)
+                if polarity:
+                    polarities.add(polarity)
+                explicit_modes = set()
+                # Preserve refusal for two explicit reset qualifications in
+                # one sentence; a nearby data qualifier is not a reset claim.
+                for match in re.finditer(
+                        r"\b(a?synchronous)(?:\s+active[ -](?:high|low))?\s+reset\b",
+                        sentence, re.I):
+                    explicit_modes.add(match.group(1).lower())
+                for match in re.finditer(
+                        r"\b(?:reset|" + re.escape(rst_name) +
+                        r")\s+(?:is\s+)?(a?synchronous)\b", sentence, re.I):
+                    explicit_modes.add(match.group(1).lower())
+                if explicit_modes:
+                    modes.update(explicit_modes)
+                elif mode:
+                    modes.add(mode)
+        declarations = [doc.get("reset")] + list(doc.get("reset_domains") or [])
+        for rst in declarations:
+            if not isinstance(rst, dict) or rst.get("name", rst_name) != rst_name:
+                continue
+            mode = rst.get("mode") or rst.get("sync")
+            polarity = str(rst.get("polarity") or "").replace("_", "-")
+            if mode in ("synchronous", "asynchronous"):
+                modes.add(mode)
+            if polarity in ("active-high", "active-low"):
+                polarities.add(polarity)
     if len(modes) != 1:
         return None, "reset mode is absent or contradictory; defer to spec-to-rtl AI"
     if len(polarities) > 1:

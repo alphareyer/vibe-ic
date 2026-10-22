@@ -613,3 +613,44 @@ def test_measured_origin_reemission_keeps_real_random_goal_current(tmp_path, mon
     refusal = professional.random_pair_goal_measurement(mutant, goal)
     assert refusal["verdict"] == "NOT_MEASURED" and "stale" in refusal["why"], refusal
     runner._finalize_rtl_provenance()
+
+
+@pytest.mark.parametrize('data_statement', [
+    'There are no asynchronous data inputs.',
+    'The asynchronous data input is synchronized before computation.',
+    'Asynchronous data inputs, synchronous active-high reset rst.',
+])
+def test_reset_mode_ignores_unrelated_data_qualifiers(tmp_path, data_statement):
+    project = _mk_project(tmp_path, ports=_SPM_PORTS,
+                          l2_text='serial-parallel multiplier. ' + data_statement)
+    gd = project / 'phase1/generated_docs'
+    doc = json.loads((gd / 'L9_INTEGRATION_SPEC.json').read_text())
+    doc['reset_domains'] = [{'name': 'rst', 'sync': 'synchronous', 'polarity': 'active_high'}]
+    (gd / 'L9_INTEGRATION_SPEC.json').write_text(json.dumps(doc))
+    spec, reason = spm.extract_serial_parallel_mul_spec(project, 'digital_arithmetic_primitive')
+    assert spec is not None, reason
+    assert spec['reset_mode'] == 'synchronous'
+
+
+@pytest.mark.parametrize('declaration', [
+    'The asynchronous active-high reset rst clears all state.',
+    'Asynchronous reset rst and synchronous reset rst.',
+    'The reset is asynchronous.',
+])
+def test_reset_mode_still_refuses_conflicting_reset_prose(tmp_path, declaration):
+    project = _mk_project(tmp_path, ports=_SPM_PORTS,
+                          l2_text='serial-parallel multiplier. ' + declaration)
+    spec, reason = spm.extract_serial_parallel_mul_spec(project, 'digital_arithmetic_primitive')
+    assert spec is None
+    assert 'reset mode' in reason
+
+
+def test_reset_mode_still_refuses_structured_conflict(tmp_path):
+    project = _mk_project(tmp_path, ports=_SPM_PORTS, l2_text='serial-parallel multiplier')
+    p = project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json'
+    doc = json.loads(p.read_text())
+    doc['reset_domains'] = [{'name': 'rst', 'sync': 'asynchronous', 'polarity': 'active_high'}]
+    p.write_text(json.dumps(doc))
+    spec, reason = spm.extract_serial_parallel_mul_spec(project, 'digital_arithmetic_primitive')
+    assert spec is None
+    assert 'reset mode' in reason
