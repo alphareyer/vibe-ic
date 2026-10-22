@@ -438,5 +438,16 @@
     "version_observed": "v1.30.61, v1.30.96, and main 3ce036897d",
     "version_lkg": "",
     "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/opentitan_aes/l20_planned_unmeasured.txt"
+  },
+  {
+    "issue": 3469,
+    "project": "opentitan_aes",
+    "layer": "L10_TEST_CASES",
+    "field": "test_obligations, test_cases, no_test_cases_in_input",
+    "expected": "L10 preserves four source-bound verification obligations and explicitly marks their executable oracle unresolved from input. It must not fabricate stimulus timing, expected signal values, pass status, or measured coverage, and must not route these statements into L22 regression_matrix or numeric coverage_goals.",
+    "actual": "The canonical producer returns rc=0 with test_cases=[], no_test_cases_in_input=true, and none of reset interruption, withheld clocks, delayed responses, or stuck-high appears in L10.",
+    "version_observed": "v1.30.61, v1.30.96, and main 3ce036897d",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/opentitan_aes/l10_verification_shall.txt"
   }
 ]
