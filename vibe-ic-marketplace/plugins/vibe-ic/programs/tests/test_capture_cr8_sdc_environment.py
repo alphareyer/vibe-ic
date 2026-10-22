@@ -89,6 +89,31 @@ def test_local_pdk_values_use_the_current_image_files(tmp_path, monkeypatch, con
                for _, source in values.values())
 
 
+def test_readable_host_cache_wins_over_retained_container_identity(tmp_path, monkeypatch):
+    """A continuation keeps the container id after resolving its pinned PDK
+    into a same-host cache.  The host-only path must not be sent to docker."""
+    library = "quartz_sc"
+    root = tmp_path / "cache/by-image-digest/family"
+    configs = root / "libs.tech/librelane"
+    (configs / library).mkdir(parents=True)
+    (configs / "config.tcl").write_text(_BASE)
+    (configs / library / "config.tcl").write_text(_CELL)
+    liberty = str(root / "libs.ref" / library / "lib/slow.lib")
+    monkeypatch.setattr(env._cex, "no_container_route", lambda: False)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a readable host-cache PDK must not use docker")
+
+    monkeypatch.setattr(env._cex, "docker_exec_argv", forbidden)
+    values, unread = env._sdc_environment_pdk_values(
+        liberty, "retained-pinned-eda",
+        lambda path, _container: "/container-only" + path)
+    assert not unread
+    assert values["set_max_transition"][0] == "2.7"
+    assert values["set_max_capacitance"][0] == "0.18"
+    assert values["set_driving_cell"][0] == "quartz_sc__inv_2/Z"
+
+
 def test_missing_local_pdk_files_are_named_and_not_fabricated(tmp_path, monkeypatch):
     root = tmp_path / "pdk/family"
     liberty = str(root / "libs.ref/quartz_sc/lib/slow.lib")

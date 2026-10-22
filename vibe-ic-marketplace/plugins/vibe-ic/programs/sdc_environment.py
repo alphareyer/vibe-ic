@@ -81,11 +81,22 @@ def _sdc_environment_pdk_values(liberty_path: str, container: str,
     pdk_root, library = match.groups()
     root = f"{pdk_root}/libs.tech/librelane"
     for config in (f"{root}/config.tcl", f"{root}/{library}/config.tcl"):
+        host_config = Path(config)
         config_c = (to_container_path(config, container)
                     if to_container_path is not None else config)
         try:
-            if local:
+            # A same-host continuation may resolve the image-pinned PDK into
+            # the content-addressed host cache while still retaining the EDA
+            # container identity.  Such a host path is not necessarily mounted
+            # at the same spelling inside that container.  Read the exact local
+            # bytes when they exist; reserve docker I/O for container-only PDK
+            # paths.  Missing paths still take the fail-closed NOT_READ branch.
+            if host_config.is_file():
+                body = host_config.read_text(errors="replace")
+                source = str(host_config)
+            elif local:
                 body = Path(config_c).read_text(errors="replace")
+                source = str(config_c)
             else:
                 run = subprocess.run(_cex.docker_exec_argv(container, "cat", config_c),
                                      capture_output=True, text=True, timeout=60)
@@ -93,6 +104,7 @@ def _sdc_environment_pdk_values(liberty_path: str, container: str,
                     unread.append(f"NOT_READ: pinned PDK config {config_c}")
                     continue
                 body = run.stdout
+                source = str(config_c)
         except (OSError, subprocess.TimeoutExpired,
                 _cex.ContainerImageMismatch):
             unread.append(f"NOT_READ: pinned PDK config {config_c}")
@@ -116,7 +128,7 @@ def _sdc_environment_pdk_values(liberty_path: str, container: str,
                 raw = f"{number:g}"
             elif not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.$]*/[A-Za-z_][A-Za-z0-9_]*", raw):
                 continue
-            values[name] = (raw, f"pinned PDK default {config_c}:{key}")
+            values[name] = (raw, f"pinned PDK default {source}:{key}")
     return values, unread
 
 
