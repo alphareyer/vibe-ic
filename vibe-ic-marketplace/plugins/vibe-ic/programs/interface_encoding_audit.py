@@ -101,7 +101,7 @@ class InterfaceAuditResult:
     consumer_port: str
     consumer_encoding: str
     consumer_evidence: str
-    status: str             # "MATCH" | "MISMATCH" | "UNKNOWN"
+    status: str             # MATCH | MISMATCH | NOT_APPLICABLE | UNKNOWN
     severity: str           # "ERROR" | "WARN" | "INFO"
 
 
@@ -1159,6 +1159,121 @@ def _whole_scalar_predicate(wire, producer, producer_port, consumer,
     )
 
 
+def _whole_copy_assignments(module, signal, *, source=False):
+    """Return closed whole-value copies for one port, or ``None``.
+
+    This deliberately small grammar accepts only a bare port on one side of a
+    whole assignment and a same-width declared port on the other.  A select,
+    concat, operator, literal, call, partial write, local alias or second use is
+    outside the grammar.  Native widths are part of the proof: spelling and a
+    scalar-looking declaration are not enough.
+    """
+    width = module.native_widths.get(signal)
+    if not isinstance(width, int) or width < 1:
+        return None
+    ports = {port.name: port for port in module.ports}
+    signal_port = ports.get(signal)
+    expected_direction = 'output' if source else 'input'
+    if signal_port is None or signal_port.direction != expected_direction:
+        return None
+
+    refs = list(re.finditer(
+        r'(?<![\w$])' + re.escape(signal) + r'(?![\w$])', module.body))
+    if not refs:
+        return None
+    proven = set()
+    peers = set()
+    assignments = re.finditer(
+        r'(?<![\w$])([A-Za-z_]\w*)\s*(?:<=|=(?!=))\s*'
+        r'([A-Za-z_]\w*)\s*;', module.body, re.MULTILINE)
+    for assignment in assignments:
+        target, value = assignment.group(1), assignment.group(2)
+        if source and target == signal:
+            peer, span = value, assignment.span(1)
+        elif not source and value == signal:
+            peer, span = target, assignment.span(2)
+        else:
+            continue
+        peer_port = ports.get(peer)
+        peer_direction = 'input' if source else 'output'
+        if (peer_port is None or peer_port.direction != peer_direction
+                or module.native_widths.get(peer) != width):
+            return None
+        proven.add(span)
+        peers.add(peer)
+    if not proven or {ref.span() for ref in refs} != proven:
+        return None
+    lines = sorted({module.body.count('\n', 0, start) + 1
+                    for start, _ in proven})
+    return width, sorted(peers), lines
+
+
+def _whole_nonencoding_value(wire, producer, producer_port, consumer,
+                             consumer_port, parent, modules, instances):
+    """Prove a finite source-bound edge has no encoding interpretation.
+
+    This is not a BINARY default and it does not exempt scalar boundaries.
+    Both actual connections must be unselected named whole values.  The
+    consumer must copy the complete value to a same-width output and use the
+    input nowhere else.  Multi-bit producers must likewise be same-width input
+    copies.  One-bit producers may instead use the existing complete
+    transitive Boolean source-domain proof.
+    """
+    if (_DISCOVERY_ISSUES
+            or _CONFIGURATION.get('native', {}).get('status') != 'MEASURED'
+            or not re.fullmatch(r'[A-Za-z_]\w*', wire)):
+        return None
+    width = producer.native_widths.get(producer_port)
+    if (not isinstance(width, int) or width < 1
+            or consumer.native_widths.get(consumer_port) != width
+            or parent.native_widths.get(wire) != width):
+        return None
+    producer_boundaries = [
+        inst for inst in instances
+        if inst.parent_module == parent.name
+        and inst.module_type == producer.name
+        and inst.connections.get(producer_port) == wire]
+    consumer_boundaries = [
+        inst for inst in instances
+        if inst.parent_module == parent.name
+        and inst.module_type == consumer.name
+        and inst.connections.get(consumer_port) == wire]
+    if (not producer_boundaries or not consumer_boundaries
+            or any(inst.connection_expressions.get(producer_port) != wire
+                   for inst in producer_boundaries)
+            or any(inst.connection_expressions.get(consumer_port) != wire
+                   for inst in consumer_boundaries)):
+        return None
+    consumed = _whole_copy_assignments(consumer, consumer_port, source=False)
+    if consumed is None:
+        return None
+    if width == 1:
+        source_evidence = _producer_one_bit_source_domain(
+            producer, producer_port, parent, producer_boundaries,
+            modules, instances)
+        if source_evidence is None:
+            return None
+        role = 'BOOLEAN_VALUE'
+    else:
+        produced = _whole_copy_assignments(producer, producer_port, source=True)
+        if produced is None:
+            return None
+        _, peers, lines = produced
+        source_evidence = (
+            f'native whole {width}-bit value copied only from same-width input '
+            f'port(s) {",".join(peers)} at body line(s) '
+            f'{",".join(map(str, lines))}; encoding is not inferred')
+        role = 'OPAQUE_VALUE'
+    _, outputs, lines = consumed
+    sink_evidence = (
+        f'native whole {width}-bit value copied only to same-width output '
+        f'port(s) {",".join(outputs)} at body line(s) '
+        f'{",".join(map(str, lines))}; no comparison, transform, select, '
+        'partial write or control interpretation')
+    return (EncodingClassification(role, source_evidence, 0),
+            EncodingClassification(role, sink_evidence, lines[0]))
+
+
 # ---------------------------------------------------------------------------
 # Cross-module interface tracing
 # ---------------------------------------------------------------------------
@@ -1565,6 +1680,7 @@ def run_audit(
         if not prod_module or not cons_module:
             continue
 
+        nonencoding = None
         if _fixed_nested_bit_select(wire) is not None:
             evidence = (f'unsupported fixed nested bit-select carrier {wire}; '
                         'retained in interface population')
@@ -1584,9 +1700,17 @@ def run_audit(
             predicate = _whole_scalar_predicate(
                 wire, prod_module, prod_port, cons_module, cons_port,
                 all_modules[parent_mod], all_modules, all_instances)
+            nonencoding = _whole_nonencoding_value(
+                wire, prod_module, prod_port, cons_module, cons_port,
+                all_modules[parent_mod], all_modules, all_instances)
 
         # Determine match status
-        if predicate is not None and cons_class.encoding == 'UNKNOWN':
+        if (nonencoding is not None
+                and prod_class.encoding == cons_class.encoding == 'UNKNOWN'):
+            prod_class, cons_class = nonencoding
+            status = 'NOT_APPLICABLE'
+            severity = 'INFO'
+        elif predicate is not None and cons_class.encoding == 'UNKNOWN':
             predicate_class, producer_domain = predicate
             if prod_class.encoding == 'UNKNOWN':
                 prod_class = EncodingClassification(
@@ -1668,9 +1792,11 @@ def main():
     # Summary
     mismatches = sum(1 for r in results if r.status == 'MISMATCH')
     matches = sum(1 for r in results if r.status == 'MATCH')
+    not_applicable = sum(1 for r in results if r.status == 'NOT_APPLICABLE')
     unknowns = sum(1 for r in results if r.status == 'UNKNOWN')
     print(f"interface_encoding_audit: {mismatches} MISMATCH, "
-          f"{matches} MATCH, {unknowns} UNKNOWN "
+          f"{matches} MATCH, {not_applicable} NOT_APPLICABLE, "
+          f"{unknowns} UNKNOWN "
           f"({len(filtered)} interfaces analyzed)")
     print("-" * 70)
     for r in sorted(filtered, key=lambda x: (x.status != 'MISMATCH',
@@ -1690,17 +1816,26 @@ def main():
     report_file = out_path / 'encoding_audit_report.json'
     interface_rows = [asdict(r) for r in results]
     report = {
-        'report_schema': 'vibeic.interface_encoding_audit.v2',
+        'report_schema': 'vibeic.interface_encoding_audit.v3',
         'summary': {
             'total_interfaces': len(results),
             'mismatches': mismatches,
             'matches': matches,
+            'not_applicable': not_applicable,
             'unknowns': unknowns,
             'top_module': args.top_module,
             'rtl_dir': args.rtl_dir,
         },
         'interfaces': interface_rows,
         'interface_population': _population.binding(interface_rows),
+        'semantic_coverage': {
+            'complete': (not unknowns and not _DISCOVERY_ISSUES
+                         and not _NOTHING_EXAMINED and source_error is None),
+            'total_interfaces': len(results),
+            'decided': matches + mismatches,
+            'not_applicable': not_applicable,
+            'unknown': unknowns,
+        },
         'discovery': {
             'complete': (not _DISCOVERY_ISSUES and not _NOTHING_EXAMINED and
                          source_error is None),

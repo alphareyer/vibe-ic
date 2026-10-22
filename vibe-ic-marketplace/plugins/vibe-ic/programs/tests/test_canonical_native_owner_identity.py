@@ -28,6 +28,7 @@ def admission_case(tmp_path, monkeypatch):
     for name in ['design_one_shot_runner.py', 'phase3_one_shot_runner.py',
                  'librelane_contract.py', 'execution_backend_producers.py',
                  'drv_capture_plan.py', 'drv_signoff_capture.py',
+                 'serial_parallel_mul_synth.py',
                  *librelane_contract.PLUGIN_HOST_MODULES]:
         shutil.copyfile(actual / name, programs / name)
     shutil.copytree(actual / 'librelane_plugins', programs / 'librelane_plugins',
@@ -250,3 +251,24 @@ def test_capture_host_owner_change_reopens_and_preserves_duplicate_controls(
     assert observed['changed_reason'] == 'ADMITTED', observed
     assert changed.admitted, observed
     assert changed.identity_sha256 != first.identity_sha256, observed
+
+
+def test_serial_rtl_producer_fix_reopens_bounded_phase2(admission_case):
+    module, project, programs = admission_case
+    config = {'pdk': 'gf180mcuD', 'entry_step': '1', 'exit_step': '4'}
+    def admit():
+        return module.admit_span(project, 'phase2', programs, 'vibeic-eda', config)
+    first = admit()
+    assert first.admitted
+    assert not admit().admitted
+    producer = programs / 'serial_parallel_mul_synth.py'
+    original = producer.read_bytes()
+    producer.write_bytes(original + b'\n# repaired retained RTL contract refresh\n')
+    changed = admit()
+    assert changed.admitted, changed.reason
+    assert changed.identity_sha256 != first.identity_sha256
+    assert not admit().admitted
+    producer.write_bytes(original)
+    restored = admit()
+    assert not restored.admitted
+    assert restored.identity_sha256 == first.identity_sha256

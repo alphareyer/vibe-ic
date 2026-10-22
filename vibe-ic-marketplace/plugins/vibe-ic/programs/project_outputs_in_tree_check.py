@@ -758,19 +758,40 @@ def _current_encoding_producer(project: Path):
         summary = payload.get('summary') or {}
         discovery = payload.get('discovery') or {}
         rows = payload.get('interfaces')
-        if (payload.get('report_schema') != 'vibeic.interface_encoding_audit.v2'
+        schema = payload.get('report_schema')
+        semantic_schema = schema == 'vibeic.interface_encoding_audit.v3'
+        count_pairs = [('matches','MATCH'), ('mismatches','MISMATCH'),
+                       ('unknowns','UNKNOWN')]
+        if semantic_schema:
+            count_pairs.insert(2, ('not_applicable','NOT_APPLICABLE'))
+        coverage = payload.get('semantic_coverage')
+        coverage_ok = (not semantic_schema or (isinstance(coverage, dict)
+                       and coverage.get('complete') is
+                       (summary.get('unknowns') == 0)
+                       and coverage.get('total_interfaces') ==
+                       (len(rows) if isinstance(rows, list) else -1)
+                       and coverage.get('decided') ==
+                       summary.get('matches', 0) + summary.get('mismatches', 0)
+                       and coverage.get('not_applicable') ==
+                       summary.get('not_applicable')
+                       and coverage.get('unknown') == summary.get('unknowns')))
+        if (schema not in ('vibeic.interface_encoding_audit.v2',
+                           'vibeic.interface_encoding_audit.v3')
                 or type(payload.get('producer_returncode')) is not int
                 or payload['producer_returncode'] != 0
                 or not isinstance(cfg.get('native'), dict)
                 or discovery.get('complete') is not True or discovery.get('issues') != []
                 or not isinstance(rows, list) or not rows
                 or not all(isinstance(r, dict) and r.get('status') in
-                           ('MATCH', 'MISMATCH', 'UNKNOWN') for r in rows)
+                           (('MATCH', 'MISMATCH', 'NOT_APPLICABLE', 'UNKNOWN')
+                            if semantic_schema else ('MATCH', 'MISMATCH', 'UNKNOWN'))
+                           for r in rows)
                 or type(summary.get('total_interfaces')) is not int
                 or summary['total_interfaces'] != len(rows)
+                or not coverage_ok
                 or any(type(summary.get(k)) is not int or summary[k] != sum(
                     row['status'] == status for row in rows)
-                    for k, status in (('matches','MATCH'),('mismatches','MISMATCH'),('unknowns','UNKNOWN')))):
+                    for k, status in count_pairs)):
             return None
         # Select the actual project source, independently of the receipt's
         # self-declared root, using the same existing front-door locations.

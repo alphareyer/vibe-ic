@@ -249,6 +249,32 @@ def test_one_bad_receipt_reddens_exactly_that_audit(tmp_path, subject,
                 f"{other} moved when only {subject}'s receipt changed")
 
 
+@pytest.mark.parametrize("missing_counter", [
+    "matches", "unknowns", "not_applicable",
+])
+def test_v3_interface_receipt_missing_coverage_counter_is_not_measured(
+        tmp_path, missing_counter):
+    """Malformed semantic coverage refuses normally; it never crashes."""
+    receipts = _receipt_set(encoding_total=1)
+    receipt = receipts["encoding_audit_report.json"]
+    receipt["report_schema"] = "vibeic.interface_encoding_audit.v3"
+    receipt["summary"]["not_applicable"] = 0
+    receipt["semantic_coverage"] = {
+        "complete": True,
+        "total_interfaces": 1,
+        "decided": 1,
+        "not_applicable": 0,
+        "unknown": 0,
+    }
+    receipt["summary"].pop(missing_counter)
+
+    result, data = _drive(tmp_path, _REVIEW, receipts)
+
+    assert _state(data, "X_interface_encoding_audit") == (
+        "FAIL", "NOT_MEASURED")
+    assert result.returncode == 1
+
+
 @pytest.mark.parametrize("filename,cid", [
     ("encoding_audit_report.json", "X_interface_encoding_audit"),
     ("crc_bitorder_report.json", "X_crc_bitorder_check"),

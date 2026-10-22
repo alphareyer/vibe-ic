@@ -903,7 +903,11 @@ def _encoding_native_source_error(payload: Dict[str, Any], receipt: Path) -> Opt
     cfg = payload.get('configuration')
     cfg = cfg if isinstance(cfg, dict) else {}
     native_required = any(isinstance(row, dict) and (
-        row.get('producer_encoding') == 'BIT_VALUE' or row.get('consumer_encoding') == 'PREDICATE')
+        row.get('status') == 'NOT_APPLICABLE' or
+        row.get('producer_encoding') in {
+            'BIT_VALUE', 'BOOLEAN_VALUE', 'OPAQUE_VALUE'} or
+        row.get('consumer_encoding') in {
+            'PREDICATE', 'BOOLEAN_VALUE', 'OPAQUE_VALUE'})
         for row in payload.get('interfaces', []))
     if not native_required and not any(k in cfg for k in ('native', 'native_context', 'native_script')):
         return None
@@ -1201,15 +1205,36 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
             status_error = status_error or 'incomplete_discovery'
         if auditor == 'interface_encoding_audit':
             rows = payload['interfaces']
+            semantic_schema = payload.get('report_schema') == \
+                'vibeic.interface_encoding_audit.v3'
+            count_pairs = [('matches', 'MATCH'), ('mismatches', 'MISMATCH'),
+                           ('unknowns', 'UNKNOWN')]
+            if semantic_schema:
+                count_pairs.insert(2, ('not_applicable', 'NOT_APPLICABLE'))
             counts_ok = all(type(summary.get(k)) is int and summary[k] >= 0
-                            for k in ('total_interfaces', 'matches', 'mismatches', 'unknowns'))
+                            for k in ('total_interfaces',
+                                      *(key for key, _ in count_pairs)))
             counts_ok = counts_ok and (
+                all(isinstance(row, dict) and row.get('status') in
+                    ({'MATCH', 'MISMATCH', 'UNKNOWN', 'NOT_APPLICABLE'}
+                     if semantic_schema else {'MATCH', 'MISMATCH', 'UNKNOWN'})
+                    for row in rows) and
                 summary['total_interfaces'] == len(rows) and
                 all(summary[key] == sum(isinstance(row, dict) and
                                         row.get('status') == status for row in rows)
-                    for key, status in (('matches', 'MATCH'),
-                                        ('mismatches', 'MISMATCH'), ('unknowns', 'UNKNOWN'))))
-            if not counts_ok or summary.get('verdict') not in ('PASS', STATE_NOT_APPLICABLE):
+                    for key, status in count_pairs))
+            coverage = payload.get('semantic_coverage')
+            coverage_ok = (not semantic_schema or (counts_ok
+                           and isinstance(coverage, dict)
+                           and coverage.get('complete') is (summary['unknowns'] == 0)
+                           and coverage.get('total_interfaces') == len(rows)
+                           and coverage.get('decided') ==
+                           summary['matches'] + summary['mismatches']
+                           and coverage.get('not_applicable') ==
+                           summary['not_applicable']
+                           and coverage.get('unknown') == summary['unknowns']))
+            if (not counts_ok or not coverage_ok
+                    or summary.get('verdict') not in ('PASS', STATE_NOT_APPLICABLE)):
                 status_error = status_error or 'invalid_or_nonpassing_interface_population'
             sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'programs'))
             import _interface_encoding_population as interface_population
@@ -1332,7 +1357,8 @@ def _cc_audit_receipt_evidence(spec: Dict[str, Any], text: str,
             valid_population = (
                 payload.get('interfaces') == [] and
                 all(type(summary.get(k)) is int and summary[k] == 0
-                    for k in ('total_interfaces', 'mismatches', 'matches', 'unknowns')) and
+                    for k in ('total_interfaces', 'mismatches', 'matches',
+                              'unknowns')) and
                 summary.get('verdict') == STATE_NOT_APPLICABLE and
                 summary.get('top_module') ==
                 facts.get('top_module'))

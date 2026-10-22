@@ -227,6 +227,8 @@ def canonical_program_paths(programs_dir: Path) -> tuple[Path, ...]:
         programs_dir / "execution_modes.py",
         programs_dir / "execution_frontend_providers.py",
         programs_dir / "execution_frontend_worker.py",
+        # Phase 2 executes this producer directly for retained RTL refresh.
+        programs_dir / "serial_parallel_mul_synth.py",
         programs_dir / "execution_backend_producers.py",
         programs_dir / "drv_capture_plan.py",
         programs_dir / "drv_signoff_capture.py",
