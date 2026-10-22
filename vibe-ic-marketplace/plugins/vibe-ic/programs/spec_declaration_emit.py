@@ -1647,6 +1647,21 @@ def _outside_contract(overrides: Dict[str, Any], names: List[str],
     # are facts written by their producer, never declarations an author may
     # retract or replace through --set/--from-json.
     owned = {SUPPLIED_RTL_KEY, "ip_catalog_used", "ai_authored_files"}
+    # These namespaces hold verification choices made by the author or the
+    # documented AI-backup skills.  They are not producer measurements.  In
+    # particular, testbench-gen directs callers to add nested choices under
+    # verification_stimuli with this emitter.  Retained projects can predate
+    # the outside-field provenance sidecar, so treating an existing namespace
+    # as producer-owned makes the documented update path impossible.
+    mergeable_author_namespaces = {"verification_stimuli"}
+
+    def merge_nested(old: Any, new: Any) -> Any:
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            return new
+        merged = dict(old)
+        for name, value in new.items():
+            merged[name] = merge_nested(merged.get(name), value)
+        return merged
     for k, v in overrides.items():
         if k in names:
             continue
@@ -1656,7 +1671,7 @@ def _outside_contract(overrides: Dict[str, Any], names: List[str],
         if k in owned:
             refused[k] = "%s is written by the flow, not declared by an author" % k
             continue
-        if k in existing and not author_owned:
+        if k in existing and not author_owned and k not in mergeable_author_namespaces:
             refused[k] = "%s already exists as a producer-owned declaration key" % k
             continue
         if v is UNDETERMINED:
@@ -1666,7 +1681,8 @@ def _outside_contract(overrides: Dict[str, Any], names: List[str],
         if why is not None:
             refused[k] = why
         else:
-            keep[k] = v
+            keep[k] = (merge_nested(existing.get(k), v)
+                       if k in mergeable_author_namespaces else v)
     # A normal runner re-invokes this emitter without --set. Preserve a prior
     # authored outside-contract declaration only while its value still matches.
     for k, entry in prior_outside.items():

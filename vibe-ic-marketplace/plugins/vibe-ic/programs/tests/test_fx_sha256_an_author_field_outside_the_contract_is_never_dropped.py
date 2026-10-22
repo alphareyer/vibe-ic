@@ -131,6 +131,38 @@ def test_contract_fields_are_unchanged_by_the_outside_route(tmp_path):
     assert _decl(p) == {"handshake_style": "valid_ready"}
 
 
+def test_verification_stimuli_patch_deep_merges_a_retained_namespace(tmp_path):
+    """The documented testbench-gen update path works on old checkpoints."""
+    p = _project(tmp_path)
+    path = p / DECL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "handshake_style": "valid_ready",
+        "verification_stimuli": {
+            "arithmetic_scenarios": {"case_3": {"transaction_count": 2}}
+        },
+    }))
+    patch = p / "observation.json"
+    patch.write_text(json.dumps({
+        "verification_stimuli": {
+            "arithmetic_observation": {
+                "chip_top": {"clock": "clk", "output": "p"}
+            }
+        }
+    }))
+
+    cp = _emit(p, "--from-json", str(patch))
+
+    assert cp.returncode == 0, (cp.stdout, cp.stderr)
+    stimuli = _decl(p)["verification_stimuli"]
+    assert stimuli["arithmetic_scenarios"]["case_3"]["transaction_count"] == 2
+    assert stimuli["arithmetic_observation"]["chip_top"] == {
+        "clock": "clk", "output": "p"}
+    assert "verification_stimuli" not in cp.stdout or "REFUSED" not in cp.stdout
+    outside = _sidecar(p)["declared_outside_contract"]
+    assert outside["verification_stimuli"]["provenance"] == "author_declared"
+
+
 @pytest.mark.parametrize("key,value", [
     ("ip_catalog_used", '[{"name":"sha256_core"}]'),
     ("ai_authored_files", '["rtl/top.v"]'),
