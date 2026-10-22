@@ -36880,6 +36880,71 @@ def _padring_producer_dispatch(project: Path,
         f"die_required_um that pins the floorplan to a ring nothing places.", declared_by=f"deliverable={declared or 'UNDECLARED'}; {why}")
 
 
+def _refresh_pad_observation_wrapper_binding(project: Path) -> Dict[str, Any]:
+    """Refresh only the canonical wrapper byte binding after its producer ran.
+
+    The observation clock, output and sampling schedule are design choices and
+    remain untouched.  The wrapper digest is provenance for the deterministic
+    Step-15 output, however: keeping its previous digest makes the functional
+    producer reject the wrapper that this same invocation just emitted.  Only
+    an existing binding for the exact producer-recorded wrapper may move; this
+    function never invents an observation contract or changes model bindings.
+    """
+    project = Path(project)
+    declaration_path = project / "plugin_output" / "declaration.json"
+    pad_record_path = project / "reports" / "phase3" / "io_pad_chip_top.json"
+    report_path = (project / "reports" / "phase3" /
+                   "functional_observation_binding_refresh.json")
+    result: Dict[str, Any] = {
+        "program": "phase3_one_shot_runner",
+        "check": "functional_observation_wrapper_binding_refresh",
+        "verdict": "NOT_APPLICABLE",
+        "changed": False,
+    }
+    try:
+        declaration = json.loads(declaration_path.read_text())
+        pad_record = json.loads(pad_record_path.read_text())
+        module = pad_record["chip_top_module"]
+        wrapper_rel = pad_record["chip_top_verilog"]
+        if pad_record.get("verdict") != "WROTE":
+            raise ValueError("pad producer record is not WROTE")
+        wrapper = (project / wrapper_rel).resolve()
+        if not wrapper.is_file() or not wrapper.is_relative_to(project.resolve()):
+            raise ValueError("pad producer wrapper is absent or outside project")
+        choices = declaration["verification_stimuli"]["arithmetic_observation"]
+        choice = choices[module]
+        bindings = choice["binding"]
+        if not isinstance(bindings, dict):
+            raise ValueError("observation binding is not a mapping")
+        matching = [key for key in bindings
+                    if (project / str(key)).resolve() == wrapper]
+        if len(matching) != 1:
+            raise ValueError("observation contract has no unique exact wrapper binding")
+        key = matching[0]
+        old = bindings[key]
+        current = hashlib.sha256(wrapper.read_bytes()).hexdigest()
+        if not re.fullmatch(r"[0-9a-f]{64}", str(old)):
+            raise ValueError("existing wrapper binding is not a SHA-256 digest")
+        result.update(verdict="PASS", module=module,
+                      wrapper=str(wrapper.relative_to(project)),
+                      previous_sha256=old, current_sha256=current)
+        if old != current:
+            history = (project / "plugin_output" / "declaration_history" /
+                       f"{time.time_ns()}" / "declaration.json")
+            history.parent.mkdir(parents=True, exist_ok=False)
+            shutil.copy2(declaration_path, history)
+            bindings[key] = current
+            _aa.write_json(declaration_path, declaration)
+            result.update(changed=True,
+                          previous_declaration=str(history.relative_to(project)))
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        result.update(verdict="NOT_MEASURED", reason_class="INPUT_ABSENT",
+                      reason=f"{type(exc).__name__}: {exc}")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    _aa.write_json(report_path, result)
+    return result
+
+
 def _full_stack_functional_after_padring(project: Path,
                                          container: Optional[str],
                                          res: StepResult,
@@ -36906,6 +36971,8 @@ def _full_stack_functional_after_padring(project: Path,
                           for m in (_fsf, _gate)}}
     binding['source'][Path(__file__).name] = digest(Path(__file__))
     try:
+        binding["observation_binding_refresh"] = (
+            _refresh_pad_observation_wrapper_binding(project))
         rec = _fsf.generate(project, container)
         res.extras["full_stack_functional"] = {
             "verdict": rec.get("verdict"),

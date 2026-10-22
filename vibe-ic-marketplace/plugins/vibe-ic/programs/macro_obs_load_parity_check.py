@@ -146,11 +146,13 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Sequence, Set, Tuple
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
@@ -385,8 +387,149 @@ def _read(paths: Sequence[Path]) -> Tuple[List[str], List[str]]:
     return texts, labels
 
 
+_CURRENT_FLOORPLAN = Path("phase3/librelane/15-floorplan")
+_LEF_CONFIG_KEYS = frozenset(("TECH_LEFS", "CELL_LEFS", "PAD_LEFS",
+                              "EXTRA_LEFS", "MACRO_LEFS"))
+
+
+def _path_strings(value: Any) -> Iterable[str]:
+    """Yield path leaves from LibreLane's scalar/list/dict config values."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            yield from _path_strings(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _path_strings(item)
+
+
+def _current_floorplan_config(proj: Path) -> Path | None:
+    """Return the last config written by the current canonical Step 15 run."""
+    root = proj / _CURRENT_FLOORPLAN
+    configs = sorted(root.glob("[0-9][0-9]-*/config.json"))
+    return configs[-1] if configs else None
+
+
+def _sha256(path: Path) -> str | None:
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _config_file_digests(config_path: Path) -> Dict[str, str]:
+    """Exact producer input digests stored beside a resolved config."""
+    for name in ("input_fingerprint.json", "vibeic_receipt.json"):
+        path = config_path.with_name(name)
+        try:
+            record = json.loads(path.read_text(errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if name == "vibeic_receipt.json" and isinstance(record, dict):
+            record = record.get("input")
+        files = record.get("config_files") if isinstance(record, dict) else None
+        if isinstance(files, dict):
+            return {str(k): str(v) for k, v in files.items()
+                    if isinstance(k, str) and isinstance(v, str)}
+    return {}
+
+
+def _runtime_pdk_roots(config: Dict[str, Any], config_path: Path) -> List[Path]:
+    """Available aliases for the PDK root used by the Step 15 producer."""
+    out: List[Path] = []
+    for raw in (os.environ.get("VIBEIC_RUNTIME_PDK_ROOT"),
+                os.environ.get("PDK_ROOT"), "/foss/pdks"):
+        if raw:
+            out.append(Path(raw))
+    pdk_record = config_path.with_name("pdk_root.json")
+    try:
+        record = json.loads(pdk_record.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        record = {}
+    declared_root = str(config.get("PDK_ROOT") or "")
+    for pair in record.get("mounts_under_it", []) if isinstance(record, dict) else []:
+        if (isinstance(pair, list) and len(pair) == 2
+                and str(pair[1]) == declared_root):
+            out.append(Path(str(pair[0])))
+    deduped: List[Path] = []
+    seen: Set[str] = set()
+    for path in out:
+        marker = str(path)
+        if marker not in seen:
+            seen.add(marker)
+            deduped.append(path)
+    return deduped
+
+
+def _resolve_configured_path(path: Path, config: Dict[str, Any],
+                             config_path: Path,
+                             digests: Dict[str, str]) -> Path:
+    """Rebase a producer mount path only onto byte-identical runtime input."""
+    if path.is_file():
+        return path
+    declared_root_raw = config.get("PDK_ROOT")
+    if not isinstance(declared_root_raw, str) or not declared_root_raw:
+        return path
+    declared_root = Path(declared_root_raw)
+    try:
+        relative = path.relative_to(declared_root)
+    except ValueError:
+        return path
+    expected = digests.get(str(path))
+    if not expected:
+        return path
+    for root in _runtime_pdk_roots(config, config_path):
+        candidate = root / relative
+        if _sha256(candidate) == expected:
+            return candidate
+    return path
+
+
+def configured_lefs(proj: Path) -> Tuple[List[Path], Path | None]:
+    """LEFs named by the current Step 15 producer, including mounted PDK LEFs.
+
+    The resolved LibreLane config is the producer/consumer contract.  Project
+    wide globs are not: they also see retained runs, program calibration data,
+    and timestamped evidence that the current invocation never loaded.
+    """
+    config_path = _current_floorplan_config(proj)
+    if config_path is None:
+        return [], None
+    try:
+        config = json.loads(config_path.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return [], config_path
+    if not isinstance(config, dict):
+        return [], config_path
+    digests = _config_file_digests(config_path)
+
+    out: List[Path] = []
+    seen: Set[str] = set()
+    for key in sorted(_LEF_CONFIG_KEYS):
+        for raw in _path_strings(config.get(key)):
+            if not raw.lower().endswith((".lef", ".tlef")):
+                continue
+            path = Path(raw)
+            if not path.is_absolute():
+                path = proj / path
+            else:
+                path = _resolve_configured_path(path, config, config_path,
+                                                digests)
+            marker = str(path)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            out.append(path)
+    return out, config_path
+
+
 def discover_lefs(proj: Path) -> List[Path]:
-    """EVERY LEF under the project, in a stable order.
+    """LEFs from the current Step 15 contract, or bounded legacy inputs.
 
     NOT `discover_macro_lefs`. That helper filters to files whose content
     declares a MACRO, which is right for a gate that reads obstructions and
@@ -404,12 +547,19 @@ def discover_lefs(proj: Path) -> List[Path]:
     # glob of `*.lef` alone cannot see a tech LEF even when the design has
     # VENDORED one under `input/pdk/`, which is the remedy this gate prints.
     # Both suffixes, or the remedy is unreachable.
+    current, config_path = configured_lefs(proj)
+    if config_path is not None:
+        return current
+
     out: List[Path] = []
     seen = set()
     for pat in ("input/pdk/**/*.lef", "input/pdk/**/*.tlef",
                 "phase3/**/*.lef", "phase3/**/*.tlef",
                 "**/*.lef", "**/*.tlef"):
         for p in sorted(proj.glob(pat)):
+            rel_parts = p.relative_to(proj).parts
+            if ".vibeic" in rel_parts or "steps" in rel_parts:
+                continue
             rp = p.resolve()
             if rp in seen or not p.is_file():
                 continue
@@ -419,12 +569,24 @@ def discover_lefs(proj: Path) -> List[Path]:
 
 
 def discover_logs(proj: Path) -> List[Path]:
-    """Tool transcripts, if the project kept any. Absence is not a failure —
-    the static leg stands alone; the log only ever ADDS evidence."""
+    """Current Step 15 transcripts only.
+
+    Retained logs describe older invocations and may name another PDK or a
+    calibration fixture.  They cannot corroborate the current producer.
+    Absence is not a failure because the static LEF comparison stands alone.
+    """
     out: List[Path] = []
     seen = set()
+    root = proj / _CURRENT_FLOORPLAN
+    bounded = root.is_dir()
+    if not bounded:
+        root = proj
     for pat in ("**/*.log", "**/*.rpt"):
-        for p in sorted(proj.glob(pat)):
+        for p in sorted(root.glob(pat)):
+            if not bounded:
+                rel_parts = p.relative_to(proj).parts
+                if ".vibeic" in rel_parts or "steps" in rel_parts:
+                    continue
             rp = p.resolve()
             if rp in seen or not p.is_file():
                 continue
@@ -457,10 +619,20 @@ def main(argv=None) -> int:
         # LEF: a declared macro whose abstract never reached this gate, which
         # is BLOCKED and never an N/A.
         declared = macro_declaration_sites(proj)
+        config_path = _current_floorplan_config(proj) if a.lefs is None else None
+        configured_missing = [str(p) for p in lefs if not p.is_file()]
         reason = (f"no LEF under {proj}. A run with no LEF is not a run whose "
                   f"obstructions all loaded — it is one this gate could not "
                   f"read. NOT a pass.")
-        if declared:
+        if config_path is not None:
+            reason += f" Current Step 15 config: {config_path}."
+            if configured_missing:
+                reason += (" Configured LEF(s) unreadable in this runtime: "
+                           + ", ".join(configured_missing[:8])
+                           + (f" (+{len(configured_missing) - 8} more)"
+                              if len(configured_missing) > 8 else "") + ".")
+            cls = _reason_taxonomy.BLOCKED_BY_UPSTREAM
+        elif declared:
             reason += (f" The project DECLARES a macro at "
                        f"{', '.join(declared)} and no abstract was staged "
                        f"for this gate to read.")
