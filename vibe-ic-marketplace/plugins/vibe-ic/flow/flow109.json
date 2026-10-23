@@ -2318,17 +2318,41 @@
         {
           "id": "default",
           "select_when": "otherwise",
-          "provider": "other",
+          "provider": "vibeic",
           "tools": "ngspice batch model/device smoke suite",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "pdk_analog_completeness_check",
+            "ngspice_model_device_smoke",
+            "flow109_analog_model_check"
+          ],
+          "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
+          "dispatch": {
+            "adapter": "flow109_analog_a02",
+            "native_step_id": "flow109.A02",
+            "engine_families": [
+              "ngspice"
+            ],
+            "engine_executables": {
+              "ngspice": "ngspice"
+            },
+            "engine_steps": {
+              "ngspice": [
+                "pdk_analog_completeness_check",
+                "ngspice_model_device_smoke",
+                "flow109_analog_model_check"
+              ]
+            },
+            "operation_scope": "declared_analog_model_device_smoke"
+          }
         }
       ],
       "complementary_tools": [],
       "capability_status": "SELECTED_NOT_ROUTE_QUALIFIED",
       "availability_status": "NOT_INVENTORIED_THIS_UPDATE",
       "source_components": [
-        "pdk_analog_completeness_check"
+        "pdk_analog_completeness_check",
+        "flow109_analog_a02",
+        "flow109_analog_model_check"
       ],
       "obligations": [
         {
