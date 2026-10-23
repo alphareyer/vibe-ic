@@ -285,6 +285,24 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float, execution_mode=
     """Neutralise everything main() does that is not the cache decision, and
     record the steps it invokes. `_pnr_cache_valid_for` and the geometry
     sidecar are LEFT REAL — the cache verdict is what is under test."""
+    # main() normally owns a process. This in-process fixture must restore
+    # its retained program-tree bindings when the test's monkeypatch exits.
+    # Keep real activation and command verification during the invocation.
+    import os
+    import runtime_program_tree as runtime_tree
+    for name in ("PROGRAMS_DIR", "_RUNTIME_PROGRAM_TREE", "__file__"):
+        monkeypatch.setattr(R, name, getattr(R, name))
+    for name in ("run", "run_best_effort"):
+        monkeypatch.setattr(R._pr, name, getattr(R._pr, name))
+    monkeypatch.setattr(sys, "path", sys.path[:])
+    monkeypatch.setattr(sys, "dont_write_bytecode", sys.dont_write_bytecode)
+    for name in (runtime_tree.ENV_ROOT, runtime_tree.ENV_MANIFEST,
+                 "PYTHONDONTWRITEBYTECODE", "EDA_CONTAINER"):
+        if name in os.environ:
+            monkeypatch.setenv(name, os.environ[name])
+        else:
+            monkeypatch.setenv(name, "")
+            monkeypatch.delenv(name)
     d = _Drive()
     if execution_mode is not None:
         import execution_policy
