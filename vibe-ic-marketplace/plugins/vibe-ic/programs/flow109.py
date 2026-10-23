@@ -145,7 +145,8 @@ def _tool_uses(row: dict, profile: dict) -> list[dict]:
     return [{"use_id": f"flow109.{row['id']}.{profile['id']}.{tool}",
              "tool_id": tool, "purpose": f"{row['id']}.{profile['id']}",
              "native_step_id": dispatch["native_step_id"],
-             "native_steps": profile.get("native_steps", []),
+             "native_steps": dispatch.get("engine_steps", {}).get(tool, profile.get("native_steps", [])),
+             "executable_name": dispatch.get("engine_executables", {}).get(tool, tool),
              "qualification_required": True}
             for tool in dispatch["engine_families"]]
 

@@ -106,7 +106,7 @@ def require_admission(project, context):
             raise AdmissionRefusal('QUALIFICATION_BUILD_MISMATCH', uid, use_id=uid)
         # The identity must name the executable the current launch environment
         # resolves, not another qualified binary sitting elsewhere on disk.
-        binary = shutil.which(identity['tool_id'])
+        binary = shutil.which(use.get('executable_name', identity['tool_id']))
         if not binary or Path(binary).resolve() != Path(executable['path']).resolve():
             raise AdmissionRefusal('QUALIFICATION_RUNTIME_UNSUPPORTED', identity['tool_id'], use_id=uid)
         evidence = reference.get('reference_evidence')

@@ -7608,6 +7608,7 @@
           "provider": "librelane",
           "tools": "OpenROAD.Floorplan + Odb.ManualMacroPlacement",
           "native_steps": [
+            "Yosys.JsonHeader",
             "OpenROAD.Floorplan",
             "Odb.ManualMacroPlacement"
           ],
@@ -7621,6 +7622,7 @@
               "librelane_contract.py:run_chain"
             ],
             "engine_families": [
+              "yosys",
               "openroad"
             ],
             "consumer": "execution_backend_gates.py:evaluate",
@@ -7631,7 +7633,20 @@
               "reports/phase2/gates/stage2_compliance.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "yosys": "yosys",
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "yosys": [
+                "Yosys.JsonHeader"
+              ],
+              "openroad": [
+                "OpenROAD.Floorplan",
+                "Odb.ManualMacroPlacement"
+              ]
+            }
           }
         }
       ],
@@ -7760,10 +7775,10 @@
           "provider": "librelane",
           "tools": "Odb.SetPowerConnections + OpenROAD.PadRing + OpenROAD.TapEndcapInsertion + OpenROAD.GeneratePDN",
           "native_steps": [
-            "Odb.SetPowerConnections",
-            "OpenROAD.PadRing",
-            "OpenROAD.TapEndcapInsertion",
-            "OpenROAD.GeneratePDN"
+            "Vibeic.PadAssignment",
+            "Vibeic.PadRingRetainedState",
+            "Vibeic.PadRingCheck",
+            "Vibeic.PadBtermCoincidenceCheck"
           ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
@@ -7774,7 +7789,7 @@
               "phase3_one_shot_runner.py:step_pad_ring_gen"
             ],
             "engine_families": [
-              "openroad"
+              "python3"
             ],
             "consumer": "execution_backend_gates.py:evaluate",
             "native_required_outputs": [
@@ -7784,7 +7799,18 @@
               "reports/phase3/io_pad_chip_top.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "python3": "python3"
+            },
+            "engine_steps": {
+              "python3": [
+                "Vibeic.PadAssignment",
+                "Vibeic.PadRingRetainedState",
+                "Vibeic.PadRingCheck",
+                "Vibeic.PadBtermCoincidenceCheck"
+              ]
+            }
           }
         }
       ],
@@ -8299,7 +8325,17 @@
               "reports/phase3/placement_legality.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "openroad": [
+                "OpenROAD.GlobalPlacement",
+                "OpenROAD.RepairDesignPostGPL",
+                "OpenROAD.DetailedPlacement"
+              ]
+            }
           }
         }
       ],
@@ -8548,7 +8584,15 @@
               "reports/spare_cell_coverage.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "openroad": [
+                "Vibeic.InsertSpareCells"
+              ]
+            }
           }
         }
       ],
@@ -8689,7 +8733,16 @@
               "reports/phase3/librelane_cts_handoff.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "openroad": [
+                "OpenROAD.CTS",
+                "OpenROAD.STAMidPNR"
+              ]
+            }
           }
         }
       ],
@@ -8816,7 +8869,16 @@
               "phase3/stage3/pnr/post_hold.def"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "openroad": [
+                "OpenROAD.ResizerTimingPostCTS",
+                "OpenROAD.STAMidPNR"
+              ]
+            }
           }
         }
       ],
@@ -8975,7 +9037,18 @@
               "reports/phase3/drc_router.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "openroad": [
+                "OpenROAD.GlobalRouting",
+                "OpenROAD.RepairAntennas",
+                "OpenROAD.DetailedRouting",
+                "OpenROAD.FillInsertion"
+              ]
+            }
           }
         }
       ],
@@ -9221,7 +9294,17 @@
               "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.canonical.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "openroad": [
+                "Vibeic.PostRouteRepair",
+                "OpenROAD.RCX",
+                "OpenROAD.STAPostPNR"
+              ]
+            }
           }
         }
       ],
@@ -9504,7 +9587,7 @@
           "tools": "OpenROAD.CheckAntennas + KLayout.Antenna",
           "native_steps": [
             "OpenROAD.CheckAntennas",
-            "KLayout.Antenna"
+            "Vibeic.PrestreamRouteCensus"
           ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
@@ -9525,7 +9608,16 @@
               "reports/phase3/antenna_signoff.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "openroad": [
+                "OpenROAD.CheckAntennas",
+                "Vibeic.PrestreamRouteCensus"
+              ]
+            }
           }
         }
       ],
@@ -10110,7 +10202,15 @@
               "reports/phase2/gates/spef_extraction.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "openroad": [
+                "OpenROAD.RCX"
+              ]
+            }
           }
         }
       ],
@@ -10251,7 +10351,10 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "OpenSTA fork + Python timing-aware SI/MCF analysis",
-          "native_steps": [],
+          "native_steps": [
+            "OpenSTA.SICrosstalkTiming",
+            "OpenSTA.MCFTiming"
+          ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
             "kind": "canonical_backend_window",
@@ -10272,7 +10375,16 @@
               "reports/phase3/si_mcf_sta.rpt"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "opensta": "sta"
+            },
+            "engine_steps": {
+              "opensta": [
+                "OpenSTA.SICrosstalkTiming",
+                "OpenSTA.MCFTiming"
+              ]
+            }
           }
         }
       ],
@@ -10398,7 +10510,7 @@
               "librelane_signoff.py:run"
             ],
             "engine_families": [
-              "opensta"
+              "openroad"
             ],
             "consumer": "execution_backend_gates.py:evaluate",
             "native_required_outputs": [
@@ -10415,7 +10527,15 @@
               "reports/phase3/achievable_fmax.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "openroad": [
+                "OpenROAD.STAPostPNR"
+              ]
+            }
           }
         }
       ],
@@ -10895,7 +11015,8 @@
           "provider": "librelane",
           "tools": "Vibeic.GateLevelSim",
           "native_steps": [
-            "Vibeic.GateLevelSim"
+            "Icarus.Compile",
+            "Icarus.Simulate"
           ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
@@ -10907,7 +11028,8 @@
               "phase3_one_shot_runner.py:_step29_tool_arm"
             ],
             "engine_families": [
-              "iverilog"
+              "iverilog",
+              "vvp"
             ],
             "consumer": "execution_backend_gates.py:evaluate",
             "native_required_outputs": [
@@ -10915,7 +11037,19 @@
               "reports/phase2/gates/post_layout_sim.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "iverilog": "iverilog",
+              "vvp": "vvp"
+            },
+            "engine_steps": {
+              "iverilog": [
+                "Icarus.Compile"
+              ],
+              "vvp": [
+                "Icarus.Simulate"
+              ]
+            }
           }
         }
       ],
@@ -11052,7 +11186,11 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "ngspice extracted-path/block simulation",
-          "native_steps": [],
+          "native_steps": [
+            "OpenSTA.WritePathSpice",
+            "Magic.ExtractCells",
+            "Ngspice.PathCorrelation"
+          ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
             "kind": "canonical_backend_window",
@@ -11063,6 +11201,7 @@
             ],
             "engine_families": [
               "opensta",
+              "magic",
               "ngspice"
             ],
             "consumer": "execution_backend_gates.py:evaluate",
@@ -11071,7 +11210,23 @@
               "phase3/stage3/spice/correlation.json OR reports/phase3/spice_correlation.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "opensta": "sta",
+              "magic": "magic",
+              "ngspice": "ngspice"
+            },
+            "engine_steps": {
+              "opensta": [
+                "OpenSTA.WritePathSpice"
+              ],
+              "magic": [
+                "Magic.ExtractCells"
+              ],
+              "ngspice": [
+                "Ngspice.PathCorrelation"
+              ]
+            }
           }
         }
       ],
@@ -11356,7 +11511,7 @@
           "provider": "librelane",
           "tools": "OpenROAD.STAPostPNR report_power",
           "native_steps": [
-            "OpenROAD.STAPostPNR"
+            "Vibeic.AdoptSTAPostPNRPower"
           ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
@@ -11368,7 +11523,7 @@
               "librelane_signoff.py:run"
             ],
             "engine_families": [
-              "opensta"
+              "python3"
             ],
             "consumer": "execution_backend_gates.py:evaluate",
             "native_required_outputs": [
@@ -11376,7 +11531,15 @@
               "reports/phase3/power.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "python3": "python3"
+            },
+            "engine_steps": {
+              "python3": [
+                "Vibeic.AdoptSTAPostPNRPower"
+              ]
+            }
           }
         }
       ],
@@ -11540,7 +11703,16 @@
               "reports/phase3/dynamic_ir.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "openroad": [
+                "OpenROAD.IRDropReport",
+                "Vibeic.TransientIR"
+              ]
+            }
           }
         }
       ],
@@ -11676,7 +11848,9 @@
           "select_when": "otherwise",
           "provider": "openroad",
           "tools": "OpenROAD PDNSim analyze_power_grid -enable_em + Python EM limits",
-          "native_steps": [],
+          "native_steps": [
+            "OpenROAD.PSMElectromigration"
+          ],
           "capability_status": "PARTIAL_UNSUPPORTED_SIGNAL_EM",
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
@@ -11698,7 +11872,15 @@
               "reports/phase3/em_current_authority.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "openroad": [
+                "OpenROAD.PSMElectromigration"
+              ]
+            }
           }
         }
       ],
@@ -11823,7 +12005,9 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "KLayout/PDK topology rules + ngspice + Python PERC",
-          "native_steps": [],
+          "native_steps": [
+            "Vibeic.PercEquivalent"
+          ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
             "kind": "canonical_backend_window",
@@ -11833,7 +12017,7 @@
               "phase3_one_shot_runner.py:_emit_perc_equivalent"
             ],
             "engine_families": [
-              "openroad"
+              "python3"
             ],
             "consumer": "execution_backend_gates.py:evaluate",
             "native_required_outputs": [
@@ -11843,7 +12027,15 @@
               "reports/phase2/gates/perc_signoff.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "python3": "python3"
+            },
+            "engine_steps": {
+              "python3": [
+                "Vibeic.PercEquivalent"
+              ]
+            }
           }
         }
       ],
@@ -12273,9 +12465,13 @@
           "provider": "librelane",
           "tools": "Magic.StreamOut + KLayout.StreamOut + OpenROAD.WriteViews",
           "native_steps": [
+            "OpenROAD.WriteViews",
             "Magic.StreamOut",
             "KLayout.StreamOut",
-            "OpenROAD.WriteViews"
+            "KLayout.Antenna",
+            "KLayout.SealRing",
+            "KLayout.Fill",
+            "KLayout.Density"
           ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
@@ -12287,6 +12483,7 @@
               "librelane_step37.py:run"
             ],
             "engine_families": [
+              "openroad",
               "magic",
               "klayout"
             ],
@@ -12299,7 +12496,27 @@
               "reports/phase3/pad_ring_route_evidence.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "openroad": "openroad",
+              "magic": "magic",
+              "klayout": "klayout"
+            },
+            "engine_steps": {
+              "openroad": [
+                "OpenROAD.WriteViews"
+              ],
+              "magic": [
+                "Magic.StreamOut"
+              ],
+              "klayout": [
+                "KLayout.StreamOut",
+                "KLayout.Antenna",
+                "KLayout.SealRing",
+                "KLayout.Fill",
+                "KLayout.Density"
+              ]
+            }
           }
         }
       ],
@@ -12536,7 +12753,7 @@
               "phase3_one_shot_runner.py:_die_finishing"
             ],
             "engine_families": [
-              "openroad"
+              "klayout"
             ],
             "consumer": "execution_backend_gates.py:evaluate",
             "native_required_outputs": [
@@ -12544,7 +12761,15 @@
               "reports/phase3/die_finishing.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "klayout": "klayout"
+            },
+            "engine_steps": {
+              "klayout": [
+                "KLayout.SealRing"
+              ]
+            }
           }
         }
       ],
@@ -13004,7 +13229,16 @@
               "reports/phase3/gds_xor.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "klayout": "klayout"
+            },
+            "engine_steps": {
+              "klayout": [
+                "KLayout.XOR",
+                "Vibeic.FinishingXOR"
+              ]
+            }
           }
         }
       ],
@@ -13129,7 +13363,8 @@
             "KLayout.DRC",
             "Magic.SpiceExtraction",
             "Netgen.LVS",
-            "KLayout.Density"
+            "KLayout.Density",
+            "OpenROAD.ERC"
           ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
@@ -13146,7 +13381,8 @@
             "engine_families": [
               "magic",
               "klayout",
-              "netgen"
+              "netgen",
+              "openroad"
             ],
             "consumer": "execution_backend_gates.py:evaluate",
             "native_required_outputs": [
@@ -13165,7 +13401,28 @@
               "reports/phase3/perc_sweep.json"
             ],
             "acceptance_scope": "existing_native_component_only",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "magic": "magic",
+              "klayout": "klayout",
+              "netgen": "netgen",
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "magic": [
+                "Magic.SpiceExtraction"
+              ],
+              "klayout": [
+                "KLayout.DRC",
+                "KLayout.Density"
+              ],
+              "netgen": [
+                "Netgen.LVS"
+              ],
+              "openroad": [
+                "OpenROAD.ERC"
+              ]
+            }
           }
         }
       ],
