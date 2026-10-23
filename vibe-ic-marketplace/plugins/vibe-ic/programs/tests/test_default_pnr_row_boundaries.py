@@ -314,7 +314,9 @@ def test_default_floorplan_records_synthesis_under_the_current_sdc_before_native
     monkeypatch.setattr(runner, "_chip_path_requests_pad_ring", lambda *a: True)
     monkeypatch.setattr(runner, "_prepare_librelane_floorplan_for_route", native)
     with pytest.raises(RuntimeError, match="native floorplan boundary reached"):
-        producers.produce_pnr(tmp_path, {"step_id": "15", "top": "unit", "die_um": "100,100", "util": .2})
+        producers.produce_pnr(tmp_path, {"step_id": "15", "top": "unit",
+            "die_um": "100,100", "util": .2, "pdk_root": str(tmp_path / "pdk"),
+            "image_id": "unit-image"})
 
 
 def test_default_floorplan_closes_pad_record_sdc_cycle_in_one_invocation(
@@ -1409,9 +1411,10 @@ def test_default_dfm_produces_its_report_before_its_canonical_consumer(tmp_path,
     monkeypatch.setattr(worker, 'resolve_input_contract', lambda *args: [])
     report = tmp_path / 'reports/phase3/dfm_screen.json'
 
-    def program(project, sid):
+    def program(project, sid, manifest):
         calls.append(('producer', sid))
         assert project == tmp_path and sid == '35'
+        assert isinstance(manifest, dict)
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text('{"verdict":"PASS"}\n')
         return {'verdict': 'PRODUCED'}
