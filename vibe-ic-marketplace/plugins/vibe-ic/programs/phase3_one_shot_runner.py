@@ -53068,12 +53068,79 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
                         _pv.publish_report(native_log.parent, native_log.name, dest_log))
                     outputs.append(str(dest_log))
             if half == "lvs" and "Netgen.LVS" in folders:
+                extraction = folders.get("Magic.SpiceExtraction")
+                overlap_dir = job / "extraction_feedback"
+                if extraction is None:
+                    raise Refusal("LL_PV_VIEW_MISSING", "current Magic extraction feedback")
+                for name, target in (("feedback.txt", "feedback.txt"),
+                                     ("invocation.log", "extract.log")):
+                    extras.setdefault("published", []).append(_pv.publish_report(
+                        extraction, name, overlap_dir / target))
+                # The later independent audit uses the canonical extraction
+                # directory too. Retain prior channels before publishing this
+                # invocation's raw feedback and transcript into those names.
+                canonical_extract = _pl.extracted_dir(project)
+                old_names = {*_mio.FEEDBACK_NAMES, *_mio.TRANSCRIPT_NAMES,
+                             *(p.name for p in canonical_extract.glob("*.sp")),
+                             *(p.name for p in canonical_extract.glob("*.spice"))}
+                for old_name in sorted(old_names):
+                    old = canonical_extract / old_name
+                    if old.is_file():
+                        retained = job / "prior_extraction_channels" / old_name
+                        retained.parent.mkdir(parents=True, exist_ok=True)
+                        old.rename(retained)
+                for name, target in (("feedback.txt", "feedback.txt"),
+                                     ("extract.log", "ext2spice.log")):
+                    extras.setdefault("published", []).append(_pv.publish_report(
+                        overlap_dir, name, canonical_extract / target))
+                extraction_state = json.loads((extraction / "state_out.json").read_text())
+                extracted_spice = Path(extraction_state["spice"])
+                published_spice = canonical_extract / f"{physical_top}_extracted.spice"
+                extras.setdefault("published", []).append(_pv.publish_report(
+                    extracted_spice.parent, extracted_spice.name, published_spice))
+                outputs.append(str(published_spice))
+                overlap_json = _pl.reports_phase3_dir(project) / "magic_illegal_overlap.json"
+                overlap_rc, overlap_detail = _run_illegal_overlap_gate(project, overlap_json)
+                outputs.append(str(overlap_json))
+                if overlap_rc:
+                    return StepResult(half, "FAIL", time.time() - t0,
+                                      overlap_detail, outputs, extras)
                 dest = _pl.reports_phase3_dir(project) / "lvs.rpt"
                 extras.setdefault("published", []).append(_pv.publish_report(
                     folders["Netgen.LVS"] / "reports", "lvs.netgen.rpt", dest))
                 outputs.append(str(dest))
+                # Reuse the importer adapter: witnessed when native logs can
+                # prove it, explicitly reconstructed otherwise. Measurement
+                # is classified from the report, never stamped by this caller.
+                import librelane_import as imported
+                netgen_folder = folders["Netgen.LVS"]
+                native = imported.Ran("Netgen.LVS", "Netgen.LVS", netgen_folder.name,
+                                      netgen_folder, 1, netgen_folder.parent)
+                provenance = imported._provenance_row(project, native, {
+                    dest.relative_to(project).as_posix():
+                        netgen_folder / "reports/lvs.netgen.rpt"})
+                with (project / "provenance.jsonl").open("a") as journal:
+                    journal.write(json.dumps(provenance) + "\n")
                 lvs = record["metrics"].get("design__lvs_error__count", {})
                 match = record["verdict"] == "PASS"
+                # Bind the actual full-GDS compare before its verdict. Final
+                # DRV consumes this same typed record on both LVS routes.
+                inputs_path = _pl.reports_phase3_dir(project) / "lvs_inputs.json"
+                _aa.write_json(inputs_path, {
+                    "layout_def": {"path": str(views["def"].resolve()),
+                                   "sha256": _sha256_file(views["def"])},
+                    "schematic_netlist": {"path": str(views["netlist"].resolve()),
+                                          "sha256": _sha256_file(views["netlist"])},
+                    "layout_gds": {"path": str(views["gds"].resolve()),
+                                   "sha256": _sha256_file(views["gds"])},
+                    "extracted_spice": {"path": str(extracted_spice.resolve()),
+                                        "sha256": _sha256_file(extracted_spice)},
+                    "powered_reference": {"path": str(powered.resolve()),
+                                          "sha256": _sha256_file(powered)},
+                    "librelane_pv": {"path": str(record_path.resolve()),
+                                     "sha256": _sha256_file(record_path)},
+                    "selected_because": "current full-GDS LibreLane LVS inputs"})
+                outputs.append(str(inputs_path))
                 outputs.append(_write_lvs_verdict(
                     project, "PASS" if match else (
                         "FAIL" if lvs.get("status") == "FAIL" else "INCOMPLETE"),
@@ -54165,8 +54232,7 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
     # only when that skip does not apply. ``_direct``: the dual arm's re-entry.
     if not _direct:
         # R-0929-DRV-IDENTITY: step 31 starts with no LVS record on disk, in
-        # EVERY mode (the LibreLane half returns from the dispatch below and
-        # writes no inputs record): an earlier run's inputs or verdict must
+        # EVERY mode: an earlier run's inputs or verdict must
         # never stand for this compare.
         # The public step also owns retention when the producer is unavailable
         # before a later physical-verification snapshot can be made.

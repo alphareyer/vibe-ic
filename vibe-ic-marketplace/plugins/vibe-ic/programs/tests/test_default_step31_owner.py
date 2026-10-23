@@ -716,7 +716,12 @@ def _native31_process_leaf(project, selected, case, calls):
             report.write_text(_GOOD.replace("ab" * 32, sha(selected["gds"])))
             return 0, report.read_text(), ""
         if "openroad" in argv and any("erc_" in token for token in argv):
-            return 0, "0 floating nets\n0 floating pins\nERC_NATIVE_DONE\n", ""
+            transcript = "0 floating nets\n0 floating pins\nERC_NATIVE_DONE\n"
+            # Match the native shell tee before the real logger hashes output.
+            log = Path(argv[argv.index("tee") + 1])
+            log.write_text(transcript)
+            observed['erc'] = {'tee': str(log)}
+            return 0, transcript, ""
         raise AssertionError("unexpected expensive native process: " + command)
     return leaf
 
@@ -1182,6 +1187,23 @@ def _native31_synthesis_handoff(project, pdk, source_netlist):
     put(folder, "state_out.json", json.dumps({"nl": str(raw), "metrics": {
         "design__instance_unmapped__count": 0, "synthesis__check_error__count": 0}}))
     put(folder, "reports/stat.json", json.dumps({"modules": {"\\spm": {"num_submodules": 0}}}))
+    # CHECK reports are actual Yosys measurements of this neutral antecedent.
+    # Mapping remains a software fixture; no native synthesis PASS is claimed.
+    import subprocess
+    masters = set(re.findall(r"(?m)^\s*(\w+)\s+\w+\s*\(", text)) - {"module"}
+    assert len(masters) == 1, masters
+    cells = put(folder, "neutral_cells.v", "\n".join(
+        f"module {master}(input I, output Z); assign Z = I; endmodule" for master in masters))
+    for name, sources in (("pre_synth_chk.rpt", [rtl]), ("chk.rpt", [cells, raw])):
+        report = folder / "reports" / name
+        script = '; '.join([
+            'read_verilog ' + ' '.join('"' + str(path) + '"' for path in sources),
+            'hierarchy -check -top spm', 'proc',
+            'tee -o "' + str(report) + '" check'])
+        done = subprocess.run(['yosys', '-Q', '-T', '-p', script],
+                              capture_output=True, text=True)
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert 'Found and reported 0 problems.' in report.read_text()
     put(folder, "pdk_root.json", json.dumps({"cli_pdk_root": "/pdk",
         "stated_by": "run_chain(pdk_root=...)", "mounts_under_it": []}))
     inputs = {"step": "Yosys.Synthesis", "config": sha(resolved),

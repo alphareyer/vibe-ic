@@ -437,10 +437,17 @@ def test_normal373_local_receipts_reach_original_connectivity_consumer(
     monkeypatch.setattr(LC._ce, 'no_container_route', lambda: True)
     monkeypatch.setenv('VIBEIC_DOCKER_MEMORY', '4g')
     if condition.startswith('local_runner'):
-        launch = json.loads(local_image.receipt.read_text())
-        launch['container_inspect']['HostConfig'].update(
-            NanoCpus=8_000_000_000, Memory=32 * 1024**3, MemorySwap=32 * 1024**3)
-        BF.put(local_image.receipt, launch)
+        if getattr(local_image, 'readonly_attestation', False):
+            # A real host launch receipt is immutable. Require the actual
+            # test container to provide the same bounds as this fixture.
+            identity = LC.local_image_attestation(local_image.image)
+            assert identity['memory'] == identity['memory_swap'] == 32 * 1024**3
+            assert identity['network_mode'] == 'none'
+        else:
+            launch = json.loads(local_image.receipt.read_text())
+            launch['container_inspect']['HostConfig'].update(
+                NanoCpus=8_000_000_000, Memory=32 * 1024**3, MemorySwap=32 * 1024**3)
+            BF.put(local_image.receipt, launch)
         monkeypatch.setenv('VIBEIC_DOCKER_MEMORY', '32g')
     monkeypatch.setattr(EBP, '_parameters', lambda *a: (R, LC, pdk, ''))
     monkeypatch.setattr(LC, 'pdk_root_resolution', lambda *a, **k: {'path': str(root)})
