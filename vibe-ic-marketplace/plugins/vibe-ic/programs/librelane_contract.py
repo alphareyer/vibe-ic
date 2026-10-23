@@ -589,18 +589,59 @@ def _run_local(argv: list[str], *, probe_deadline_s: float | None,
     with _ce.local_engine_cwd() as scratch:
         if child_cwd is None:
             kw.setdefault('cwd', scratch)
-        import _watchdog as _wd
-        # The caller's probe allowance remains an observable budget. Stillness,
-        # rather than crossing that budget, is what permits the owned group reap.
-        budget = TOOL_BUDGET_S if probe_deadline_s is None else probe_deadline_s
-        grace = TOOL_STALL_GRACE_S if TOOL_STALL_GRACE_S is not None else _wd.DEFAULT_STALL_GRACE_S
-        result = _wd.run_host_supervised(command, env=environment,
-            stall_grace_s=grace, hard_ceiling_s=budget,
-            ceiling_notice=_ce.default_ceiling_notice('LOCAL LibreLane', budget), **kw)
-        if result.outcome == 'stalled':
-            raise Refusal('LL_TOOL_STALLED', f'LOCAL tool made no progress for {grace:g} s; '
-                          f'{_salvage(result.out, result.err, log)}')
-        result = _wd.completed_process(command, result)
+        if probe_deadline_s is not None:
+            # A probe deadline is a kill contract, unlike a tool session's
+            # advisory hard ceiling.  Give the native launch its own process
+            # group so the same deadline also reaps grandchildren (a bare
+            # subprocess.run(timeout=...) kills only its immediate child).
+            popen_kw = dict(kw)
+            capture_output = bool(popen_kw.pop('capture_output', False))
+            input_data = popen_kw.pop('input', None)
+            # run_container has always returned captured stdout/stderr on both
+            # routes; capture_output is accepted for subprocess.run parity but
+            # omission must not turn a LOCAL result into stdout=None.
+            if capture_output or 'stdout' not in popen_kw:
+                popen_kw.setdefault('stdout', subprocess.PIPE)
+            if capture_output or 'stderr' not in popen_kw:
+                popen_kw.setdefault('stderr', subprocess.PIPE)
+            popen_kw.setdefault('text', True)
+            popen_kw['start_new_session'] = True
+            proc = subprocess.Popen(command, env=environment, **popen_kw)
+            try:
+                out, err = proc.communicate(input=input_data,
+                                            timeout=probe_deadline_s)
+            except subprocess.TimeoutExpired as exc:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                    out, err = proc.communicate(timeout=.2)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    out, err = proc.communicate()
+                raise Refusal(
+                    'LL_TOOL_DEADLINE',
+                    f'LOCAL run passed its {probe_deadline_s:g} s probe deadline; '
+                    f'owned process group {proc.pid} reaped; '
+                    f'{_salvage(out or exc.stdout, err or exc.stderr, log)}') from exc
+            result = subprocess.CompletedProcess(command, proc.returncode, out, err)
+        else:
+            import _watchdog as _wd
+            # Tool sessions have an observable ceiling, but only measured
+            # stillness authorizes a kill.
+            grace = (TOOL_STALL_GRACE_S if TOOL_STALL_GRACE_S is not None
+                     else _wd.DEFAULT_STALL_GRACE_S)
+            watched = _wd.run_host_supervised(
+                command, env=environment, stall_grace_s=grace,
+                hard_ceiling_s=TOOL_BUDGET_S,
+                ceiling_notice=_ce.default_ceiling_notice(
+                    'LOCAL LibreLane', TOOL_BUDGET_S), **kw)
+            if watched.outcome == 'stalled':
+                raise Refusal('LL_TOOL_STALLED',
+                              f'LOCAL tool made no progress for {grace:g} s; '
+                              f'{_salvage(watched.out, watched.err, log)}')
+            result = _wd.completed_process(command, watched)
     if provider is not None:
         changed = []
         if (provider.librelane_root and

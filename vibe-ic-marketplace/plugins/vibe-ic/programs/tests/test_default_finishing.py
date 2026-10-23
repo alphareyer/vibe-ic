@@ -373,7 +373,9 @@ def test_ordinary_primary_and_gate_invoke_existing_per_layer_consumer(
     ref = DFM.audit(p)['density_ref']
     assert ref['step34_pass'] is True
     assert ref['per_layer_consumer']['subject_sha256'] == record['canonical_sha256']
-    assert calls == [(str(p / LF.METAL_DENSITY_REL), 'PASS')] * 3
+    # step_gds, the Step-34 report, its DFM reference and this explicit audit
+    # each invoke the same existing consumer on the same retained bytes.
+    assert calls == [(str(p / LF.METAL_DENSITY_REL), 'PASS')] * 4
     assert (p / 'phase3/librelane_switch.json').exists() is switch_present
 
 

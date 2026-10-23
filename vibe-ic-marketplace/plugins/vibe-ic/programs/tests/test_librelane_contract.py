@@ -827,7 +827,7 @@ def test_step31_reports_chain_stall_as_unmeasured(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pv, 'run_half', stalled)
     result = runner._step31_librelane(
-        tmp_path, 'block', SimpleNamespace(name='processA'), 'lvs', publish=False)
+        tmp_path, 'block', SimpleNamespace(name='processA'), 'drc', publish=False)
     assert result.status == 'NOT_MEASURED'
     assert result.reason_class == runner._V.ReasonClass.STALLED
     assert 'LL_TOOL_STALLED' in result.detail

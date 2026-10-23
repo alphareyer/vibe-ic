@@ -480,6 +480,7 @@ EXPECTED_CALL_SITES = {
     'librelane_ir_antenna.py::run_ir': 2,
     'librelane_ir_antenna.py::run_sealring': 1,
     'librelane_ir_antenna.py::xor_sealed': 1,
+    'librelane_postmap.py::run_and_publish': 1,
     'librelane_postroute.py::gate_level_sim': 1,
     'librelane_postroute_repair.py::_candidate': 1,
     'librelane_prelayout.py::run_prelayout': 1,
