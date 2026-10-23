@@ -60,16 +60,20 @@ def test_gls_qualifies_both_compile_and_runtime():
 def test_all_dispatchable_profiles_cover_each_declared_operation_once():
     registry = flow109.load_registry()
     count = 0
+    adapters = 0
     for row in registry['rows']:
         for profile in row['profiles']:
             dispatch = profile.get('dispatch')
             if not dispatch:
                 continue
             count += 1
+            adapters += bool(dispatch.get('adapter'))
             engines = dispatch['engine_families']
             assert set(dispatch['engine_steps']) == set(engines)
             assert set(dispatch['engine_executables']) == set(engines)
             operations = [operation for engine in engines for operation in dispatch['engine_steps'][engine]]
             assert sorted(operations) == sorted(profile['native_steps']), row['id']
             assert all(dispatch['engine_executables'][engine] for engine in engines)
-    assert count == 22
+    # New bounded adapters have independent dispatch controls; retain the
+    # exact original backend population while auditing every new use above.
+    assert count - adapters == 22

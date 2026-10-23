@@ -60,3 +60,26 @@ adapters are implemented. This boundary can be extended as implementation lands.
 Native component PASS remains scoped to the existing consumer. The new metric
 bindings, G1-G9 checks, full route acceptance and tool/profile qualifications
 have independent statuses; this registry does not establish 109/109 PASS.
+
+## A01 structured analog specification component
+
+`--entry-step A01 --exit-step A01` calls the existing
+`analog_a1_spec_emit.py` producer and `analog_a1_spec_extract_check.py` consumer.
+It does not start topology generation, SPICE, PVT or layout. Use the declared
+IC/IP endpoint and a nonempty structured analog block list with attributed L5
+specifications. Existing unbound/human-owned specs are preserved, and do not
+become fresh production merely because the old gate accepts their shape.
+
+The Python tool use also requires `semantics.operation_sources`: the exact
+portable path-to-SHA256 map returned by `flow109_analog.operation_sources()`.
+That map binds the adapter, producer, consumer and existing transitive source
+closure. Source changes invalidate this qualification scope before launch.
+The adapter checks D03 admission again at each actual subprocess call and
+binds consumed L1/L5/L9/block-list bytes, current outputs and actual gate JSONs.
+
+Each attempt is preserved under `reports/flow109/attempts/A01-*/`; the latest
+component view is `reports/flow109/components/A01.json`. A completed native
+component returns CLI success with `component_status: PASS`, while
+`flow109_acceptance` remains `NOT_MEASURED`: the two A01 metric obligations and
+G1-G9 audit have not been implemented by this dispatch adapter. Qualification
+contract fixtures in developer tests are not production qualification records.

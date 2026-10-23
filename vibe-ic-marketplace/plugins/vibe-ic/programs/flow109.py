@@ -297,6 +297,20 @@ def prepare_front_door(args, project: Path) -> int | None:
     path = destination / "requests" / (context["context_sha256"] + ".json")
     write_json(path, context)
     os.environ[CONTEXT_ENV] = str(path.resolve())
+    adapter = context['resolved_row']['profile']['dispatch'].get('adapter')
+    if adapter:
+        # Only source-owned dispatch data selects this bounded adapter. It
+        # calls existing producers/consumers and retains their actual receipts.
+        from importlib import import_module
+        result = import_module(adapter).execute(project, context)
+        if (not isinstance(result, dict)
+                or result.get('component_status') not in ('PASS', 'FAIL', 'NOT_MEASURED')
+                or result.get('flow109_acceptance') != 'NOT_MEASURED'):
+            raise Flow109Error('FLOW109_COMPONENT_RESULT_INVALID', adapter)
+        write_json(destination / 'components' / (context['requested_step'] + '.json'), result)
+        print(f"FLOW109 {context['requested_step']}: component {result['component_status']}; "
+              "metric acceptance NOT_MEASURED")
+        return {'PASS': 0, 'FAIL': 1, 'NOT_MEASURED': 2}[result['component_status']]
     args.entry_step = context["native_step_id"]
     args.exit_step = context["native_step_id"]
     return None
