@@ -107,7 +107,8 @@ def write_extra_corner_tcl(project: Path, body: str = '') -> Path:
 
 
 def run(project: Path, image: str, pdk_root: Path, pdk: str, *,
-        routed_def: Path, netlist: Path, sdc: Path, lane: str = '22-23',
+        routed_def: Path, netlist: Path, sdc: Path, routed_odb: Optional[Path] = None,
+        lane: str = '22-23',
         extract: bool = True, time: bool = True,
         direct_spefs: Optional[dict[str, Path]] = None,
         report_body: str = '') -> dict:
@@ -137,10 +138,12 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str, *,
         # fallback's case (the direct path); the tool would warn and skip.
         raise Refusal('LL_RCX_RULESETS_UNDECLARED', f'{pdk}: RCX_RULESETS is empty')
     mounts = [(pdk_root.resolve(), PDK_GUEST_ROOT)]
-    for source in (routed_def, netlist, sdc):
+    for source in (routed_def, netlist, sdc, *([routed_odb] if routed_odb else [])):
         if not Path(source).is_file():
             raise Refusal('LL_ROUTE_VIEW_MISSING', str(source))
     views: dict[str, Any] = {'def': routed_def, 'nl': netlist, 'sdc': sdc}
+    if routed_odb is not None:
+        views['odb'] = routed_odb
     steps = (['OpenROAD.RCX'] if extract else []) + (['OpenROAD.STAPostPNR'] if time else [])
     if not extract:
         spef: dict[str, Path] = {}
@@ -574,7 +577,7 @@ def judge_timing(corners: dict) -> dict:
         return {'verdict': 'FAIL', 'reason': 'LL_POSTROUTE_IDEAL_CLOCK', 'ideal_clocks': ideal}
     failing = sorted(c for c, row in corners.items()
                      if row['setup_ws'] < 0 or row['hold_ws'] < 0 or row['setup_vio'] or row['hold_vio']
-                     or row['max_slew_vio'] or row['max_cap_vio'])
+                     or row['max_slew_vio'] or row['max_cap_vio'] or row['max_fanout_vio'])
     worst_setup = min(corners, key=lambda c: corners[c]['setup_ws'])
     worst_hold = min(corners, key=lambda c: corners[c]['hold_ws'])
     return {'verdict': 'FAIL' if failing else 'PASS', 'failing_corners': failing,

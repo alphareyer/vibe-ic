@@ -212,6 +212,32 @@ def test_a_pdk_without_rcx_rules_is_refused_not_extracted(tmp_path, monkeypatch)
                     sdc=pnr / 'constraint.sdc', extract=True, time=False)
 
 
+def test_rcx_consumes_the_supplied_final_odb_without_deriving_a_replacement(tmp_path, monkeypatch):
+    p, pnr, root = _project(tmp_path)
+    final_odb = write(pnr / 'spm.filled.odb', 'final filled odb bytes')
+    monkeypatch.setattr(contract.subprocess, 'run', _tool_edge(tmp_path))
+    result = signoff.run(p, 'img', root, 'gf', routed_def=pnr / 'spm.def',
+                         routed_odb=final_odb, netlist=pnr / 'spm_pnr.v',
+                         sdc=pnr / 'constraint.sdc', extract=True, time=False)
+    state = json.loads((result['rcx'] / 'state_in.json').read_text())
+    receipt = json.loads((p / 'phase3/librelane/22-config/bridge/bridge_receipt.json').read_text())
+    assert state['odb'] == str(final_odb.resolve())
+    assert receipt['views']['odb']['source'] == str(final_odb.resolve())
+    assert 'odb' not in receipt['derived']
+
+
+def test_missing_supplied_final_odb_refuses_before_native_step(tmp_path, monkeypatch):
+    p, pnr, root = _project(tmp_path)
+    calls = []
+    monkeypatch.setattr(contract.subprocess, 'run', _tool_edge(tmp_path, calls=calls))
+    missing = pnr / 'missing-final.odb'
+    with pytest.raises(contract.Refusal, match='LL_ROUTE_VIEW_MISSING'):
+        signoff.run(p, 'img', root, 'gf', routed_def=pnr / 'spm.def',
+                    routed_odb=missing, netlist=pnr / 'spm_pnr.v',
+                    sdc=pnr / 'constraint.sdc', extract=True, time=False)
+    assert not [call for call in calls if '--id' in call]
+
+
 def test_rcx_spefs_reach_the_direct_consumers_bound_by_sha(tmp_path, monkeypatch):
     p, pnr, root = _project(tmp_path)
     monkeypatch.setattr(contract.subprocess, 'run', _tool_edge(tmp_path))
@@ -350,7 +376,8 @@ STA_LOG = ("Reading timing models for corner {c}…\n"
            "Reading top-level netlist at '/w/spm_pnr.v'…\n")
 
 
-def _sta_folder(tmp_path, *, setup=1.0, hold=0.4, ideal=(), derate=True, drop=None, spefs=None):
+def _sta_folder(tmp_path, *, setup=1.0, hold=0.4, ideal=(), derate=True, drop=None,
+                violations=None, spefs=None):
     folder = tmp_path / 'sta'
     metrics = {}
     for c in CORNERS:
@@ -361,7 +388,8 @@ def _sta_folder(tmp_path, *, setup=1.0, hold=0.4, ideal=(), derate=True, drop=No
             write(folder / c / signoff.CORNER_REPORT,
                   'OCV_DERATE_APPLIED early=0.95 late=1.05 flat-OCV source=TIME_DERATING_CONSTRAINT=5\n')
         for key, metric in signoff.TIMING_METRICS.items():
-            value = setup if key == 'setup_ws' else hold if key == 'hold_ws' else 0
+            value = (setup if key == 'setup_ws' else hold if key == 'hold_ws'
+                     else (violations or {}).get(key, 0))
             metrics[f'{metric}__corner:{c}'] = value
     if drop:
         metrics.pop(drop)
@@ -395,6 +423,15 @@ def test_an_absent_metric_or_derate_record_is_not_measured_never_zero(tmp_path):
 def test_a_negative_corner_fails(tmp_path):
     judged = signoff.judge_timing(signoff.corner_timing(_sta_folder(tmp_path, hold=-0.2)))
     assert judged['verdict'] == 'FAIL' and judged['failing_corners'] == sorted(CORNERS)
+
+
+@pytest.mark.parametrize('metric', (
+    'setup_vio', 'hold_vio', 'max_slew_vio', 'max_cap_vio', 'max_fanout_vio'))
+def test_each_measured_violation_count_fails(metric, tmp_path):
+    judged = signoff.judge_timing(signoff.corner_timing(
+        _sta_folder(tmp_path, violations={metric: 1})))
+    assert judged['verdict'] == 'FAIL'
+    assert judged['failing_corners'] == sorted(CORNERS)
 
 
 # --------------------------------------------------- the agreement arms ---
