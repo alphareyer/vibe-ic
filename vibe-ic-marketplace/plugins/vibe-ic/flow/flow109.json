@@ -12941,23 +12941,50 @@
           "select_when": "otherwise",
           "provider": "openroad",
           "tools": "OpenROAD density_fill (ODB metal fill)",
-          "native_steps": [],
+          "native_steps": [
+            "OpenROAD.DensityFill"
+          ],
           "geometry_format": "ODB",
           "entrypoint": {
             "kind": "openroad_tcl",
             "command": "density_fill",
-            "native_steps": []
+            "native_steps": [
+              "OpenROAD.DensityFill"
+            ]
           },
           "capability_status": "NOT_QUALIFIED_FOR_FINAL_EXTRACTION",
-          "execution_status": "UNIMPLEMENTED"
+          "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
+          "dispatch": {
+            "kind": "native_adapter",
+            "adapter": "flow109_density_fill",
+            "native_step_id": "flow109.D62",
+            "producer": "flow109_density_fill.py:execute",
+            "consumer": "flow109_density_fill.py:validate_filled_odb",
+            "engine_families": [
+              "openroad"
+            ],
+            "engine_executables": {
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "openroad": [
+                "OpenROAD.DensityFill"
+              ]
+            },
+            "acceptance_scope": "odb_fill_component_only",
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "native_required_outputs": [
+              "filled.odb",
+              "receipt.json"
+            ]
+          }
         }
       ],
       "complementary_tools": [],
       "capability_status": "SELECTED_NOT_ROUTE_QUALIFIED",
       "availability_status": "NOT_INVENTORIED_THIS_UPDATE",
       "source_components": [
-        "metal_fill_emit",
-        "metal_fill_density_check"
+        "flow109_density_fill"
       ],
       "obligations": [
         {
