@@ -126,8 +126,8 @@ def test_one_moved_figure_is_named_with_its_row_column_and_both_values():
     live = gen.render(*_synthetic(undeclared_d2=3, contradicted_d2=1))
     assert committed != live, "the mutation did not change the rendered block"
     lines = gen.census_drift(committed, live)
-    assert "  d2.undeclared: committed 4 -> live 3" in lines, lines
-    assert "  d2.contradicted: committed 0 -> live 1" in lines, lines
+    assert "  G2.undeclared: committed 4 -> live 3" in lines, lines
+    assert "  G2.contradicted: committed 0 -> live 1" in lines, lines
     assert "  total.undeclared: committed 12 -> live 11" in lines, lines
     assert "  total.contradicted: committed 0 -> live 1" in lines, lines
     # And it names the HEADLINE too, which is the figure a reader quotes.
@@ -136,7 +136,7 @@ def test_one_moved_figure_is_named_with_its_row_column_and_both_values():
     # drift report that lists every figure is a report that names none of them.
     assert not any(".waived:" in ln or ".na:" in ln or ".own:" in ln
                    for ln in lines), lines
-    assert not any(ln.startswith("  d1.") or ln.startswith("  d3.")
+    assert not any(ln.startswith("  G1.") or ln.startswith("  G3.")
                    for ln in lines), lines
 
 
@@ -161,6 +161,22 @@ def test_the_reader_refuses_a_row_it_does_not_understand():
     assert set(figures) == {"1", "2", "3", "total"}, figures
     assert all(isinstance(v, int)
                for row in figures.values() for v in row.values()), figures
+
+
+def test_gate_census_labels_round_trip_with_legacy_numeric_tables():
+    gen = _generator()
+    block = gen.render(*_synthetic())
+    assert "| G1 | `wiring`" in block
+    assert "| G2 | `falsifiable`" in block
+    assert "| gate | question |" in block
+    expected = gen.table_figures(block)
+    legacy = re.sub(r"(?m)^\| G([1-9][0-9]*) \|", r"| \1 |", block)
+    assert legacy != block
+    assert gen.table_figures(legacy) == expected
+    # Presentation-only migration changes no measured figure.
+    lines = gen.census_drift(legacy, block)
+    assert len(lines) == 1 and "no PUBLISHED FIGURE moved" in lines[0]
+    assert set(expected) == {"1", "2", "3", "total"}
 
 
 #: The real `main()`, over a SYNTHETIC census, in a subprocess — the same

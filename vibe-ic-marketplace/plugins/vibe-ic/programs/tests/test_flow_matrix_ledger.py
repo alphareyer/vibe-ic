@@ -493,6 +493,47 @@ def test_audit_history_is_carried_but_never_load_bearing():
     assert d8 <= {"DEFECT", C.NOTE, C.ABSENT}, d8
 
 
+def test_gate_labels_keep_step_ids_and_numeric_coordinates_separate():
+    cell = C.Cell("D1", 4, C.ABSENT, "")
+    assert cell.key == ("D1", 4)
+    assert cell.dim == 4
+    assert cell.gate_id == "G4"
+    assert cell.label == "D1/G4:criteria_match"
+    assert W.Waiver("D1", 4, "reason", "evidence").label == "D1/G4"
+    assert C.GATE_IDS == {i: f"G{i}" for i in range(1, 10)}
+
+
+def test_snapshot_adds_gate_ids_without_rekeying_history(monkeypatch):
+    history = {("D1", 1): ("OK", "historical wiring"),
+               ("D1", 8): (C.NOTE, "historical catcher")}
+    monkeypatch.setattr(C, "audit_history", lambda: history)
+    monkeypatch.setattr(C, "audit_source", lambda: None)
+    snapshot = C.build_snapshot()
+    assert snapshot["gate_ids"]["1"] == "G1"
+    assert snapshot["gate_names"]["G9"] == "verdict_consumed"
+    assert set(snapshot["cells"]["D1"]) == {"1", "8"}
+    assert snapshot["cells"]["D1"]["8"]["gate_id"] == "G8"
+    assert C._history_from_snapshot(snapshot) == history
+    # Existing snapshots without gate metadata remain readable, byte values
+    # and numeric coordinate keys unchanged.
+    legacy = {"cells": {"D1": {"1": {"verdict": "OK", "summary": "historical wiring"}}}}
+    before = repr(legacy)
+    assert C._history_from_snapshot(legacy) == {("D1", 1): history[("D1", 1)]}
+    assert repr(legacy) == before
+
+
+def test_raw_audit_fields_keep_the_original_d_namespace():
+    assert C.AUDIT_FIELDS == (
+        "d1_wiring", "d2_runnable", "d3_outputs_produced", "d4_criteria_match",
+        "d5_deps_correct", "d6_skip_abuse", "d7_outputs_list_complete", "d8_missing_mechanism")
+    raw = {"steps": [{"step_id": "D1", "d1_wiring": {"verdict": "DEFECT", "summary": "raw"}}]}
+    before = repr(raw)
+    history = C._history_from_raw(raw)
+    assert history[("D1", 1)][0] == "DEFECT"
+    assert history[("D1", 9)][0] == C.ABSENT
+    assert repr(raw) == before
+
+
 def test_absent_from_audit_is_surfaced_not_swallowed():
     absent = C.absent_from_audit()
     if C.audit_source() is None:

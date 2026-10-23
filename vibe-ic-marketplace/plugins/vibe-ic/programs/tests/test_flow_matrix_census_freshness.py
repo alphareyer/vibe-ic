@@ -596,7 +596,7 @@ def test_every_substitution_disclosure_says_what_was_substituted():
             continue
         text = SUB.disclosure_for(mods[dim], sid, "ENFORCED")
         assert isinstance(text, str) and not SUB.validate(text), (
-            f"d{dim}/{sid}: disclosure not admissible: {SUB.validate(text)}")
+            f"G{dim}/{sid}: disclosure not admissible: {SUB.validate(text)}")
         seen += 1
     assert seen, (
         "NOTHING_SCANNED: no substituted cell was examined, so this test "

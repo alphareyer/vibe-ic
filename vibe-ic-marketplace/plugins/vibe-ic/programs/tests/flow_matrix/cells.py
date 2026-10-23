@@ -119,6 +119,10 @@ DIMENSION_NAMES: Dict[int, str] = {
     9: "verdict_consumed",
 }
 
+# Gate IDs are a display namespace. Numeric coordinates and the historical
+# d1_* audit fields retain their original meaning and serialized identity.
+GATE_IDS: Dict[int, str] = {dim: f"G{dim}" for dim in DIMENSIONS}
+
 #: One line per dimension — the question the cell actually asks.
 #:
 #: Dimensions 1-7 ask about the GATE. Dimension 8 asks about the CATCHER: when
@@ -199,9 +203,13 @@ class Cell:
         return DIMENSION_NAMES[self.dim]
 
     @property
+    def gate_id(self) -> str:
+        return GATE_IDS[self.dim]
+
+    @property
     def label(self) -> str:
-        """Human label used in test ids and failure messages: ``12/d4:criteria_match``."""
-        return f"{flowref.normalize_id(self.step_id)}/d{self.dim}:{self.dim_name}"
+        """Human label: ``12/G4:criteria_match``; raw key stays ``('12', 4)``."""
+        return f"{flowref.normalize_id(self.step_id)}/{self.gate_id}:{self.dim_name}"
 
     def __str__(self) -> str:  # pragma: no cover - cosmetic
         return self.label
@@ -401,6 +409,7 @@ def build_snapshot() -> Dict[str, Any]:
     cells_out: Dict[str, Dict[str, Dict[str, str]]] = {}
     for (sid, dim), (verdict, summary) in sorted(hist.items()):
         cells_out.setdefault(sid, {})[str(dim)] = {
+            "gate_id": GATE_IDS[dim],
             "verdict": verdict,
             "summary": summary,
         }
@@ -413,6 +422,8 @@ def build_snapshot() -> Dict[str, Any]:
         ),
         "generated_from": src.name if src else None,
         "dimension_names": {str(k): v for k, v in DIMENSION_NAMES.items()},
+        "gate_ids": {str(k): v for k, v in GATE_IDS.items()},
+        "gate_names": {GATE_IDS[k]: v for k, v in DIMENSION_NAMES.items()},
         "cells": cells_out,
     }
 
@@ -439,6 +450,7 @@ if __name__ == "__main__":  # pragma: no cover
 __all__ = [
     "DIMENSIONS",
     "DIMENSION_NAMES",
+    "GATE_IDS",
     "DIMENSION_QUESTIONS",
     "AUDIT_FIELDS",
     "VERDICTS",
