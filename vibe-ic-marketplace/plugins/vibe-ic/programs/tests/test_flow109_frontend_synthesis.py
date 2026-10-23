@@ -163,3 +163,15 @@ def test_actual_native_contract_refuses_qualification_drift_after_owner_preparat
     assert result['native_started'] is False,result
     assert result['native_operations']==[]
     assert not (tmp_path/'phase3/librelane/02-yosys-synthesis/state_out.json').exists()
+
+
+@pytest.mark.parametrize('external', ['`include "outside.vh"', 'initial $readmemh("outside.hex", mem);'])
+def test_external_rtl_file_consumption_refuses_before_existing_owner(tmp_path,monkeypatch,external):
+    context,path=case(tmp_path);monkeypatch.setenv('VIBEIC_FLOW109_CONTEXT',str(path))
+    source=tmp_path/'phase2/stage1/rtl/unit_alpha.v'
+    source.write_text(external+'\n'+source.read_text())
+    import step_preflight
+    calls=[];monkeypatch.setattr(step_preflight,'retained_call',lambda *a,**k:calls.append('owner'))
+    result=frontend.execute(tmp_path,context)
+    assert result['reason']=='D22_TRANSITIVE_INPUT_UNIMPLEMENTED'
+    assert result['native_started'] is False and calls==[]

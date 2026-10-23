@@ -127,6 +127,12 @@ def prepare(project, context):
         raise AdmissionRefusal('D22_INPUT_INVALID', 'explicit top and PDK required')
     if not (project / 'input/submission_template/tapeout_declaration.json').is_file():
         raise AdmissionRefusal('D22_REQUIRED_INPUT_ABSENT', 'canonical submission declaration required')
+    from _hdl_code_text import strip_hdl_comments_and_strings
+    for rtl in (project / 'phase2/stage1/rtl').rglob('*'):
+        if rtl.is_file() and rtl.suffix in ('.v', '.sv', '.vh', '.svh'):
+            text = strip_hdl_comments_and_strings(rtl.read_text())
+            if re.search(r'`include\b|\$(?:readmem[hb]|fopen|system)\b', text):
+                raise AdmissionRefusal('D22_TRANSITIVE_INPUT_UNIMPLEMENTED', str(rtl))
     import librelane_contract as contract
     if contract.selected_mode(project, '9') != 'librelane':
         raise AdmissionRefusal('D22_ROUTE_UNSUPPORTED', 'only the existing native LibreLane Default owner is selected')

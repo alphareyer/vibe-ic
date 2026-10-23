@@ -31,3 +31,8 @@ not new display IDs. No provider listing is treated as execution evidence.
 arms. In ordinary Default mode `dispatch_fixed_step` returns without running
 those arms. They must not be relabeled as the Default producer. Some listed
 worker functions are placeholders or incomplete standalone CLI wrappers.
+
+The first D22 adapter supports self-contained RTL. Verilog includes and external
+file-I/O tasks are refused before production until their transitive input
+population has a verified binding. This is a component scope limit, not a claim
+that the existing synthesis tools cannot support those language constructs.
