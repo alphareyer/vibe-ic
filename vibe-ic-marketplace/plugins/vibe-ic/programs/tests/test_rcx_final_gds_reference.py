@@ -64,3 +64,18 @@ def test_native_gf180_final_gds_fill_is_sensitive_and_floating_is_distinct(tmp_p
             with pytest.raises(Refusal,match='RCX_FINAL_BINDING_CHANGED'):
                 ref.collect_final_gds(out,victim='A',grounded=['VSUBS','B'],floating=floats)
     assert results['filled']>results['bare']
+
+
+def test_consumer_refuses_matrix_omitting_extracted_conductor(tmp_path):
+    import json
+    matrix=_matrix(tmp_path/'matrix.csv')
+    lvs=tmp_path/'unit-only.lvsdb';lvs.write_text('unit contract only')
+    log=tmp_path/'unit-only.log';log.write_text('unit contract only')
+    record={'schema':'vibeic.final-gds-field-reference.v1','component_status':'MATRIX_MEASURED',
+            'source_sha256':ref.digest(Path(ref.__file__)), 'inputs':{},
+            'conductors':[{'name':'VICTIM'},{'name':'MISSING_ISLAND'}]}
+    for key,path in [('matrix',matrix),('lvsdb',lvs),('native_log',log)]:
+        record[key]={'path':str(path),'sha256':ref.digest(path)}
+    (tmp_path/'matrix_receipt.json').write_text(json.dumps(record))
+    with pytest.raises(Refusal,match='RCX_FINAL_CONDUCTOR_ABSENT'):
+        ref.collect_final_gds(tmp_path,victim='VICTIM',grounded=['GROUND'],floating=['FILL'])

@@ -415,6 +415,11 @@ def collect_final_gds(out: Path, *, victim: str, grounded: list[str], floating: 
         if not Path(path).is_file() or digest(Path(path)) != sha:
             raise Refusal('RCX_FINAL_BINDING_CHANGED', path)
     known = {r['name']: r for r in record['conductors']}
+    with Path(record['matrix']['path']).open() as stream:
+        header = next(csv.reader(stream, delimiter=';'), [])
+    matrix_names = {name.split('_', 1)[1] for name in header if '_' in name}
+    if not set(known).issubset(matrix_names) or victim not in known:
+        raise Refusal('RCX_FINAL_CONDUCTOR_ABSENT', 'matrix omits an extracted conductor or victim')
     for name in floating:
         row = known.get(name)
         if row is None or row['pin_count'] or row['terminal_count']:
