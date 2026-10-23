@@ -297,6 +297,135 @@ def measure(def_path: str, lefs: list[str], layer_map: str, kpex_pdk: str,
     return reference
 
 
+def solve_final_gds(gds: Path, cell: str, kpex_pdk: str, out: Path, *,
+                    tolerance: float = 0.005, threads: int = 2) -> dict:
+    """Explicit native final-GDS reference mode, including PDK dummy layers.
+
+    Run inside the admitted EDA image. Unlike measure(), no routing-only clip
+    or layer map is used. This produces a matrix, not a final D69 qualification.
+    A caller must separately prove final ODB/GDS common geometry and supply
+    the electrical roles to collect_final_gds(). Existing measure() is unchanged.
+    """
+    import importlib.metadata
+    import shutil
+    from klayout_pex.pdk_config import PDK
+    gds, out = Path(gds).resolve(), Path(out).resolve()
+    if not gds.is_file() or not cell or tolerance <= 0 or threads < 1:
+        raise Refusal('RCX_FINAL_INPUT_INVALID', 'GDS, cell and positive solver settings required')
+    config = PDK(kpex_pdk).config
+    model = Path(config.tech_pb_json_path)
+    deck = Path(config.pex_lvs_script_path)
+    kpex, solver = shutil.which('kpex'), shutil.which('FasterCap')
+    if not kpex or not solver:
+        raise Refusal('RCX_FINAL_TOOL_ABSENT', 'KPEX and FasterCap required')
+    sources = [gds, model, deck, *sorted(deck.parent.rglob('*.lvs')), Path(kpex), Path(solver)]
+    inputs = {str(p): digest(p) for p in sources}
+    out.mkdir(parents=True, exist_ok=False)
+    work = out / 'work'; work.mkdir()
+    argv = [kpex, '--pdk', kpex_pdk, '--gds', str(gds), '--cell', cell,
+            '--fastercap', '--mode', 'CC', '--threads', str(threads),
+            '--tolerance', str(tolerance), '--out_dir', str(out / 'kpex')]
+    with (out / 'native.log').open('w') as log:
+        process = subprocess.run(argv, cwd=work, stdout=log, stderr=subprocess.STDOUT)
+    if process.returncode != 0:
+        raise Refusal('RCX_FINAL_NATIVE_FAILED', f'rc={process.returncode}; {out}/native.log')
+    if any(not Path(p).is_file() or digest(Path(p)) != sha for p, sha in inputs.items()):
+        raise Refusal('RCX_FINAL_INPUT_CHANGED', 'consumed GDS/model/tool changed')
+    matrices = list((out / 'kpex').glob(f'*/{cell}_FasterCap_Result_Matrix_Avg.csv'))
+    databases = list((out / 'kpex').glob(f'*/{cell}.lvsdb.gz'))
+    if len(matrices) != 1 or len(databases) != 1:
+        raise Refusal('RCX_FINAL_MATRIX_ABSENT', 'one complete matrix and extracted netlist required')
+    import klayout.db as db
+    extracted = db.LayoutVsSchematic(); extracted.read(str(databases[0]))
+    circuit = extracted.netlist().circuit_by_name(cell)
+    if circuit is None:
+        raise Refusal('RCX_FINAL_NETLIST_ABSENT', cell)
+    conductors = [{'name': n.expanded_name(), 'pin_count': n.pin_count(),
+                   'terminal_count': len(list(n.each_terminal())),
+                   'lvs_floating': n.is_floating()} for n in circuit.each_net()]
+    result = {'schema': 'vibeic.final-gds-field-reference.v1', 'component_status': 'MATRIX_MEASURED',
+              'qualification': 'NOT_VERIFIED', 'final_geometry_common_source': 'NOT_VERIFIED',
+              'geometry_mode': 'final GDS, including PDK dummy layers; no routing-only clip',
+              'inputs': inputs, 'gds': str(gds), 'cell': cell, 'pdk': kpex_pdk,
+              'tool_version': importlib.metadata.version('klayout-pex'), 'argv': argv,
+              'source_sha256': digest(Path(__file__)), 'conductors': conductors,
+              'matrix': {'path': str(matrices[0]), 'sha256': digest(matrices[0])},
+              'lvsdb': {'path': str(databases[0]), 'sha256': digest(databases[0])},
+              'native_log': {'path': str(out / 'native.log'), 'sha256': digest(out / 'native.log')}}
+    write_json(out / 'matrix_receipt.json', result)
+    return result
+
+
+def floating_victim_c_pf(matrix_csv: Path, *, victim: str,
+                         grounded: list[str], floating: list[str]) -> dict:
+    """Solve Q_float=0 using the full measured Maxwell matrix (Schur complement).
+
+    Electrical roles are explicit and exhaustive. A KLayout is_floating flag
+    alone is insufficient: even an externally driven labelled wire can have no
+    device terminal in a pure-metal layout. No conductor is implicitly grounded.
+    """
+    import numpy as np
+    rows = list(csv.reader(Path(matrix_csv).open(), delimiter=';'))
+    try:
+        names = [h.split('_', 1)[1] for h in rows[0]]
+        matrix = np.asarray([[float(x) for x in row] for row in rows[1:]])
+    except (IndexError, ValueError) as exc:
+        raise Refusal('RCX_FLOAT_MATRIX_INVALID', str(matrix_csv)) from exc
+    roles = [victim, *grounded, *floating]
+    if len(set(names)) != len(names) or len(set(roles)) != len(roles) or set(roles) != set(names):
+        raise Refusal('RCX_FLOAT_CLASSIFICATION_INCOMPLETE', 'unique exhaustive driven/ground/floating identities required')
+    if matrix.shape != (len(names), len(names)) or not np.isfinite(matrix).all():
+        raise Refusal('RCX_FLOAT_MATRIX_INVALID', 'complete finite square Maxwell matrix required')
+    if not np.array_equal(matrix, matrix.T) or np.any(np.diag(matrix) <= 0):
+        raise Refusal('RCX_FLOAT_MATRIX_INVALID', 'symmetric averaged matrix and positive diagonal required')
+    offdiagonal = matrix - np.diag(np.diag(matrix))
+    if np.any(offdiagonal > 0) or np.any(np.linalg.eigvalsh(matrix) <= 0):
+        raise Refusal('RCX_FLOAT_MATRIX_INVALID', 'passive positive definite Maxwell matrix required')
+    k = names.index(victim)
+    f = [names.index(name) for name in floating]
+    potentials = np.zeros(len(names)); potentials[k] = 1.0
+    if f:
+        try:
+            potentials[f] = np.linalg.solve(matrix[np.ix_(f, f)], -matrix[f, k])
+        except np.linalg.LinAlgError as exc:
+            raise Refusal('RCX_FLOAT_MATRIX_SINGULAR', 'floating submatrix not solvable') from exc
+    charge = matrix @ potentials
+    capacitance = float(charge[k]) * 1e12
+    if not capacitance > 0:
+        raise Refusal('RCX_FLOAT_MATRIX_NONPOSITIVE', 'nonpositive effective victim capacitance')
+    return {'victim': victim, 'grounded': grounded, 'floating': floating,
+            'conductors': names, 'capacitance_pf': capacitance,
+            'floating_potential_v': {name: float(potentials[names.index(name)]) for name in floating},
+            'floating_charge_c': {name: float(charge[names.index(name)]) for name in floating},
+            'boundary_condition': 'victim=1V, declared ground=0V, declared floating Q=0',
+            'qualification': 'NOT_VERIFIED'}
+
+
+def collect_final_gds(out: Path, *, victim: str, grounded: list[str], floating: list[str]) -> dict:
+    """Consume one native invocation's bound matrix; preserve legacy collect()."""
+    out = Path(out)
+    record = json.loads((out / 'matrix_receipt.json').read_text())
+    if record.get('schema') != 'vibeic.final-gds-field-reference.v1' or record.get('component_status') != 'MATRIX_MEASURED':
+        raise Refusal('RCX_FINAL_RECEIPT_INVALID', 'native matrix receipt required')
+    if record.get('source_sha256') != digest(Path(__file__)):
+        raise Refusal('RCX_FINAL_SOURCE_CHANGED', 'reference consumer source changed')
+    bindings = {**record['inputs'], **{record[key]['path']: record[key]['sha256']
+                                     for key in ('matrix', 'lvsdb', 'native_log')}}
+    for path, sha in bindings.items():
+        if not Path(path).is_file() or digest(Path(path)) != sha:
+            raise Refusal('RCX_FINAL_BINDING_CHANGED', path)
+    known = {r['name']: r for r in record['conductors']}
+    for name in floating:
+        row = known.get(name)
+        if row is None or row['pin_count'] or row['terminal_count']:
+            raise Refusal('RCX_FLOAT_CONNECTED_CONDUCTOR', name)
+    measured = floating_victim_c_pf(Path(record['matrix']['path']), victim=victim,
+                                    grounded=grounded, floating=floating)
+    result = {**record, 'component_status': 'REFERENCE_MEASURED', 'electrical_model': measured}
+    write_json(out / 'reference.json', result)
+    return result
+
+
 def _mounted(path: str, mounts: list[tuple[str, str]]) -> Path:
     """The host path behind an in-image path, through the declared mounts."""
     for host, guest in mounts:
