@@ -116,3 +116,21 @@ def test_native_openroad_density_fill_writes_readable_odb_and_preserves_route(tm
     # This native component smoke deliberately does not manufacture a
     # qualification registry, D62 accepted receipt or whole-flow PASS.
     assert not (tmp_path / 'reports/flow109/D62/accepted.json').exists()
+
+
+@pytest.mark.parametrize('qualification', [{}, {'status': 'NOT_VERIFIED', 'uses': ['synthetic']}, {'status': 'PASS', 'uses': []}])
+def test_handoff_refuses_unqualified_component_receipt(tmp_path, qualification):
+    receipt = tmp_path / 'receipt.json'
+    receipt.write_text(json.dumps({'schema': fill.SCHEMA, 'component_status': 'PASS',
+                                   'qualification': qualification}))
+    with pytest.raises(AdmissionRefusal, match='qualified producer binding required'):
+        fill.validate_filled_odb(tmp_path, fill._record(tmp_path, receipt))
+
+
+def test_handoff_refuses_changed_receipt_before_reading_output(tmp_path):
+    receipt = tmp_path / 'receipt.json'
+    receipt.write_text('{}')
+    reference = fill._record(tmp_path, receipt)
+    receipt.write_text('{"component_status":"PASS"}')
+    with pytest.raises(AdmissionRefusal, match='receipt.json'):
+        fill.validate_filled_odb(tmp_path, reference)
