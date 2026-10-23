@@ -51,8 +51,10 @@ identities and qualification path. Child execution receives the explicit
 ordinary 70-flow invocation clears an inherited 109 context.
 
 Only a single explicit mapped component is dispatchable in this tranche.
-Unmapped rows, including the new ODB metal-fill and final-geometry acceptance
-responsibilities, return `FLOW109_PRODUCER_UNIMPLEMENTED`. Translating an entire
+The registry currently maps 25 rows: 22 existing backend components and the
+A01, D44 and D62 adapters described below. A dispatch mapping is not a native
+test result or a completed row. The remaining 84 rows return
+`FLOW109_PRODUCER_UNIMPLEMENTED`. Translating an entire
 new span into an old span would silently execute a different dependency order,
 so multi-row execution remains `FLOW109_WINDOW_UNIMPLEMENTED` until its actual
 adapters are implemented. This boundary can be extended as implementation lands.
@@ -111,3 +113,24 @@ netlist source and proof identity. This prepares the downstream source chain;
 it does not claim that STA, LVS, or release consumers have run/adopted it.
 `flow109_acceptance` and `baseline_adoption` remain `NOT_MEASURED` until their
 individual metric/consumer bindings are implemented.
+
+## D62 ODB metal-density fill component
+
+`--entry-step D62 --exit-step D62` uses OpenROAD `density_fill` on the bound
+input ODB, writes a new ODB in an immutable attempt directory, and opens it in
+an independent native process. `input/flow109/D62.json` binds that input,
+the qualified PDK/rules, and the fixed operation configuration. Admission is
+checked at the native launch boundary. Non-fill geometry must remain unchanged,
+previous fill cannot disappear, and the independent fill census must agree.
+
+`flow109_density_fill.validate_filled_odb` verifies the current receipt and
+output hashes before a downstream consumer can use them. The synthetic native
+control proves fill persistence; it does not qualify GF180 rules or establish
+that an extractor models floating-fill capacitance. The handoff therefore
+keeps `extraction_fill_sensitivity: NOT_VERIFIED`. D69 must consume a common
+final ODB/GDS geometry identity and qualified extraction evidence; an old
+pre-fill GDS or SPEF cannot satisfy that requirement.
+
+This adapter does not adopt an old GDS-finishing result, update STA/LVS release
+acceptance, or grant a full D62 or 109-flow PASS. Those metric and downstream
+bindings remain separate implementation work.
