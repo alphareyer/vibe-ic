@@ -158,8 +158,8 @@ def execute(project, context):
                 pdk_name=prepared['manifest']['pdk'], canonical_acceptance=True)
         finally:
             _ACTIVE.reset(token)
-        record['native_operations'] = active['operations']
-        record['native_started'] = bool(active['operations'])
+            record['native_operations'] = active['operations']
+            record['native_started'] = bool(active['operations'])
         record['producer'] = asdict(result)
         record['canonical_current_pass'] = versions.latest_pass(project, '9')
         record['source_sha256'] = prepared['sources']
