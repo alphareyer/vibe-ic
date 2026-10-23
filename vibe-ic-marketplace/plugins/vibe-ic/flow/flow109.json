@@ -11425,17 +11425,57 @@
           "id": "default",
           "select_when": "otherwise",
           "provider": "other",
-          "tools": "Adopted-netlist Icarus/cocotb VCD or mapped RTL VCD/SAIF + ngspice current traces + annotation manifest",
-          "native_steps": [],
+          "tools": "Adopted-netlist Icarus/vvp via sim_activity_dump; native OpenSTA vector annotation/report_power complement",
+          "native_steps": [
+            "sim_activity_dump.dump.compile",
+            "sim_activity_dump.dump.simulate",
+            "OpenSTA.read_vcd",
+            "OpenSTA.report_power"
+          ],
           "capability_status": "SUPPORTED_SUBSET_NOT_QUALIFIED",
-          "execution_status": "UNIMPLEMENTED"
+          "execution_status": "SOURCE_ADAPTER_IMPLEMENTED_COMPONENT_ONLY",
+          "dispatch": {
+            "adapter": "flow109_functional_activity",
+            "native_step_id": "flow109.D55",
+            "engine_families": [
+              "iverilog",
+              "vvp",
+              "opensta"
+            ],
+            "engine_executables": {
+              "iverilog": "iverilog",
+              "vvp": "vvp",
+              "opensta": "sta"
+            },
+            "engine_steps": {
+              "iverilog": [
+                "sim_activity_dump.dump.compile"
+              ],
+              "vvp": [
+                "sim_activity_dump.dump.simulate"
+              ],
+              "opensta": [
+                "OpenSTA.read_vcd",
+                "OpenSTA.report_power"
+              ]
+            }
+          },
+          "limitations": [
+            "Only full-window single-rail scalar-port adopted-netlist GLS activity is implemented.",
+            "Pinned LibreLane STAPostPNR has no VCD/SAIF configuration; direct OpenSTA is an activity-consumption complement, not final post-route power adoption.",
+            "Mapped RTL VCD/SAIF, analog current traces and qualified upper bounds remain UNIMPLEMENTED.",
+            "Complete D55 metric acceptance remains NOT_MEASURED."
+          ]
         }
       ],
       "complementary_tools": [],
       "capability_status": "SUPPORTED_SUBSET_NOT_QUALIFIED",
       "availability_status": "NOT_INVENTORIED_THIS_UPDATE",
       "source_components": [
-        "professional_tb_gen"
+        "sim_activity_dump.dump",
+        "_ppa.power.activity_read_tcl",
+        "_ppa.power.activity_provenance",
+        "_ppa.power.parse_power_report"
       ],
       "obligations": [
         {
