@@ -193,3 +193,24 @@ worker.execute(Path(sys.argv[2]), Path(sys.argv[3]), step_id='19', params={
     assert result['verdict'] == 'NOT_MEASURED'
     assert result['native_receipts'] == []
     assert not audit.exists(), audit.read_text() if audit.exists() else ''
+
+
+def test_worker_current_unit_contract_reaches_producer(tmp_path, monkeypatch):
+    """Positive launch-seam control only; synthetic registry is not qualification."""
+    import execution_backend_worker as worker
+    inputs = tmp_path / 'inputs'
+    project = inputs / 'project'
+    project.mkdir(parents=True)
+    context, _ = fixture_context(project, monkeypatch)
+    calls = []
+    def produce(*args):
+        calls.append('producer')
+        return {'verdict': 'NOT_MEASURED', 'detail': 'unit transport, no native measurement'}
+    monkeypatch.setattr(worker, 'produce', produce)
+    monkeypatch.setenv('VIBEIC_EXECUTION_BINDING', json.dumps({'required_gates': []}))
+    result = worker.execute(inputs, tmp_path / 'outputs', step_id='19', params={
+        'flow109_context': context,
+        'resolved_input_manifest': {'declarations': [], 'files': {}, 'missing': []}})
+    assert calls == ['producer']
+    assert result['flow109_admission']['status'] == 'PASS'
+    assert result['verdict'] == 'NOT_MEASURED'
