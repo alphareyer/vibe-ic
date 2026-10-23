@@ -97,6 +97,9 @@ raise SystemExit(runner._main())
     assert 'Yosys.Synthesis' in result['native_operations']
     receipt=tmp_path/result['native_receipt']['path']
     assert frontend._sha(receipt)==result['native_receipt']['sha256']
+    native_binding=json.loads(receipt.read_text())['input']['flow109_synthesis']
+    assert native_binding['context_sha256']==result['context_sha256']
+    assert len(native_binding['qualification_uses'])==3
     assert result['flow109_acceptance']=='NOT_MEASURED'
     assert result['producer']['status']=='PASS',result
     assert result['canonical_current_pass'],result

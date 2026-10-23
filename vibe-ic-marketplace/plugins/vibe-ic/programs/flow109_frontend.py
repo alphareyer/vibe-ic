@@ -97,6 +97,20 @@ def require_librelane_launch(project, operation, *, configuration=False):
         active['operations'].append(operation)
 
 
+def synthesis_fingerprint(project):
+    """Existing native reuse must name the exact admitted producer identity."""
+    path = os.environ.get('VIBEIC_FLOW109_CONTEXT')
+    if not path or _read(path).get('requested_step') != 'D22':
+        return None
+    active = _ACTIVE.get()
+    if active is None or active['project'] != Path(project).resolve():
+        raise AdmissionRefusal('D22_LAUNCH_CONTEXT_UNBOUND', 'native fingerprint')
+    _before(Path(project), active['context'], active['prepared'])
+    return {'context_sha256': active['context']['context_sha256'],
+            'qualification_uses': {use['use_id']: use['qualification_sha256']
+                                   for use in active['context']['runtime_tool_uses']}}
+
+
 def prepare(project, context):
     require_launch_admission(project, '9', {'flow109_context': context})
     if context.get('requested_step') != 'D22':

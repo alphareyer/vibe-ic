@@ -4071,6 +4071,10 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                        # are inputs too: an edited deck must re-run the step.
                        'config_files': config_file_hashes(_load(config), mounts or []),
                        'step': step_id}
+        from flow109_frontend import synthesis_fingerprint
+        admitted_synthesis = synthesis_fingerprint(project)
+        if admitted_synthesis is not None:
+            fingerprint['flow109_synthesis'] = admitted_synthesis
         if step_id == 'Yosys.Synthesis':
             declared_synthesis = synthesis_levers(project)
             if declared_synthesis is not None:
