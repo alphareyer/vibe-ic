@@ -742,6 +742,8 @@ def test_current_density_consumes_real_typed_local_receipt(tmp_path, monkeypatch
               'pdk_root_host': str(root), 'librelane_root_host': str(source),
               'librelane_executable': sys.executable, 'local_network_mode': 'host'}
     BF.put(switch_path, switch)
+    BF.put(p / 'reports/container_image.json', {
+        'image_match': True, 'image_ref': BF.IMAGE})
     monkeypatch.setenv(LLC.LOCAL_PROVIDER_ROUTE_ENV, 'LOCAL')
     monkeypatch.setenv('VIBEIC_DOCKER_MEMORY', '4g')
     monkeypatch.setattr(LLC, 'image_capability', lambda *a: None)

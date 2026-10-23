@@ -348,6 +348,7 @@ def _drive_step_pnr_to_the_deck_builder(tmp_path, monkeypatch, switch):
     if switch is not None:
         put(project / 'phase3/librelane_switch.json', {'steps': switch})
     pdk = ring_fixture._pdk(tmp_path, ring=None)
+    pdk.liberty = str(write(tmp_path / 'cells.lib', 'library(cells) { }\n'))
     netlist = write(tmp_path / 'dut.v', 'module dut(input clk, output q); assign q=clk; endmodule\n')
     for name, value in {
             'pnr_input_netlist': lambda *a: (netlist, 'test DUT', False),
@@ -780,6 +781,7 @@ def test_the_install_seam_calls_the_producer_the_switch_selects(tmp_path, monkey
     if switch is not None:
         put(project / 'phase3/librelane_switch.json', {'steps': switch})
     pdk = ring_fixture._pdk(tmp_path, ring=None)
+    pdk.liberty = str(write(tmp_path / 'cells.lib', 'library(cells) { }\n'))
     netlist = write(tmp_path / 'dut.v', 'module dut(input clk, output q); assign q=clk; endmodule\n')
     called = []
 
@@ -822,6 +824,7 @@ def test_a_placement_retry_reaches_the_same_tool_floorplan_again(tmp_path, monke
     project.mkdir(parents=True)
     put(project / 'phase3/librelane_switch.json', {'steps': {'15': 'librelane', '15.5ic': 'librelane'}})
     pdk = ring_fixture._pdk(tmp_path, ring=None)
+    pdk.liberty = str(write(tmp_path / 'cells.lib', 'library(cells) { }\n'))
     netlist = write(tmp_path / 'dut.v', 'module dut(input clk, output q); assign q=clk; endmodule\n')
     calls = []
 
@@ -869,6 +872,7 @@ def test_a_die_upsize_cannot_silently_reuse_the_tool_floorplan(tmp_path, monkeyp
     project.mkdir(parents=True)
     put(project / 'phase3/librelane_switch.json', {'steps': {'15': 'librelane', '15.5ic': 'librelane'}})
     pdk = ring_fixture._pdk(tmp_path, ring=None)
+    pdk.liberty = str(write(tmp_path / 'cells.lib', 'library(cells) { }\n'))
     netlist = write(tmp_path / 'dut.v', 'module dut(input clk, output q); assign q=clk; endmodule\n')
     calls = []
 

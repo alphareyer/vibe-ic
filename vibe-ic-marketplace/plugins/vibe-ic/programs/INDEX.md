@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1462
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1462)
+- **Total programs (excluding helpers / shims):** 1466
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1466)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1453 |
+| `any` | 1457 |
 
 ## Alphabetical listing
 
@@ -484,7 +484,9 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `flow109_admission` | any | — | Per-use qualification consumed immediately before flow109 native dispatch. |
 | `flow109_analog` | any | — | A01 component adapter for the existing spec producer and read-only gate. |
 | `flow109_density_fill` | any | — | Blocking D62 ODB density-fill component, not a density/tapeout signoff. |
+| `flow109_final_geometry` | any | — | D64 new-geometry component, never adoption of historical stream/PV PASS. |
 | `flow109_final_lec` | any | — | Blocking D44 component: native LibreLane EQY on the adopted final netlist. |
+| `flow109_frontend` | any | — | D22 uses the existing Default synthesis owner and its complete consumer. |
 | `flow109_functional_activity` | any | — | D55 component: adopted-netlist GLS activity and a real vector-power consumer. |
 | `flow_compliance_check` | any | Wave 91 | Strict Vibe-IC phase 2+3 gate (40 main-track steps + A1-A9 analog + M1-M4 mixed-signal + P0 structural-RTL umbrella in v1.6.15). |
 | `flow_condition_reachability_check` | any | — | the self-disabling-condition guard. |
@@ -796,6 +798,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `librelane_cts_hold` | any | — | steps 19 (CTS) and 20 (post-CTS hold repair) on LibreLane (T98). |
 | `librelane_eqy` | any | — | Step 13 arm B: LibreLane Yosys.EQY beside lec_run (arm A). |
 | `librelane_fill_dfm` | any | — | Default Step-34 tool fill and its existing Step-35 DFM consumer. |
+| `librelane_fill_stream` | any | — | Lossless DEF FILLS -> native LibreLane/KLayout stream bridge. |
+| `librelane_fill_stream_native` | any | — | Run reviewed LibreLane stream producer with only its fill-clear bug patched. |
 | `librelane_image_facts` | any | — | What the vibeic-eda image in hand says about its own LibreLane: read at run time, never stored. |
 | `librelane_import` | any | — | import a LibreLane run into the canonical tree (llv1 W6). |
 | `librelane_ir_antenna` | any | — | Opt-in steps 24, 26 and 26.5ic through LibreLane tool steps. |
@@ -1534,7 +1538,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1453 programs)
+### `any` (1457 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1990,7 +1994,9 @@ _(no programs in this group)_
 - `flow109_admission` — Per-use qualification consumed immediately before flow109 native dispatch.
 - `flow109_analog` — A01 component adapter for the existing spec producer and read-only gate.
 - `flow109_density_fill` — Blocking D62 ODB density-fill component, not a density/tapeout signoff.
+- `flow109_final_geometry` — D64 new-geometry component, never adoption of historical stream/PV PASS.
 - `flow109_final_lec` — Blocking D44 component: native LibreLane EQY on the adopted final netlist.
+- `flow109_frontend` — D22 uses the existing Default synthesis owner and its complete consumer.
 - `flow109_functional_activity` — D55 component: adopted-netlist GLS activity and a real vector-power consumer.
 - `flow_compliance_check` — Strict Vibe-IC phase 2+3 gate (40 main-track steps + A1-A9 analog + M1-M4 mixed-signal + P0 structural-RTL umbrella in v1.6.15).  _[Wave 91]_
 - `flow_condition_reachability_check` — the self-disabling-condition guard.
@@ -2301,6 +2307,8 @@ _(no programs in this group)_
 - `librelane_cts_hold` — steps 19 (CTS) and 20 (post-CTS hold repair) on LibreLane (T98).
 - `librelane_eqy` — Step 13 arm B: LibreLane Yosys.EQY beside lec_run (arm A).
 - `librelane_fill_dfm` — Default Step-34 tool fill and its existing Step-35 DFM consumer.
+- `librelane_fill_stream` — Lossless DEF FILLS -> native LibreLane/KLayout stream bridge.
+- `librelane_fill_stream_native` — Run reviewed LibreLane stream producer with only its fill-clear bug patched.
 - `librelane_image_facts` — What the vibeic-eda image in hand says about its own LibreLane: read at run time, never stored.
 - `librelane_import` — import a LibreLane run into the canonical tree (llv1 W6).
 - `librelane_ir_antenna` — Opt-in steps 24, 26 and 26.5ic through LibreLane tool steps.

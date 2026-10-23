@@ -28,7 +28,16 @@ def _project(tmp_path):
     project = tmp_path / "run"
     pnr = project / "phase3/stage3/pnr"
     pnr.mkdir(parents=True)
-    (pnr / "unit.def").write_text("DESIGN unit ;\nEND DESIGN\n")
+    minimal_def = (
+        "VERSION 5.8 ;\nDIVIDERCHAR \"/\" ;\nBUSBITCHARS \"[]\" ;\n"
+        "DESIGN unit ;\nUNITS DISTANCE MICRONS 1000 ;\n"
+        "DIEAREA ( 0 0 ) ( 1000 1000 ) ;\n"
+        "COMPONENTS 0 ;\nEND COMPONENTS\nPINS 0 ;\nEND PINS\n"
+        "NETS 0 ;\nEND NETS\nEND DESIGN\n")
+    (pnr / "unit.def").write_text(minimal_def)
+    (pnr / "routed.def").write_text(minimal_def)
+    (project / "phase3/librelane_switch.json").write_text(
+        json.dumps({"steps": {"34": "direct"}}))
     (project / "provenance.jsonl").write_text("")
     R.set_invocation_provenance_sink(project)
     return project
@@ -103,9 +112,11 @@ def test_transform_input_requires_earlier_successful_retained_output(
 
 def test_magic_fill_retains_stream_and_declares_finished_head(tmp_path, monkeypatch):
     project = _project(tmp_path)
-    pdk = SimpleNamespace(drc_deck=None, stdcell_marker_layer=None,
+    import execution_policy
+    monkeypatch.setattr(execution_policy, "request", lambda: {"mode": "ultra"})
+    pdk = SimpleNamespace(name="neutral", drc_deck=None, stdcell_marker_layer=None,
                           dummy_fill=None, same_net_heal=None,
-                          port_label_restore=None)
+                          port_label_restore=None, metal_fill_density=None)
     monkeypatch.setattr(R, "_layout_basis", lambda *a: ("basis", None))
     monkeypatch.setattr(R._ga, "gate_passed", lambda *a: True)
     monkeypatch.setattr(R, "_vacuous_on_unrouted", lambda *a: None)
@@ -160,7 +171,9 @@ def test_magic_fill_retains_stream_and_declares_finished_head(tmp_path, monkeypa
 
 def test_partial_failing_fill_cannot_publish_a_finished_gds(tmp_path, monkeypatch):
     project = _project(tmp_path)
-    pdk = SimpleNamespace(drc_deck=None, stdcell_marker_layer=None,
+    import execution_policy
+    monkeypatch.setattr(execution_policy, "request", lambda: {"mode": "ultra"})
+    pdk = SimpleNamespace(name="neutral", drc_deck=None, stdcell_marker_layer=None,
                           dummy_fill=None, same_net_heal=None,
                           port_label_restore=None,
                           metal_fill_density={"layers": [{"layer": [7, 0]}]})

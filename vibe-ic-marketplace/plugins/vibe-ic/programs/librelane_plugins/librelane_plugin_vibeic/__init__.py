@@ -321,3 +321,7 @@ class ExternalCaptureLaunchRetap(OpenROADStep):
 # Step 9 mapped-product implementation transform.
 from .postmap_repair import PostMapRepair  # noqa: E402,F401
 __all__ += ["PostMapRepair"]
+
+# Preserve native reader-created fill cells through stream-out (issue #3496).
+from .fill_stream import FillAwareStreamOut  # noqa: E402,F401
+__all__ += ['FillAwareStreamOut']

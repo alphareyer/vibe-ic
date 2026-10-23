@@ -5461,11 +5461,47 @@
           "provider": "librelane",
           "tools": "Yosys.Synthesis + Checker.YosysUnmappedCells + Checker.YosysSynthChecks",
           "native_steps": [
+            "Yosys.JsonHeader",
             "Yosys.Synthesis",
             "Checker.YosysUnmappedCells",
-            "Checker.YosysSynthChecks"
+            "Checker.YosysSynthChecks",
+            "Checker.NetlistAssignStatements",
+            "ABC.Map"
           ],
-          "execution_status": "UNIMPLEMENTED"
+          "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
+          "dispatch": {
+            "kind": "native_adapter",
+            "adapter": "flow109_frontend",
+            "native_step_id": "9",
+            "producer": "design_one_shot_runner.py:step_yosys_synth",
+            "consumer": "step_preflight.retained_call canonical acceptance and execution_backend_gates.evaluate",
+            "engine_families": [
+              "python3",
+              "yosys",
+              "abc"
+            ],
+            "engine_executables": {
+              "python3": "python3",
+              "yosys": "yosys",
+              "abc": "yosys-abc"
+            },
+            "engine_steps": {
+              "python3": [
+                "Yosys.JsonHeader",
+                "Checker.YosysUnmappedCells",
+                "Checker.YosysSynthChecks",
+                "Checker.NetlistAssignStatements"
+              ],
+              "yosys": [
+                "Yosys.Synthesis"
+              ],
+              "abc": [
+                "ABC.Map"
+              ]
+            },
+            "acceptance_scope": "existing_synthesis_component_only",
+            "flow109_metrics_status": "UNIMPLEMENTED"
+          }
         }
       ],
       "complementary_tools": [],
@@ -12573,7 +12609,7 @@
           "id": "default",
           "select_when": "otherwise",
           "provider": "librelane",
-          "tools": "Magic.StreamOut + KLayout.StreamOut + OpenROAD.WriteViews",
+          "tools": "Magic.StreamOut + KLayout.StreamOut + OpenROAD.WriteViews + Vibeic.FillAwareStreamOut for explicit DEF FILLS",
           "native_steps": [
             "OpenROAD.WriteViews",
             "Magic.StreamOut",
@@ -12581,7 +12617,8 @@
             "KLayout.Antenna",
             "KLayout.SealRing",
             "KLayout.Fill",
-            "KLayout.Density"
+            "KLayout.Density",
+            "Vibeic.FillAwareStreamOut"
           ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
@@ -12624,7 +12661,8 @@
                 "KLayout.Antenna",
                 "KLayout.SealRing",
                 "KLayout.Fill",
-                "KLayout.Density"
+                "KLayout.Density",
+                "Vibeic.FillAwareStreamOut"
               ]
             }
           }
@@ -13341,6 +13379,46 @@
         "D63"
       ],
       "profiles": [
+        {
+          "id": "digital_odb",
+          "select_when": "digital_physical",
+          "provider": "librelane",
+          "tools": "Qualified Python+pya native fill stream + KLayout FinishingXOR",
+          "native_steps": [
+            "Vibeic.FillAwareStreamOut",
+            "Vibeic.FinishingXOR"
+          ],
+          "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
+          "dispatch": {
+            "kind": "native_adapter",
+            "adapter": "flow109_final_geometry",
+            "native_step_id": "flow109.D64",
+            "producer": "flow109_final_geometry.py:execute",
+            "consumer": "flow109_final_geometry.py:validate_final_geometry",
+            "engine_families": [
+              "python3",
+              "klayout"
+            ],
+            "engine_executables": {
+              "python3": "python3",
+              "klayout": "klayout"
+            },
+            "engine_steps": {
+              "python3": [
+                "Vibeic.FillAwareStreamOut"
+              ],
+              "klayout": [
+                "Vibeic.FinishingXOR"
+              ]
+            },
+            "acceptance_scope": "new_D62_geometry_component_only",
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "native_required_outputs": [
+              "new final GDS and D62 ODB common geometry receipt",
+              "native finishing XOR"
+            ]
+          }
+        },
         {
           "id": "default",
           "select_when": "otherwise",

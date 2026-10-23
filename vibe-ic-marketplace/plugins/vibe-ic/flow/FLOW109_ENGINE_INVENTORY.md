@@ -29,7 +29,7 @@ the original physical tool.
 | D59 | Python | `_emit_perc_equivalent`: report/DEF/PDK-IO evidence aggregation |
 | D60 | OpenROAD, Magic, KLayout | `step_gds` stream/finishing and GDS antenna; see route note below |
 | D61 | KLayout | `_die_finishing_native` -> `die_finishing_gen`; may reuse valid retained finishing |
-| D64 | KLayout | `gds_xor_check` and current database-unit evidence |
+| D64 | Python/pya and KLayout for digital ODB; KLayout for the retained other profile | `flow109_final_geometry.execute` consumes current D62 geometry and validates native FinishingXOR; retained non-digital profile uses `gds_xor_check` |
 | D65 | Magic, KLayout, Netgen, OpenROAD | `step_drc`, `step_lvs`, `_native_erc.emit` (OpenROAD ERC) |
 
 D60's current component has PDK/route-dependent stream-out. Its qualification
@@ -42,3 +42,19 @@ alone must not be presented as container/package qualification.
 
 The 109 metric gates and new obligations are not established by this inventory.
 No native reference was qualified by these source changes.
+
+## Additional native adapters in this tranche
+
+| Row | Component engines | Actual source owner |
+| --- | --- | --- |
+| A01 | Python | Existing analog specification emitter and current checker |
+| D22 | Python/pyosys, Yosys, yosys-abc | Existing Default synthesis owner and canonical synthesis consumers |
+| D44 | Yosys / LibreLane EQY | Final adopted-netlist equivalence component |
+| D55 | Icarus, vvp, OpenSTA | Adopted-netlist GLS activity and per-port vector annotation |
+| D62 | OpenROAD | Native ODB density fill and independent current ODB readback |
+
+D64's digital component binds the interpreter, installed pya/native modules and
+exact stream script separately from KLayout CLI XOR. This does not qualify every
+D60 PDK-specific stream route or adopt final geometry for full-IC signoff.
+The final-GDS field-solver reference is an independently measured helper; D69
+remains without an admitted full-row extraction route.

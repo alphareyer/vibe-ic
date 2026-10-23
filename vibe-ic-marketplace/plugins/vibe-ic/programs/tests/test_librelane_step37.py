@@ -123,11 +123,18 @@ def test_step37_books_supervisor_stop_without_a_design_failure(
         tmp_path, monkeypatch, stage, code, status, reason):
     runner = importlib.import_module("phase3_one_shot_runner")
     feedback = importlib.import_module("drc_feedback_repair")
+    policy = importlib.import_module("execution_policy")
+    monkeypatch.setattr(policy, "request", lambda: {"mode": "ultra"})
     project = tmp_path / "project"
     pnr = runner._pl.pnr_dir(project)
     pnr.mkdir(parents=True)
     routed = pnr / "routed.def"
-    routed.write_text("VERSION 5.8 ;\nDESIGN core ;\nEND DESIGN\n")
+    routed.write_text(
+        "VERSION 5.8 ;\nDIVIDERCHAR \"/\" ;\nBUSBITCHARS \"[]\" ;\n"
+        "DESIGN core ;\nUNITS DISTANCE MICRONS 1000 ;\n"
+        "DIEAREA ( 0 0 ) ( 1000 1000 ) ;\n"
+        "COMPONENTS 0 ;\nEND COMPONENTS\nPINS 0 ;\nEND PINS\n"
+        "NETS 0 ;\nEND NETS\nEND DESIGN\n")
     (pnr / "core.def").write_bytes(routed.read_bytes())
     gds = pnr / "core.gds"
     monkeypatch.setattr(contract, "selected_mode", lambda *_a: (

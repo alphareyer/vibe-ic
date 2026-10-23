@@ -10,7 +10,6 @@ import math
 import os
 import re
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -590,17 +589,22 @@ def _run_local(argv: list[str], *, probe_deadline_s: float | None,
         if child_cwd is None:
             kw.setdefault('cwd', scratch)
         import _watchdog as _wd
-        # The caller's probe allowance remains an observable budget. Stillness,
-        # rather than crossing that budget, is what permits the owned group reap.
+        # A LOCAL probe allocation is an observable budget, not permission to
+        # kill a progressing native process.  Only measured stillness permits
+        # the owned process-group reap, for probes and tool sessions alike.
         budget = TOOL_BUDGET_S if probe_deadline_s is None else probe_deadline_s
-        grace = TOOL_STALL_GRACE_S if TOOL_STALL_GRACE_S is not None else _wd.DEFAULT_STALL_GRACE_S
-        result = _wd.run_host_supervised(command, env=environment,
-            stall_grace_s=grace, hard_ceiling_s=budget,
-            ceiling_notice=_ce.default_ceiling_notice('LOCAL LibreLane', budget), **kw)
-        if result.outcome == 'stalled':
-            raise Refusal('LL_TOOL_STALLED', f'LOCAL tool made no progress for {grace:g} s; '
-                          f'{_salvage(result.out, result.err, log)}')
-        result = _wd.completed_process(command, result)
+        grace = (TOOL_STALL_GRACE_S if TOOL_STALL_GRACE_S is not None
+                 else _wd.DEFAULT_STALL_GRACE_S)
+        watched = _wd.run_host_supervised(
+            command, env=environment, stall_grace_s=grace,
+            hard_ceiling_s=budget,
+            ceiling_notice=_ce.default_ceiling_notice(
+                'LOCAL LibreLane', budget), **kw)
+        if watched.outcome == 'stalled':
+            raise Refusal('LL_TOOL_STALLED',
+                          f'LOCAL tool made no progress for {grace:g} s; '
+                          f'{_salvage(watched.out, watched.err, log)}')
+        result = _wd.completed_process(command, watched)
     if provider is not None:
         changed = []
         if (provider.librelane_root and
@@ -695,9 +699,10 @@ def session_stop_reason(rc: int | None, evidence: str = "") -> str | None:
 #: How every container this module (and librelane_signoff) starts is bounded.
 #: Two kinds, bounded two different ways:
 #:
-#: * a PROBE (an image probe, a config resolution, a script or flow read) is
-#:   seconds of work. It keeps a short hard client deadline, `PROBE_DEADLINE_S`
-#:   (llv1 W16a), and its container is removed by name when that passes;
+#: * a PROBE (an image probe, a config resolution, a script or flow read) has
+#:   an allocated budget, `PROBE_DEADLINE_S` (llv1 W16a). A remote Docker
+#:   transport can remove its named container at that deadline; typed LOCAL
+#:   execution records the budget but only measured stillness permits a reap;
 #: * a TOOL STEP (a LibreLane step, an OpenROAD session, an STA run) is never
 #:   stopped on a clock (owner ruling vibe-ic#2051/R4). It runs under the
 #:   repo's progress-stall watchdog (`_watchdog.run_host_supervised`), which
@@ -709,9 +714,9 @@ def session_stop_reason(rc: int | None, evidence: str = "") -> str | None:
 #:   `VIBEIC_CEILING_CROSSED` line; it kills nothing.
 PROBE_DEADLINE_S = 600
 TOOL_BUDGET_S = 86_400
-#: The refusals caused by TIME, not by the design or by a tool verdict: a probe
-#: past its deadline, a tool the watchdog reaped as stalled. Only a plain FAIL
-#: is red, so a consumer books these NOT_MEASURED with the refusal as reason.
+#: The refusals caused by TIME, not by the design or by a tool verdict: a remote
+#: probe past its deadline, or a tool the watchdog reaped as stalled. Only a
+#: plain FAIL is red, so a consumer books these NOT_MEASURED with the refusal.
 TIME_REFUSALS = frozenset(TOOL_STOP_REASONS)
 TOOL_STALL_GRACE_S: float | None = None
 _REAP_DEADLINE_S = 30
@@ -807,9 +812,9 @@ def run_container(argv: list[str], *, probe_deadline_s: float | None = None,
     """Run one `docker run` argv, named so it can be removed by that name.
 
     Exactly one bound, stated by the caller:
-      * ``probe_deadline_s=`` -- a probe: `subprocess.run(..., timeout=)`; past
-        the deadline the container is removed by name and `LL_TOOL_DEADLINE` is
-        raised;
+      * ``probe_deadline_s=`` -- a probe allocation. Remote Docker removes its
+        named container at the deadline; typed LOCAL records the same budget
+        but never kills progress, and reaps only on measured stillness;
       * ``supervised=True`` -- a tool step: `_watchdog.run_host_supervised`
         with the ephemeral-container CPU probe and reap-by-name; a stall
         raises `LL_TOOL_STALLED`, and nothing else stops the job.
@@ -1832,6 +1837,7 @@ _EARLY_STEP_INPUTS: dict[str, tuple[str, ...]] = {
     'Magic.SpiceExtraction': ('gds', 'def'),
     'Netgen.LVS': ('spice', 'pnl'), 'KLayout.LVS': ('cdl', 'gds'),
     # Stream-level checks and finishing read the stream alone (steps 26, 26.5ic).
+    'Vibeic.FillAwareStreamOut': ('def',),
     'KLayout.Antenna': ('gds',), 'Checker.KLayoutAntenna': (),
     'KLayout.SealRing': ('gds',), 'KLayout.XOR': ('mag_gds', 'klayout_gds'),
     # Step 34's stream finishing (the PDK fill script, its density deck).
@@ -3153,7 +3159,8 @@ def class_defaults_in_force(project: Path) -> dict[str, str]:
 PLUGIN_ROOT = Path(__file__).resolve().parent / 'librelane_plugins'
 PLUGIN_STEP_PREFIX = 'Vibeic.'
 #: The `programs/` modules the plugin's steps import (inputs of those steps).
-PLUGIN_HOST_MODULES = ('_spare_plan.py', 'dynamic_ir_vectored_emit.py')
+PLUGIN_HOST_MODULES = ('_spare_plan.py', 'dynamic_ir_vectored_emit.py',
+                       'librelane_fill_stream.py', 'librelane_fill_stream_native.py')
 
 
 def _plugin_args(step_ids: list[str]) -> list[str]:
@@ -3795,6 +3802,8 @@ def resolve_step_config(project: Path, image: str, source: Path, output: Path,
     # probe the exact argv with a stand-in runner before creating that file;
     # in either case there is no step-specific plugin to mount yet.
     step_id = _load(source).get('meta', {}).get('step', '') if source.is_file() else ''
+    from flow109_frontend import require_librelane_launch
+    require_librelane_launch(project, step_id, configuration=True)
     result = run_container([docker, 'run', *_dmem.docker_memory_flags(), '--rm', *volumes,
                             *_plugin_args([step_id]),
                             '--entrypoint', 'python3', image, '-c', script],
@@ -4067,6 +4076,10 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                        # are inputs too: an edited deck must re-run the step.
                        'config_files': config_file_hashes(_load(config), mounts or []),
                        'step': step_id}
+        from flow109_frontend import synthesis_fingerprint
+        admitted_synthesis = synthesis_fingerprint(project)
+        if admitted_synthesis is not None:
+            fingerprint['flow109_synthesis'] = admitted_synthesis
         if step_id == 'Yosys.Synthesis':
             declared_synthesis = synthesis_levers(project)
             if declared_synthesis is not None:
@@ -4170,6 +4183,8 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                '--entrypoint', 'python3', image,
                '-m', 'librelane.steps', 'run', '--id', step_id, '-c', str(config),
                '-i', str(state_path), '-o', str(folder), '--pdk-root', str(pdk_root)]
+        from flow109_frontend import require_librelane_launch
+        require_librelane_launch(project, step_id)
         try:
             completed = run_container(cmd, supervised=True,
                                       log=folder / 'invocation.log')
