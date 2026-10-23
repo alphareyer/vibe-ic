@@ -483,6 +483,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `flow109` | any | — | Source-owned 109-flow selection and existing Default dispatch bindings. |
 | `flow109_admission` | any | — | Per-use qualification consumed immediately before flow109 native dispatch. |
 | `flow109_analog` | any | — | A01 component adapter for the existing spec producer and read-only gate. |
+| `flow109_analog_a04` | any | — | Flow 109 A04 source-authorized topology emission and retained checking. |
+| `flow109_analog_a05` | any | — | Flow 109 A05 expert-bound netlist sizing and native ngspice operating point. |
 | `flow109_density_fill` | any | — | Blocking D62 ODB density-fill component, not a density/tapeout signoff. |
 | `flow109_final_geometry` | any | — | D64 new-geometry component, never adoption of historical stream/PV PASS. |
 | `flow109_final_lec` | any | — | Blocking D44 component: native LibreLane EQY on the adopted final netlist. |
@@ -1993,6 +1995,8 @@ _(no programs in this group)_
 - `flow109` — Source-owned 109-flow selection and existing Default dispatch bindings.
 - `flow109_admission` — Per-use qualification consumed immediately before flow109 native dispatch.
 - `flow109_analog` — A01 component adapter for the existing spec producer and read-only gate.
+- `flow109_analog_a04` — Flow 109 A04 source-authorized topology emission and retained checking.
+- `flow109_analog_a05` — Flow 109 A05 expert-bound netlist sizing and native ngspice operating point.
 - `flow109_density_fill` — Blocking D62 ODB density-fill component, not a density/tapeout signoff.
 - `flow109_final_geometry` — D64 new-geometry component, never adoption of historical stream/PV PASS.
 - `flow109_final_lec` — Blocking D44 component: native LibreLane EQY on the adopted final netlist.

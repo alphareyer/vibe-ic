@@ -30,11 +30,20 @@ def _case(project):
     spec = _put(project, 'phase3/analog/keeper_alpha/spec.json', {
         'block': 'keeper_alpha', 'block_type': 'pull',
         'specs': [{'name': 'Reff', 'target': 50000.0, 'unit': 'Ohm'}]})
-    model = _put(project, 'input/pdk/open_models.lib',
-                 '.lib tt\n.model open_n nmos level=1 vto=0.5 kp=100u\n.endl tt\n')
+    model_text = '* neutral open-device model\n'
+    for corner in ('ss', 'tt', 'ff'):
+        model_text += (f'.lib {corner}\n'
+                       '.model open_core nmos level=1 vto=0.5 kp=100u\n'
+                       '.subckt open_nmos_dev d g s b w=1u l=1u\n'
+                       'mcore d g s b open_core w={w} l={l}\n'
+                       '.ends open_nmos_dev\n'
+                       f'.endl {corner}\n')
+    model = _put(project, 'input/pdk/spice/open_models.lib', model_text)
+    _put(project, 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json',
+         {'fields': {'pdk_target': 'sky130'}})
     pdk = _put(project, 'input/flow109/A04-pdk.json', {
         'schema': analog.SCHEMA, 'family': 'sky130',
-        'typed_models': [{'device': 'open_n', 'corner': 'tt', 'model': model}]})
+        'typed_models': [{'device': 'open_nmos_dev', 'corner': 'tt', 'model': model}]})
     topology = a2.LIBRARY['pull']['topology']
     requirements = _put(project, 'input/flow109/A04-requirements.json', {
         'schema': analog.SCHEMA,
@@ -53,7 +62,7 @@ def _case(project):
         'component_status': 'PASS', 'flow109_acceptance': 'NOT_MEASURED',
         'inputs': {str((project / a02_input['path']).resolve()): a02_input['sha256'],
                    str((project / model['path']).resolve()): model['sha256']},
-        'smokes': [{'device': 'open_n', 'corner': 'tt'}],
+        'smokes': [{'device': 'open_nmos_dev', 'corner': 'tt', 'model': model}],
         'consumer': {'verdict': 'PASS'}})
     config = _put(project, analog.INPUT, {
         'schema': analog.SCHEMA, 'basis': 'source_bound_expert_topology',

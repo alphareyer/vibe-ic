@@ -51,9 +51,9 @@ identities and qualification path. Child execution receives the explicit
 ordinary 70-flow invocation clears an inherited 109 context.
 
 Only a single explicit mapped component is dispatchable in this tranche.
-The registry currently maps 26 rows: 22 existing backend components and the
-A01, D44, D55 and D62 adapters described below. A dispatch mapping is not a native
-test result or a completed row. The remaining 83 rows return
+The registry currently maps 28 rows: 22 existing backend components and the
+A01, A04, A05, D44, D55 and D62 adapters described below. A dispatch mapping is
+not a native test result or a completed row. The remaining 81 rows return
 `FLOW109_PRODUCER_UNIMPLEMENTED`. Translating an entire
 new span into an old span would silently execute a different dependency order,
 so multi-row execution remains `FLOW109_WINDOW_UNIMPLEMENTED` until its actual
@@ -88,6 +88,24 @@ stale, partial, defaulted or AI-owned authority remains `NOT_MEASURED`; a
 measured miss is `FAIL`. `flow109_acceptance` remains `NOT_MEASURED` because
 G1-G9 and whole-flow delivery are outside this row binding. Qualification
 contract fixtures in developer tests are not production qualification records.
+
+## A04/A05 source-authorized analog circuit components
+
+A04 requires an approved circuit/topology and positive gain/noise/power budget
+declaration, exact structured specs, typed model/corner scope, and a current
+A02 receipt. It runs the existing topology emitter and retained reader, then
+refuses any mismatch between the expert selection and emitted IR.
+
+A05 requires current A02/A04 receipts and an approved per-device sizing plus
+operating-point threshold declaration. It runs the existing netlist emitter
+and retained reader, snapshots the emitted deck and complete self-contained
+local model read set, and executes that snapshot with native ngspice. Exit zero
+is insufficient: every required measurement must be finite and within its
+source-owned bounds. See `docs/flow109/A04-analog-topology.md` and
+`docs/flow109/A05-analog-netlist-sizing.md`.
+
+Both are bounded component results. PVT/statistics, production-PDK signoff,
+G1-G9, full Flow 109 qualification and benchmark PASS remain `NOT_MEASURED`.
 
 ## D44 final adopted-netlist equivalence component
 
