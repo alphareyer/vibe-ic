@@ -18,9 +18,12 @@ post-route/final power operation adopted this activity.
 `top`, SHA-bound `adopted_netlist`, `liberty`, nonempty `simulation_models`,
 `sdc`, `requirements`, `loads`, and a `modes` object with one SHA-bound
 `testbench` for every required mode. Required files use `{path, sha256}`.
-The SDC is a source-bound, qualified executable input, not an adapter-generated
-timing target. Its transitive dependencies must be represented by the selected
-qualification reference; the adapter does not certify arbitrary SDC programs.
+The SDC is a source-bound, qualified input, not an adapter-generated timing
+target. Only simple create_clock, input/output delay/transition and clock
+uncertainty/transition commands with scalar get_ports/get_clocks are supported.
+Nested Tcl evaluation, source/read commands and transitive Verilog file I/O
+(includes/readmem/fopen/system/SDF) are explicitly unimplemented and rejected
+before native launch, rather than publishing an incomplete input hash closure.
 
 The bound requirements file records owner approval and source reference,
 `modes.<name>.required_ports`, and a full-window `{start_tick: 0, end_tick,

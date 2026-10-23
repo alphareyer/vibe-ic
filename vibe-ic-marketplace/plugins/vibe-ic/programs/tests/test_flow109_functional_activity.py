@@ -264,3 +264,24 @@ def test_missing_output_load_is_rejected_by_actual_native_port_census(tmp_path):
     assert record['reason'] == 'D55_OUTPUT_LOAD_COVERAGE'
     assert len(record['commands']) == 3
     assert not (tmp_path / activity.FREEZE).exists()
+
+
+@pytest.mark.parametrize('kind', ['sdc', 'simulation'])
+def test_unbound_transitive_file_inputs_are_rejected_before_native(tmp_path, monkeypatch, kind):
+    context = _case(tmp_path)
+    manifest = json.loads((tmp_path / activity.INPUT).read_text())
+    if kind == 'sdc':
+        manifest['sdc'] = _put(tmp_path, 'inputs/constraints.sdc', 'source unbound.sdc\n')
+        reason = 'D55_SDC_SCOPE_UNIMPLEMENTED'
+    else:
+        text = (tmp_path / 'inputs/workload.v').read_text().replace('integer i;',
+            'integer i; reg [7:0] memory [0:7]; initial $readmemh("unbound.hex", memory);')
+        manifest['modes']['mission']['testbench'] = _put(tmp_path, 'inputs/workload.v', text)
+        reason = 'D55_TRANSITIVE_SIMULATION_INPUT_UNIMPLEMENTED'
+    _put(tmp_path, activity.INPUT, manifest)
+    calls = []
+    monkeypatch.setattr(activity.dump, 'dump', lambda *a: calls.append('native'))
+    record = activity.execute(tmp_path, context)
+    assert record['reason'] == reason, record
+    assert record['component_status'] == 'NOT_MEASURED'
+    assert not calls and not record['native_started']

@@ -68,6 +68,29 @@ def _fail(code, detail):
     raise AdmissionRefusal(code, detail)
 
 
+
+def _self_contained_simulation_scope(paths):
+    # This component does not yet enumerate transitive Verilog/SDC file I/O.
+    # Refuse it before launching instead of hashing only an incomplete root.
+    simulation = [paths['adopted_netlist'], *paths['simulation_models'],
+                  *(p for key, p in paths.items() if key.startswith('tb:'))]
+    for path in simulation:
+        text = re.sub(r'//[^\n]*|/\*.*?\*/', '', path.read_text(), flags=re.S)
+        if re.search(r'`include\b|\$(?:readmem[hb]|fopen|system|sdf_annotate)\b', text):
+            _fail('D55_TRANSITIVE_SIMULATION_INPUT_UNIMPLEMENTED', str(path))
+    allowed = {'create_clock', 'set_input_delay', 'set_output_delay', 'set_input_transition',
+               'set_clock_uncertainty', 'set_clock_transition'}
+    for line in paths['sdc'].read_text().splitlines():
+        line = line.partition('#')[0].strip()
+        if not line:
+            continue
+        # Only simple scalar get_ports/get_clocks substitutions; no nested
+        # Tcl evaluation, variable expansion, source, read_* or command chain.
+        reduced = re.sub(r'\[get_(?:ports|clocks)\s+\{?[A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*\}?\]', ' object ', line)
+        if line.split()[0] not in allowed or re.search(r'[^A-Za-z0-9_.+\s-]', reduced):
+            _fail('D55_SDC_SCOPE_UNIMPLEMENTED', line)
+
+
 def prepare(project, context):
     if context.get('requested_step') != 'D55' or context.get('native_step_id') != 'flow109.D55':
         _fail('D55_CONTEXT_MISMATCH', 'functional GLS activity component only')
@@ -107,6 +130,7 @@ def prepare(project, context):
                 or not re.fullmatch(r'(1|10|100)(s|ms|us|ns|ps|fs)', str(window.get('timescale')))):
             _fail('D55_WINDOW_OR_PORT_SCOPE_UNIMPLEMENTED', name)
         paths['tb:' + name] = _bound(project, modes[name].get('testbench'))
+    _self_contained_simulation_scope(paths)
     loads = _read(paths['loads'])
     approved = dict(loads)
     approved.pop('requirements_sha256', None)
