@@ -51,9 +51,9 @@ identities and qualification path. Child execution receives the explicit
 ordinary 70-flow invocation clears an inherited 109 context.
 
 Only a single explicit mapped component is dispatchable in this tranche.
-The registry currently maps 25 rows: 22 existing backend components and the
-A01, D44 and D62 adapters described below. A dispatch mapping is not a native
-test result or a completed row. The remaining 84 rows return
+The registry currently maps 26 rows: 22 existing backend components and the
+A01, D44, D55 and D62 adapters described below. A dispatch mapping is not a native
+test result or a completed row. The remaining 83 rows return
 `FLOW109_PRODUCER_UNIMPLEMENTED`. Translating an entire
 new span into an old span would silently execute a different dependency order,
 so multi-row execution remains `FLOW109_WINDOW_UNIMPLEMENTED` until its actual
@@ -146,3 +146,14 @@ about every extraction model. See `vibeic/vibeic-eda#333` for the pinned
 reproducer and the required correlation/common-geometry evidence. A suitable
 alternative extractor or authoritative correlated fill model can be evaluated;
 a caller-authored qualification label cannot replace those measurements.
+
+## D55 GLS activity and vector-power component
+
+D55 runs the existing DUT-scoped activity producer with an adopted mapped
+netlist, then consumes that actual VCD with native OpenSTA. All required scalar
+top ports must be observed and VCD-annotated; nonzero vectorless power does not
+prove annotation. Approved mode/window/load requirements and all consumed
+inputs are bound. Only the self-contained single-rail scalar subset is
+implemented. See `docs/flow109/D55-functional-activity.md` for its inputs and
+retained producer/consumer evidence. This prepares activity evidence without
+claiming final post-route power adoption or all D55 obligations.
