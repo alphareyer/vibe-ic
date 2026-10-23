@@ -12,6 +12,7 @@ import flow109
 import flow109_admission as admission
 import flow109_final_geometry as geometry
 import librelane_fill_stream as stream
+from librelane_contract import Refusal
 from test_librelane_fill_stream import _native_case, _put
 
 
@@ -84,7 +85,7 @@ def test_actual_general_frontdoor_consumes_new_d62_geometry_and_native_finishing
     gds = stream._bound(tmp_path, record['gds']); saved_gds = gds.with_suffix('.saved')
     gds.rename(saved_gds)
     try:
-        with pytest.raises((admission.AdmissionRefusal, ValueError)):
+        with pytest.raises(Refusal, match='FILL_STREAM_INPUT_CHANGED'):
             geometry.validate_final_geometry(tmp_path, record['receipt'])
     finally:
         saved_gds.rename(gds)
