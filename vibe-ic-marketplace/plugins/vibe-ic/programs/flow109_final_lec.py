@@ -251,8 +251,9 @@ def execute(project, context):
         require_launch_admission(project, 'flow109.D44', {'flow109_context': context})
         prepared = prepare(project, context)
         record.update(source_sha256=prepared['sources'], inputs=prepared['inputs'])
-        before = lambda: _before(project, context, prepared)
-        record['native_started'] = True
+        def before():
+            _before(project, context, prepared)
+            record['native_started'] = True
         record['model_census'] = _model_census(project, prepared, attempt, before)
         native_error, models = _native_eqy(project, prepared, attempt, before)
         record.update(native_error=native_error, preprocessing_models=models)
@@ -261,6 +262,8 @@ def execute(project, context):
         _before(project, context, prepared)
         record['component_status'] = {'PASS': 'PASS', 'FAIL': 'FAIL'}.get(proof['verdict'], 'NOT_MEASURED')
         record['reason'] = proof.get('explanation')
+        if native_error and record['component_status'] == 'PASS':
+            record.update(component_status='NOT_MEASURED', reason='D44_NATIVE_STEP_INCOMPLETE')
         if record['component_status'] == 'PASS':
             paths = prepared['paths']
             baseline = {'schema': SCHEMA, 'producer': 'flow109_final_lec',

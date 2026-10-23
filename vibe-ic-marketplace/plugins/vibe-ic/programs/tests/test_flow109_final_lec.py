@@ -171,3 +171,22 @@ def test_checked_in_native_eqy_sample_cannot_lose_a_required_partition(tmp_path)
     incomplete = lec.consume_eqy(tmp_path / 'native', output)
     assert incomplete['verdict'] == 'NOT_MEASURED'
     assert incomplete['explanation'] == 'D44_PARTITION_COVERAGE_INCOMPLETE'
+
+
+def test_actual_model_launch_rechecks_qualification_after_preparation(tmp_path, monkeypatch):
+    context = _case(tmp_path)
+    prepare = lec.prepare
+    def invalidate_before_launch(project, selection):
+        prepared = prepare(project, selection)
+        path = project / 'qualifications.json'
+        registry = json.loads(path.read_text())
+        registry['uses'][0]['status'] = 'UNSUPPORTED'
+        path.write_text(json.dumps(registry))
+        return prepared
+    monkeypatch.setattr(lec, 'prepare', invalidate_before_launch)
+    record = lec.execute(tmp_path, context)
+    assert record['component_status'] == 'NOT_MEASURED'
+    assert record['reason'] == 'QUALIFICATION_UNSUPPORTED'
+    assert record['native_started'] is False
+    assert not list(tmp_path.rglob('gold.model.log'))
+    assert not list(tmp_path.rglob('*.eqy'))
