@@ -521,6 +521,8 @@ def test_stage1_proof_closure_carries_existing_inputs_only(tmp_path):
         "reports/phase2/cdc/netlist.json",
         "reports/phase2/cdc/netlist_front_end.json",
         "reports/phase2/cdc/netlist.yosys.log",
+        "reports/phase2/cdc/netlist.raw.json",
+        "reports/phase2/cdc/netlist.normalize.yosys.log",
     ):
         target = project / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -541,6 +543,8 @@ def test_stage1_proof_closure_carries_existing_inputs_only(tmp_path):
         "reports/phase2/cdc/netlist.json",
         "reports/phase2/cdc/netlist_front_end.json",
         "reports/phase2/cdc/netlist.yosys.log",
+        "reports/phase2/cdc/netlist.raw.json",
+        "reports/phase2/cdc/netlist.normalize.yosys.log",
     } <= contract
     # The actual worker resolver receives every existing adjacent proof; it
     # does not silently stage only the JSON netlist.
