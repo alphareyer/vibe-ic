@@ -16,8 +16,8 @@ from librelane_contract import Refusal
 from test_librelane_fill_stream import _native_case, _put
 
 
-def _case(project, *, ic=False):
-    d62, native = _native_case(project)
+def _case(project, *, ic=False, fill_width=1.0):
+    d62, native = _native_case(project, fill_width=fill_width)
     native.pop('seal_gds')
     views = {'netlist': _put(project, 'inputs/adopted.v', 'module fill_smoke(input a,output y);assign y=a;endmodule\n'),
              'sdc': _put(project, 'inputs/adopted.sdc', 'create_clock -period 10 [get_ports a]\n')}
@@ -125,3 +125,31 @@ def test_invalid_geometry_or_ic_seal_requirement_never_launches_native_stream(tm
     assert result['native_started'] is False and calls == []
     if damage == 'ic_no_seal':
         assert result['reason'] == 'D64_D61_SEAL_REENTRY_NOT_IMPLEMENTED'
+
+
+def test_two_valid_native_components_cannot_borrow_another_admitted_manifest(tmp_path, monkeypatch):
+    import flow109_density_fill as density
+    absolute = lambda project, path: {'path': str(Path(path).resolve()), 'sha256': stream._sha(path)}
+    monkeypatch.setattr(stream, '_record', absolute)
+    monkeypatch.setattr(density, '_record', absolute)
+    components = []
+    for name, width in [('a', 1.0), ('b', 2.0)]:
+        project = tmp_path / name; project.mkdir()
+        context = _case(project, fill_width=width)
+        result = geometry.execute(project, context)
+        assert result['component_status'] == 'PASS', result
+        assert geometry.validate_final_geometry(project, result['receipt'])['component_geometry_current']
+        components.append((project, result, json.loads(stream._bound(project, result['receipt']).read_text())))
+    a, b = components
+    assert a[1]['geometry_proof']['fill_count'] != b[1]['geometry_proof']['fill_count']
+    assert a[1]['gds']['sha256'] != b[1]['gds']['sha256']
+    # B's GDS/DEF/ODB/native XOR/bridge remain independently valid. Borrow
+    # only A's admitted context and input envelope; the join must reject.
+    forged = copy.deepcopy(b[2])
+    for name in ('execution_context', 'context_sha256', 'inputs'):
+        forged[name] = a[2][name]
+    ref = _put(a[0], 'inputs/foreign-valid-component.json', forged)
+    with pytest.raises(admission.AdmissionRefusal, match='D64_ADMITTED_SOURCE_MISMATCH'):
+        geometry.validate_final_geometry(a[0], ref)
+    assert geometry.validate_final_geometry(a[0], a[1]['receipt'])['component_geometry_current']
+    assert geometry.validate_final_geometry(b[0], b[1]['receipt'])['component_geometry_current']

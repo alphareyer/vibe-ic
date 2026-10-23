@@ -224,6 +224,15 @@ def validate_final_geometry(project, receipt_ref):
     for path, sha in record['inputs'].items():
         if not Path(path).is_file() or _sha(path) != sha:
             raise AdmissionRefusal('D64_INPUT_CHANGED', path)
+    prepared = prepare(project, record['execution_context'])
+    manifest = prepared['manifest']
+    bridge_source = _read(stream._bound(project, record['stream_bridge']))
+    if (record.get('inputs') != prepared['inputs']
+            or record.get('d62_receipt') != manifest['d62_receipt']
+            or record.get('adopted_views') != manifest['adopted_views']
+            or bridge_source.get('native_inputs') != manifest['native_stream_inputs']):
+        raise AdmissionRefusal('D64_ADMITTED_SOURCE_MISMATCH',
+            'current geometry must be produced from this admitted manifest, not another valid receipt')
     common = stream.validate_bridge(project, record['stream_bridge'])
     if any(record[key] != common[key] for key in ('gds', 'odb', 'd62_receipt', 'geometry_proof')):
         raise AdmissionRefusal('D64_COMMON_GEOMETRY_MISMATCH', 'ODB/GDS/fill producer must share one geometry proof')
