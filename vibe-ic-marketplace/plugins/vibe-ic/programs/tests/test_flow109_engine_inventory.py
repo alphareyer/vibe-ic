@@ -77,3 +77,9 @@ def test_all_dispatchable_profiles_cover_each_declared_operation_once():
     # New bounded adapters have independent dispatch controls; retain the
     # exact original backend population while auditing every new use above.
     assert count - adapters == 22
+
+
+def test_explicit_fill_streaming_is_a_distinct_required_native_tool_purpose():
+    actual = uses('D60')['klayout']
+    assert 'Vibeic.FillAwareStreamOut' in actual['native_steps']
+    assert 'KLayout.StreamOut' in actual['native_steps']

@@ -12573,7 +12573,7 @@
           "id": "default",
           "select_when": "otherwise",
           "provider": "librelane",
-          "tools": "Magic.StreamOut + KLayout.StreamOut + OpenROAD.WriteViews",
+          "tools": "Magic.StreamOut + KLayout.StreamOut + OpenROAD.WriteViews + Vibeic.FillAwareStreamOut for explicit DEF FILLS",
           "native_steps": [
             "OpenROAD.WriteViews",
             "Magic.StreamOut",
@@ -12581,7 +12581,8 @@
             "KLayout.Antenna",
             "KLayout.SealRing",
             "KLayout.Fill",
-            "KLayout.Density"
+            "KLayout.Density",
+            "Vibeic.FillAwareStreamOut"
           ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
@@ -12624,7 +12625,8 @@
                 "KLayout.Antenna",
                 "KLayout.SealRing",
                 "KLayout.Fill",
-                "KLayout.Density"
+                "KLayout.Density",
+                "Vibeic.FillAwareStreamOut"
               ]
             }
           }
