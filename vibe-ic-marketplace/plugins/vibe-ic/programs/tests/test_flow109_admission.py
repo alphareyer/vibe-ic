@@ -21,6 +21,8 @@ def artifact(project, name, content):
 def fixture_context(project, monkeypatch, step="D38"):
     features = next(p['features'] for p in flow109.load_registry()['reference_profiles']
                     if p['name'] == 'Small digital IC without DFT')
+    if step == "D48":
+        features = {**features, "requires_si": True}
     plan = flow109.resolve_plan(features)
     use = flow109.resolve_step(plan, step)['tool_uses'][0]
     exe = artifact(project, 'unit-openroad', 'unit test executable identity, not a real tool')
