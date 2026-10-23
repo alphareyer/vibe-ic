@@ -12,7 +12,7 @@ the original physical tool.
 | D31 | Yosys, OpenROAD | `execution_backend_producers.produce_pnr`: JsonHeader plus floorplan/PDN chain; chip chain in `_prepare_librelane_floorplan_for_route` |
 | D32 | Python | `produce_pnr` retained ring -> `step_pad_ring_gen`: assignment/generation/check/BTerm Python consumers; native pad ring belongs to D31 |
 | D35 | OpenROAD | `produce_pnr` placement chain |
-| D37 | OpenROAD | `_native18` spare-cell state operation |
+| D37 | OpenROAD | `produce_pnr` spare-cell state chain |
 | D38 | OpenROAD | `_cts_split`: CTS + STAMidPNR |
 | D39 | OpenROAD | `_cts_split`: post-CTS timing repair + STAMidPNR |
 | D40 | OpenROAD | route/fill chain |

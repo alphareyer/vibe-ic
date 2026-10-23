@@ -2,14 +2,14 @@
 import flow109
 
 
-def digital_plan():
+def digital_plan(*, requires_spice=False):
     features = next(p['features'] for p in flow109.load_registry()['reference_profiles']
                     if p['name'] == 'Small digital IC without DFT')
-    return flow109.resolve_plan(features)
+    return flow109.resolve_plan({**features, 'requires_spice': requires_spice})
 
 
 def uses(step):
-    return {u['tool_id']: u for u in flow109.resolve_step(digital_plan(), step)['tool_uses']}
+    return {u['tool_id']: u for u in flow109.resolve_step(digital_plan(requires_spice=step == 'D54'), step)['tool_uses']}
 
 
 def test_spice_path_requires_extraction_sta_and_simulation_independently():
