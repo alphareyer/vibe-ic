@@ -164,8 +164,7 @@ def execute(project, context):
         record['canonical_current_pass'] = versions.latest_pass(project, '9')
         record['source_sha256'] = prepared['sources']
         record['inputs'] = prepared['inputs']
-        if input_census(project) != prepared['inputs']:
-            raise AdmissionRefusal('D22_INPUT_CHANGED', 'source changed during synthesis')
+        _before(project, context, prepared)
         # Native execution is established by the existing receipt, not by
         # merely entering a function which can refuse before tool launch.
         folder = project / 'phase3/librelane/02-yosys-synthesis'

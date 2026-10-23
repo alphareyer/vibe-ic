@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -74,7 +75,23 @@ def case(project):
 
 def test_actual_default_synthesis_uses_native_librelane_and_complete_existing_consumer(tmp_path,monkeypatch):
     context,path=case(tmp_path);monkeypatch.setenv('VIBEIC_FLOW109_CONTEXT',str(path))
-    result=frontend.execute(tmp_path,context)
+    driver = '''import sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+import librelane_contract as contract
+contract.local_image_attestation()
+# Explicit test route: real native tools in this inspected current image.
+contract._ce.no_container_route=lambda: True
+import vibe_ic_one_shot_runner as runner
+sys.argv=['vibe_ic_one_shot_runner.py',sys.argv[2],'--flow','109','--flow109-manifest',str(Path(sys.argv[2])/'manifest.json'),'--entry-step','D22','--exit-step','D22','--route','ic','--no-dashboard']
+raise SystemExit(runner._main())
+'''
+    launched=subprocess.run([sys.executable,'-c',driver,str(frontend.HERE),str(tmp_path)],capture_output=True,text=True)
+    assert launched.returncode==0,launched.stdout+launched.stderr
+    result=json.loads((tmp_path/'reports/flow109/components/D22.json').read_text())
+    if os.environ.get('VIBEIC_FLOW109_EVIDENCE_DIR'):
+        target=Path(os.environ['VIBEIC_FLOW109_EVIDENCE_DIR'])/'native-positive'
+        shutil.copytree(tmp_path,target)
     print('D22_NATIVE_RESULT', json.dumps({k:result.get(k) for k in ('component_status','reason','producer','native_operations','native_receipt','detail')}, default=str))
     assert result['native_started'], result
     assert 'Yosys.Synthesis' in result['native_operations']
@@ -124,3 +141,22 @@ def test_native_synthesis_does_not_promote_missing_area_authority(tmp_path,monke
     assert result['producer']['status']=='NOT_MEASURED',result
     assert result['component_status']=='NOT_MEASURED',result
     assert result['canonical_current_pass'] is None
+
+
+def test_actual_native_contract_refuses_qualification_drift_after_owner_preparation(tmp_path,monkeypatch):
+    context,path=case(tmp_path);monkeypatch.setenv('VIBEIC_FLOW109_CONTEXT',str(path))
+    import librelane_contract as contract
+    original=contract.resolve_step_config
+    seen=[]
+    def invalidate_at_native_boundary(*args,**kwargs):
+        file=tmp_path/'qualifications.json';record=json.loads(file.read_text())
+        record['uses'][0]['status']='UNSUPPORTED';file.write_text(json.dumps(record))
+        seen.append('boundary')
+        return original(*args,**kwargs)
+    monkeypatch.setattr(contract,'resolve_step_config',invalidate_at_native_boundary)
+    result=frontend.execute(tmp_path,context)
+    assert seen==['boundary']
+    assert result['component_status']!='PASS'
+    assert result['native_started'] is False,result
+    assert result['native_operations']==[]
+    assert not (tmp_path/'phase3/librelane/02-yosys-synthesis/state_out.json').exists()
