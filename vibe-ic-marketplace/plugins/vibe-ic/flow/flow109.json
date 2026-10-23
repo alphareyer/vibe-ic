@@ -2244,7 +2244,7 @@
             "checker.base_A1.analog_specs_with_units",
             "producer.base_A1.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "IMPLEMENTED_A01_RUNTIME_BINDING"
         },
         {
           "id": "base_A1.required_measurements",
@@ -2264,10 +2264,10 @@
             "checker.base_A1.required_measurements",
             "producer.base_A1.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "IMPLEMENTED_A01_RUNTIME_BINDING"
         }
       ],
-      "metric_acceptance_status": "UNIMPLEMENTED",
+      "metric_acceptance_status": "IMPLEMENTED_A01_RUNTIME",
       "gate_layer_ids": [
         "G1",
         "G2",
@@ -2318,17 +2318,41 @@
         {
           "id": "default",
           "select_when": "otherwise",
-          "provider": "other",
+          "provider": "vibeic",
           "tools": "ngspice batch model/device smoke suite",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "pdk_analog_completeness_check",
+            "ngspice_model_device_smoke",
+            "flow109_analog_model_check"
+          ],
+          "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
+          "dispatch": {
+            "adapter": "flow109_analog_a02",
+            "native_step_id": "flow109.A02",
+            "engine_families": [
+              "ngspice"
+            ],
+            "engine_executables": {
+              "ngspice": "ngspice"
+            },
+            "engine_steps": {
+              "ngspice": [
+                "pdk_analog_completeness_check",
+                "ngspice_model_device_smoke",
+                "flow109_analog_model_check"
+              ]
+            },
+            "operation_scope": "declared_analog_model_device_smoke"
+          }
         }
       ],
       "complementary_tools": [],
       "capability_status": "SELECTED_NOT_ROUTE_QUALIFIED",
       "availability_status": "NOT_INVENTORIED_THIS_UPDATE",
       "source_components": [
-        "pdk_analog_completeness_check"
+        "pdk_analog_completeness_check",
+        "flow109_analog_a02",
+        "flow109_analog_model_check"
       ],
       "obligations": [
         {
@@ -2708,8 +2732,28 @@
           "select_when": "otherwise",
           "provider": "vibeic",
           "tools": "Python topology/budget emitter + Codex IC Expert",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "analog_a2_topology_emit",
+            "analog_a2_topology_select_check"
+          ],
+          "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
+          "dispatch": {
+            "adapter": "flow109_analog_a04",
+            "native_step_id": "flow109.A04",
+            "engine_families": [
+              "python3"
+            ],
+            "engine_executables": {
+              "python3": "python3"
+            },
+            "engine_steps": {
+              "python3": [
+                "analog_a2_topology_emit",
+                "analog_a2_topology_select_check"
+              ]
+            },
+            "operation_scope": "source_authorized_analog_topology"
+          }
         }
       ],
       "complementary_tools": [],
@@ -2819,8 +2863,34 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "ngspice + Python SPICE netlist emitter",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "analog_a3_netlist_emit",
+            "analog_a3_netlist_gen_check",
+            "ngspice_operating_point"
+          ],
+          "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
+          "dispatch": {
+            "adapter": "flow109_analog_a05",
+            "native_step_id": "flow109.A05",
+            "engine_families": [
+              "python3",
+              "ngspice"
+            ],
+            "engine_executables": {
+              "python3": "python3",
+              "ngspice": "ngspice"
+            },
+            "engine_steps": {
+              "python3": [
+                "analog_a3_netlist_emit",
+                "analog_a3_netlist_gen_check"
+              ],
+              "ngspice": [
+                "ngspice_operating_point"
+              ]
+            },
+            "operation_scope": "expert_sized_netlist_native_operating_point"
+          }
         }
       ],
       "complementary_tools": [],

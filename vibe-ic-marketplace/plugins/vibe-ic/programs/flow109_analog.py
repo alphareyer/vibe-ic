@@ -20,6 +20,7 @@ if str(HERE) not in sys.path:
 from _atomic_artefact import write_json
 from flow109 import Flow109Error, validate_execution_context
 from flow109_admission import AdmissionRefusal, require_launch_admission
+from flow109_metric_acceptance import accept_a01
 
 PRODUCER = HERE / 'analog_a1_spec_emit.py'
 CONSUMER = HERE / 'analog_a1_spec_extract_check.py'
@@ -39,6 +40,7 @@ def operation_sources():
     from execution_provider_catalog import source_closure
     paths = source_closure({PRODUCER, CONSUMER})
     paths.update((Path(__file__), HERE / 'flow109.py', HERE / 'flow109_admission.py',
+                  HERE / 'flow109_metric_acceptance.py',
                   HERE / 'execution_provider_catalog.py'))
     return {str(path.relative_to(HERE.parent)): _sha(path) for path in sorted(paths)}
 
@@ -175,5 +177,13 @@ def execute(project, context):
     for path in (producer_report, attempt / 'producer.log'):
         if path.is_file():
             record['outputs'][str(path.relative_to(project))] = _sha(path)
+    # Row-level metric acceptance is separate from G1-G9 and whole-flow
+    # acceptance.  The latter deliberately remains NOT_MEASURED here.
+    require_launch_admission(project, 'A1', {'flow109_context': context})
+    record['metric_acceptance'] = accept_a01(project, context, record)
+    record['metric_acceptance_status'] = record['metric_acceptance']['status']
+    record['unimplemented_obligations'] = [
+        item['id'] for item in record['metric_acceptance']['obligations']
+        if item['status'] == 'UNIMPLEMENTED_METRIC_BINDING']
     write_json(attempt / 'component.json', record)
     return record
