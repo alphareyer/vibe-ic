@@ -4,7 +4,7 @@
   "revision": "109-default-implementation-1",
   "legacy_source_commit": "65f066d3bc2564d813fa49c6ac4ff7f6881d8450",
   "legacy_flow_path": "flow/phase1_phase2_phase3.yaml",
-  "legacy_flow_sha256": "4460b433cb67db1ab9c3da9b80216a93826366f6d18a668b57df6c99f6d20bd9",
+  "legacy_flow_sha256": "64e98f40af3cb810ae7ab1ad6df7d8c18e9debd0e07313767e4edfcee63c1bb6",
   "identity_policy": "Stable proposal IDs and unfiltered positions; legacy receipts remain in their original namespace. Native component PASS is never promoted to new metric acceptance.",
   "phases": [
     {
@@ -8438,7 +8438,25 @@
           "native_steps": [
             "OpenROAD.CheckSDCFiles"
           ],
-          "execution_status": "UNIMPLEMENTED"
+          "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
+          "dispatch": {
+            "adapter": "flow109_clock_plan",
+            "native_step_id": "flow109.D34",
+            "admission_policy": "source_owned_existing_native",
+            "engine_families": [
+              "openroad"
+            ],
+            "acceptance_scope": "existing_native_component_only",
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "openroad": [
+                "OpenROAD.CheckSDCFiles"
+              ]
+            }
+          }
         }
       ],
       "complementary_tools": [],
@@ -9996,6 +10014,8 @@
           "dispatch": {
             "adapter": "flow109_final_lec",
             "native_step_id": "flow109.D44",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
             "flow109_metrics_status": "IMPLEMENTED_D44_RUNTIME",
             "engine_families": [
               "python3",
@@ -10155,6 +10175,8 @@
           "dispatch": {
             "adapter": "flow109_netlist_cdc",
             "native_step_id": "flow109.D45",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
             "flow109_metrics_status": "IMPLEMENTED_D45_COMPONENT_RUNTIME",
             "engine_families": [
               "python3",
@@ -11699,6 +11721,8 @@
           "dispatch": {
             "adapter": "flow109_functional_activity",
             "native_step_id": "flow109.D55",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
             "engine_families": [
               "iverilog",
               "vvp",
@@ -11723,7 +11747,8 @@
             }
           },
           "limitations": [
-            "Only full-window single-rail scalar-port adopted-netlist GLS activity is implemented.",
+            "Complete vector-power component acceptance remains limited to full-window single-rail scalar-port adopted-netlist GLS activity.",
+            "Source-declared self-checking scenarios may publish a partial adopted-netlist GLS activity freeze while absent rail/load authority keeps the component NOT_MEASURED.",
             "Pinned LibreLane STAPostPNR has no VCD/SAIF configuration; direct OpenSTA is an activity-consumption complement, not final post-route power adoption.",
             "Mapped RTL VCD/SAIF, analog current traces and qualified upper bounds remain UNIMPLEMENTED.",
             "Complete D55 metric acceptance remains NOT_MEASURED."
@@ -14380,7 +14405,9 @@
             "engine_families": ["openroad"],
             "engine_executables": {"openroad": "openroad"},
             "engine_steps": {"openroad": ["OpenROAD.RCX"]},
-            "acceptance_scope": "final_filled_odb_rcx_component_only",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "component_scope": "final_filled_odb_rcx_component_only",
             "flow109_metrics_status": "UNIMPLEMENTED",
             "native_required_outputs": ["native RCX state and receipt", "per-ruleset SPEF consumer census"]
           }
@@ -14615,7 +14642,9 @@
             "engine_families": ["openroad"],
             "engine_executables": {"openroad": "openroad"},
             "engine_steps": {"openroad": ["OpenROAD.STAPostPNR"]},
-            "acceptance_scope": "final_sta_native_component_only",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "component_scope": "final_sta_native_component_only",
             "flow109_metrics_status": "UNIMPLEMENTED",
             "native_required_outputs": ["all declared STAPostPNR corners and SDFs"]
           }
@@ -14965,7 +14994,9 @@
                 "Vibeic.GateLevelSim.simulate_sdf"
               ]
             },
-            "acceptance_scope": "final_sdf_gls_component_only",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "component_scope": "final_sdf_gls_component_only",
             "flow109_metrics_status": "UNIMPLEMENTED",
             "native_required_outputs": [
               "gls_runs.json",
@@ -16456,8 +16487,37 @@
           "select_when": "otherwise",
           "provider": "vibeic",
           "tools": "Python selected-obligation/measurement aggregator",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "signoff_metrics_aggregate"
+          ],
+          "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
+          "dispatch": {
+            "kind": "canonical_backend_window",
+            "native_step_id": "37.4",
+            "producer": "execution_backend_producers.py:produce",
+            "producer_sites": [
+              "phase3_one_shot_runner.py:step_signoff_metrics_aggregate",
+              "signoff_metrics_aggregate.py:main"
+            ],
+            "engine_families": [
+              "python3"
+            ],
+            "consumer": "execution_backend_gates.py:evaluate",
+            "native_required_outputs": [
+              "phase3/final/metrics.json",
+              "reports/phase3/signoff_metrics_aggregate.json"
+            ],
+            "acceptance_scope": "existing_native_component_only",
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "python3": "python3"
+            },
+            "engine_steps": {
+              "python3": [
+                "signoff_metrics_aggregate"
+              ]
+            }
+          }
         }
       ],
       "complementary_tools": [],
@@ -16553,8 +16613,39 @@
           "select_when": "otherwise",
           "provider": "vibeic",
           "tools": "Python compliance/adopted-evidence checker",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "flow_compliance_check",
+            "tapeout_signoff_check"
+          ],
+          "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
+          "dispatch": {
+            "kind": "canonical_backend_window",
+            "native_step_id": "36",
+            "producer": "execution_backend_producers.py:produce",
+            "producer_sites": [
+              "phase3_one_shot_runner.py:_default_checklist_layout_receipts",
+              "flow_compliance_check.py:check_step"
+            ],
+            "engine_families": [
+              "python3"
+            ],
+            "consumer": "execution_backend_gates.py:evaluate",
+            "native_required_outputs": [
+              "reports/phase3/gates/stage3_compliance.json",
+              "reports/phase3/layout_receipts.json"
+            ],
+            "acceptance_scope": "existing_native_component_only",
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "python3": "python3"
+            },
+            "engine_steps": {
+              "python3": [
+                "flow_compliance_check",
+                "tapeout_signoff_check"
+              ]
+            }
+          }
         }
       ],
       "complementary_tools": [],
@@ -16776,8 +16867,47 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "wafer.space/provider precheck + Python design precheck",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "tapeout_precheck",
+            "ic_release_docs_gen"
+          ],
+          "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
+          "dispatch": {
+            "kind": "canonical_backend_window",
+            "native_step_id": "37.5ic",
+            "producer": "execution_backend_producers.py:produce",
+            "producer_sites": [
+              "phase3_one_shot_runner.py:_default_ic_release_docs",
+              "phase3_one_shot_runner.py:step_ic_release_docs_gen",
+              "tapeout_precheck.py:main"
+            ],
+            "engine_families": [
+              "python3"
+            ],
+            "consumer": "execution_backend_gates.py:evaluate",
+            "native_required_outputs": [
+              "reports/phase3/tapeout_precheck.json",
+              "reports/phase3/general_precheck.json",
+              "reports/phase3/shuttle_precheck.json",
+              "reports/phase3/docs/SIGNOFF_*.html",
+              "reports/phase3/docs/BRIEF_*.html",
+              "phase3/stage4/documentation/ic/*/PRELIMINARY_DATASHEET.md",
+              "phase3/stage4/documentation/ic/*/RELEASE_NOTES.md",
+              "phase3/stage4/documentation/ic/*/ERRATA.md",
+              "phase3/stage4/documentation/ic/*/documentation_manifest.yaml"
+            ],
+            "acceptance_scope": "existing_native_component_only",
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "python3": "python3"
+            },
+            "engine_steps": {
+              "python3": [
+                "tapeout_precheck",
+                "ic_release_docs_gen"
+              ]
+            }
+          }
         }
       ],
       "complementary_tools": [],
@@ -16887,8 +17017,43 @@
           "select_when": "otherwise",
           "provider": "vibeic",
           "tools": "Python release/benchmark packager and publisher",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "foundry_handoff_pack_gen",
+            "tapeout_checklist_gen"
+          ],
+          "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
+          "dispatch": {
+            "kind": "canonical_backend_window",
+            "native_step_id": "38",
+            "producer": "execution_backend_producers.py:produce",
+            "producer_sites": [
+              "phase3_one_shot_runner.py:_default_final_handoff",
+              "phase3_one_shot_runner.py:run_pre_audit_producers"
+            ],
+            "engine_families": [
+              "python3"
+            ],
+            "consumer": "execution_backend_gates.py:evaluate",
+            "native_required_outputs": [
+              "reports/audit/tapeout_checklist.json",
+              "phase3/stage4/foundry_handoff/release_manifest.json",
+              "phase3/stage4/foundry_handoff/mask_spec.json",
+              "phase3/stage4/foundry_handoff/wat_plan.json",
+              "phase3/stage4/foundry_handoff/scribe_line_layout.gds OR phase3/stage4/foundry_handoff/scribe_line_layout.PENDING_FOUNDRY.txt",
+              "phase3/stage4/foundry_handoff/corner_test_vectors.json"
+            ],
+            "acceptance_scope": "existing_native_component_only",
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "engine_executables": {
+              "python3": "python3"
+            },
+            "engine_steps": {
+              "python3": [
+                "foundry_handoff_pack_gen",
+                "tapeout_checklist_gen"
+              ]
+            }
+          }
         }
       ],
       "complementary_tools": [],

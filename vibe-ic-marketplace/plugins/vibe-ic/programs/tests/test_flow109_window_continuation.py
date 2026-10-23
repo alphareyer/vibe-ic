@@ -30,9 +30,12 @@ def _artifact(project, relative, content):
     return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
-def _window_fixture(project, monkeypatch):
+def _window_fixture(project, monkeypatch, entry="D31", exit_="D32"):
     plan = flow109.resolve_plan(_profile())
-    rows = [flow109.resolve_step(plan, step) for step in ("D31", "D32")]
+    selected = [row["id"] for row in plan["rows"]]
+    first, last = selected.index(entry), selected.index(exit_)
+    rows = [flow109.resolve_step(plan, step)
+            for step in selected[first:last + 1]]
     runtime, records, executables = [], [], {}
     for row in rows:
         for number, use in enumerate(row["tool_uses"]):
@@ -59,7 +62,7 @@ def _window_fixture(project, monkeypatch):
     registry = {"schema": "vibeic.flow109.qualifications.v1", "uses": records}
     (project / "qualifications.json").write_text(json.dumps(registry))
     context = flow109.execution_context(
-        plan, "D31", "D32", runtime_tool_uses=runtime,
+        plan, entry, exit_, runtime_tool_uses=runtime,
         qualification_registry="qualifications.json")
     return plan, context, registry
 
@@ -80,10 +83,81 @@ def test_selected_window_resolves_real_canonical_backend_order():
     assert "D31" in window["resolved_rows"][1]["acceptance_deps"]
 
 
-def test_window_refuses_unimplemented_required_row_and_reverse():
+@pytest.mark.parametrize(
+    "entry,exit_,native,components",
+    [
+        ("D77", "D78", ("37.4", "36"),
+         (("signoff_metrics_aggregate",),
+          ("flow_compliance_check", "tapeout_signoff_check"))),
+        ("D80", "D81", ("37.5ic", "38"),
+         (("tapeout_precheck", "ic_release_docs_gen"),
+          ("foundry_handoff_pack_gen", "tapeout_checklist_gen"))),
+    ],
+)
+def test_delivery_windows_route_to_existing_default_consumers(
+        entry, exit_, native, components):
+    import phase3_one_shot_runner as phase3
     plan = flow109.resolve_plan(_profile())
-    with pytest.raises(flow109.Flow109Error, match=r"PRODUCER_UNIMPLEMENTED.*D34"):
-        flow109.resolve_execution_window(plan, "D31", "D35")
+    window = flow109.resolve_execution_window(plan, entry, exit_)
+    assert window["dispatch_kind"] == "canonical_backend_window"
+    assert (window["native_entry_step"], window["native_exit_step"]) == native
+    assert phase3._phase3_window_steps(*native) == list(native)
+    assert phase3._phase3_window_sites(*native) == ["default_backend"]
+    assert [row["id"] for row in window["resolved_rows"]] == [entry, exit_]
+    for row, expected in zip(window["resolved_rows"], components):
+        profile = row["profile"]
+        assert tuple(profile["native_steps"]) == expected
+        assert profile["dispatch"]["consumer"] == "execution_backend_gates.py:evaluate"
+        assert profile["dispatch"]["acceptance_scope"] == "existing_native_component_only"
+        assert profile["dispatch"]["flow109_metrics_status"] == "UNIMPLEMENTED"
+
+
+@pytest.mark.parametrize(
+    "entry,exit_,native_statuses,expected,missing_reason",
+    [
+        ("D77", "D78", ("PASS", "FAIL"), "FAIL", ""),
+        ("D80", "D81", ("PASS",), "NOT_MEASURED", "canonical row result absent"),
+    ],
+)
+def test_delivery_receipts_preserve_failure_and_missing_release_evidence(
+        tmp_path, monkeypatch, entry, exit_, native_statuses, expected,
+        missing_reason):
+    _, context, _ = _window_fixture(tmp_path, monkeypatch, entry, exit_)
+    request = tmp_path / "context.json"
+    request.write_text(json.dumps(context))
+    attempt = flow109._new_attempt(tmp_path, context)
+    monkeypatch.setenv(flow109.CONTEXT_ENV, str(request))
+    monkeypatch.setenv(flow109.ATTEMPT_ENV, str(attempt))
+    native = (context["native_entry_step"], context["native_exit_step"])
+    canonical = []
+    for index, status in enumerate(native_statuses):
+        receipt = (tmp_path / "reports/phase3/default_steps" / native[index]
+                   / "backend_result.json")
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text(json.dumps({"verdict": status}))
+        canonical.append({"status": status, "detail": "native-" + status,
+                          "extras": {"step_id": native[index]}})
+    result = flow109.finish_native_window(
+        tmp_path, {"bounded": True, "steps": [
+            {"extras": {"canonical_steps": canonical}}]})
+    assert result["component_status"] == expected
+    assert result["delivery_accepted"] is False
+    assert result["flow109_acceptance"] == "NOT_MEASURED"
+    if missing_reason:
+        assert missing_reason in result["components"][-1]["reason"]
+
+
+def test_clock_planning_row_reaches_registered_special_native_owner_and_reverse():
+    plan = flow109.resolve_plan(_profile())
+    resolved = flow109.resolve_execution_window(plan, "D34", "D34")
+    assert resolved["resolved_row"]["id"] == "D34"
+    assert resolved["native_step_id"] == "flow109.D34"
+    context = flow109.execution_context(plan, "D34", "D34")
+    admission_record = flow109.source_owned_native_admission(context)
+    assert admission_record["status"] == "NOT_APPLICABLE"
+    assert admission_record["qualification_status"] == "NOT_CLAIMED"
+    assert admission_record["native_step_id"] == "flow109.D34"
+    assert admission_record["flow109_acceptance"] == "NOT_MEASURED"
     with pytest.raises(flow109.Flow109Error, match="WINDOW_REVERSED"):
         flow109.resolve_execution_window(plan, "D32", "D31")
 
@@ -91,6 +165,9 @@ def test_window_refuses_unimplemented_required_row_and_reverse():
 def test_front_door_preserves_one_row_and_translates_bounded_window(tmp_path, monkeypatch):
     import _delivery_route
     assert _delivery_route.admit(tmp_path, "ic") is None
+    for name in (flow109.CONTEXT_ENV, flow109.ATTEMPT_ENV):
+        monkeypatch.setenv(name, os.environ.get(name, ""))
+        monkeypatch.delenv(name)
     plan, context, registry = _window_fixture(tmp_path, monkeypatch)
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({
@@ -106,6 +183,33 @@ def test_front_door_preserves_one_row_and_translates_bounded_window(tmp_path, mo
     immutable = Path(os.environ[flow109.ATTEMPT_ENV]) / "request.json"
     assert immutable.is_file()
     assert json.loads(immutable.read_text())["flow109_acceptance"] == "NOT_MEASURED"
+
+
+def test_source_owned_default_window_uses_existing_launch_admission_without_registry(
+        tmp_path, monkeypatch):
+    import _delivery_route
+    assert _delivery_route.admit(tmp_path, "ic") is None
+    for name in (flow109.CONTEXT_ENV, flow109.ATTEMPT_ENV):
+        monkeypatch.setenv(name, os.environ.get(name, ""))
+        monkeypatch.delenv(name)
+    plan = flow109.resolve_plan(_profile())
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"features": plan["features"]}))
+    args = SimpleNamespace(flow="109", flow109_manifest=manifest,
+                           flow109_plan_only=False, execution_mode="default",
+                           entry_step="D31", exit_step="D32")
+    assert flow109.prepare_front_door(args, tmp_path) is None
+    assert (args.entry_step, args.exit_step) == ("15", "15.5ic")
+    admission_record = json.loads(
+        (tmp_path / "reports/flow109/admission.json").read_text())
+    assert admission_record["status"] == "NOT_APPLICABLE"
+    assert admission_record["qualification_status"] == "NOT_CLAIMED"
+    assert admission_record["native_step_id"] == ["15", "15.5ic"]
+    request = json.loads(Path(os.environ[flow109.CONTEXT_ENV]).read_text())
+    assert admission.require_launch_admission(
+        tmp_path, "15", {"flow109_context": request})["status"] == "NOT_APPLICABLE"
+    assert admission.require_launch_admission(
+        tmp_path, "15.5ic", {"flow109_context": request})["status"] == "NOT_APPLICABLE"
 
 
 def test_canonical_window_missing_inventory_refuses_before_attempt(tmp_path):

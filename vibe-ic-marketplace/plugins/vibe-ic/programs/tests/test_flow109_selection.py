@@ -230,6 +230,162 @@ def test_owner_route_uses_native_span_without_generic_qualification_registry(
     assert request["context_sha256"] == route["context_sha256"]
 
 
+@pytest.mark.parametrize("step, adapter, component_scope", [
+    ("D45", "flow109_netlist_cdc", None),
+    ("D69", "flow109_final_extract", "final_filled_odb_rcx_component_only"),
+    ("D70", "flow109_final_electrical", "final_sta_native_component_only"),
+    ("D71", "flow109_final_gls", "final_sdf_gls_component_only"),
+])
+def test_registered_native_component_route_does_not_claim_generic_qualification(
+        step, adapter, component_scope):
+    plan = flow109.resolve_plan(profile())
+    row = flow109.resolve_step(plan, step)
+    dispatch = flow109.source_owned_native_dispatch(row)
+    assert dispatch["adapter"] == adapter
+    assert dispatch.get("component_scope") == component_scope
+    context = flow109.execution_context(plan, step, step)
+    admission = flow109.source_owned_native_admission(context)
+    assert admission["admitted"] is True
+    assert admission["status"] == "NOT_APPLICABLE"
+    assert admission["qualification_status"] == "NOT_CLAIMED"
+    assert admission["flow109_acceptance"] == "NOT_MEASURED"
+    claimed = flow109.execution_context(plan, step, step, runtime_tool_uses=[],
+                                        qualification_registry="input/qualifications.json")
+    assert flow109.source_owned_native_admission(claimed) is None
+    assert flow109.source_owned_native_dispatch(flow109.resolve_step(plan, "D62")) is None
+
+
+def test_final_native_window_reaches_real_missing_input_refusal_without_generic_claim(
+        tmp_path, monkeypatch):
+    import _delivery_route
+    import flow109_admission
+
+    assert _delivery_route.admit(tmp_path, "ic") is None
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"features": profile()}))
+    for name in (flow109.CONTEXT_ENV, flow109.ATTEMPT_ENV):
+        monkeypatch.setenv(name, __import__("os").environ.get(name, ""))
+        monkeypatch.delenv(name)
+    monkeypatch.setattr(
+        flow109_admission, "require_admission",
+        lambda *a, **k: pytest.fail("generic qualification must remain unclaimed"))
+    args = SimpleNamespace(flow="109", flow109_manifest=manifest,
+                           flow109_plan_only=False, execution_mode="default",
+                           entry_step="D69", exit_step="D71")
+
+    assert flow109.prepare_front_door(args, tmp_path) == 2
+    d69 = json.loads((tmp_path / "reports/flow109/components/D69.json").read_text())
+    assert d69["component_status"] == "NOT_MEASURED"
+    assert d69["reason"] == "D69_REQUIRED_INPUT_ABSENT"
+    assert d69["native_started"] is False
+    assert not (tmp_path / "reports/flow109/components/D70.json").exists()
+    assert not (tmp_path / "reports/flow109/components/D71.json").exists()
+    attempt = next((tmp_path / "reports/flow109/attempts").iterdir())
+    terminal = json.loads((attempt / "result.json").read_text())
+    assert terminal["component_status"] == "NOT_MEASURED"
+    assert terminal["flow109_acceptance"] == "NOT_MEASURED"
+    assert terminal["whole_flow_acceptance"] == "NOT_MEASURED"
+
+
+@pytest.mark.parametrize("step, reason", [
+    ("D69", "D69_REQUIRED_INPUT_ABSENT"),
+    ("D70", "D70_REQUIRED_INPUT_ABSENT"),
+    ("D71", "D71_INPUT_INVALID"),
+])
+def test_final_native_single_entry_reaches_own_missing_input_refusal(
+        tmp_path, monkeypatch, step, reason):
+    import _delivery_route
+    import flow109_admission
+
+    assert _delivery_route.admit(tmp_path, "ic") is None
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"features": profile()}))
+    for name in (flow109.CONTEXT_ENV, flow109.ATTEMPT_ENV):
+        monkeypatch.setenv(name, __import__("os").environ.get(name, ""))
+        monkeypatch.delenv(name)
+    monkeypatch.setattr(
+        flow109_admission, "require_admission",
+        lambda *a, **k: pytest.fail("generic qualification must remain unclaimed"))
+    args = SimpleNamespace(flow="109", flow109_manifest=manifest,
+                           flow109_plan_only=False, execution_mode="default",
+                           entry_step=step, exit_step=step)
+
+    assert flow109.prepare_front_door(args, tmp_path) == 2
+    component = json.loads(
+        (tmp_path / f"reports/flow109/components/{step}.json").read_text())
+    assert component["component_status"] == "NOT_MEASURED"
+    assert component["reason"] == reason
+    assert component["native_started"] is False
+    admission_record = json.loads(
+        (tmp_path / "reports/flow109/admission.json").read_text())
+    assert admission_record["status"] == "NOT_APPLICABLE"
+    assert admission_record["qualification_status"] == "NOT_CLAIMED"
+    assert admission_record["flow109_acceptance"] == "NOT_MEASURED"
+
+
+def test_unregistered_adapter_cannot_select_existing_native_policy():
+    row = flow109.resolve_step(flow109.resolve_plan(profile()), "D45")
+    row["profile"]["dispatch"]["adapter"] = "caller_plugin"
+    with pytest.raises(flow109.Flow109Error, match="FLOW109_NATIVE_OWNER_INVALID"):
+        flow109.source_owned_native_dispatch(row)
+
+
+def test_forged_backend_owner_cannot_select_existing_native_policy():
+    row = flow109.resolve_step(flow109.resolve_plan(profile()), "D31")
+    row["profile"]["dispatch"]["native_step_id"] = "caller-step"
+    with pytest.raises(flow109.Flow109Error, match="FLOW109_NATIVE_OWNER_INVALID"):
+        flow109.source_owned_native_dispatch(row)
+
+
+def test_d34_clock_planning_registers_real_special_owner_and_strict_claim_path():
+    import flow109_clock_plan
+
+    plan = flow109.resolve_plan(profile())
+    row = flow109.resolve_step(plan, "D34")
+    dispatch = flow109.source_owned_native_dispatch(row)
+    assert dispatch["native_step_id"] == "flow109.D34"
+    assert dispatch["adapter"] == "flow109_clock_plan"
+    assert dispatch["admission_policy"] == "source_owned_existing_native"
+    assert dispatch["acceptance_scope"] == "existing_native_component_only"
+    assert flow109_clock_plan._consumer_row()["id"] == 16
+    sources = flow109_clock_plan.operation_sources()
+    assert "programs/phase3_one_shot_runner.py" in sources
+    assert "programs/_physical_current.py" in sources
+    assert "programs/clock_plan_check.py" in sources
+    context = flow109.execution_context(plan, "D34", "D34")
+    admission = flow109.source_owned_native_admission(context)
+    assert admission["status"] == "NOT_APPLICABLE"
+    assert admission["qualification_status"] == "NOT_CLAIMED"
+    assert admission["flow109_acceptance"] == "NOT_MEASURED"
+    claimed = flow109.execution_context(
+        plan, "D34", "D34", runtime_tool_uses=[],
+        qualification_registry="input/qualifications.json")
+    assert flow109.source_owned_native_admission(claimed) is None
+
+    row["profile"]["dispatch"]["adapter"] = "flow109_missing_clock_owner"
+    with pytest.raises(flow109.Flow109Error, match="FLOW109_NATIVE_OWNER_INVALID"):
+        flow109.source_owned_native_dispatch(row)
+
+
+def test_d44_retained_lec_registers_only_existing_native_admission_fields():
+    plan = flow109.resolve_plan(profile())
+    row = flow109.resolve_step(plan, "D44")
+    dispatch = flow109.source_owned_native_dispatch(row)
+    assert dispatch["adapter"] == "flow109_final_lec"
+    assert dispatch["native_step_id"] == "flow109.D44"
+    assert dispatch["admission_policy"] == "source_owned_existing_native"
+    assert dispatch["acceptance_scope"] == "existing_native_component_only"
+    context = flow109.execution_context(plan, "D44", "D44")
+    admission = flow109.source_owned_native_admission(context)
+    assert admission["status"] == "NOT_APPLICABLE"
+    assert admission["qualification_status"] == "NOT_CLAIMED"
+    assert admission["flow109_acceptance"] == "NOT_MEASURED"
+
+    del row["profile"]["dispatch"]["acceptance_scope"]
+    with pytest.raises(flow109.Flow109Error, match="FLOW109_NATIVE_OWNER_INVALID"):
+        flow109.source_owned_native_dispatch(row)
+
+
 def test_owner_route_refuses_wrong_owner_and_unknown_native_mapping():
     plan = flow109.resolve_plan(profile())
     row = next(item for item in plan["rows"] if item["id"] == "D12")

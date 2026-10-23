@@ -46,6 +46,38 @@ def _native_refusal_status(code):
     return 'FAIL' if code == 'LL_STEP_FAILED' else 'NOT_MEASURED'
 
 
+def _fill_extraction_scope(d62):
+    """Derive the selected RCX scope; no caller field can upgrade it.
+
+    OpenROAD density_fill stores neutral metal as OpenDB dbFill objects.  The
+    selected OpenRCX implementation extracts routed-net wire/via shapes; an ODB
+    filename shared with D62 is therefore not proof that those dbFill objects
+    affected the produced parasitics.
+    """
+    measurements = d62.get('measurements') or {}
+    count = measurements.get('fill_count_after')
+    if not isinstance(count, int):
+        reason = 'D69_NATIVE_FILL_CENSUS_ABSENT'
+        count = None
+    elif count <= 0:
+        reason = 'D69_FINAL_ODB_HAS_NO_NATIVE_DENSITY_FILL'
+    else:
+        reason = 'D69_SELECTED_RCX_DBFILL_RESPONSE_NOT_PROVEN'
+    return {'status': 'NOT_MEASURED', 'reason': reason,
+            'native_fill_count': count,
+            'basis': 'source-owned D62 census and selected OpenRCX data model'}
+
+
+def _component_scope(record, d62):
+    fill_scope = _fill_extraction_scope(d62)
+    if (record.get('reason') != 'D69_ROUTED_ODB_RCX_MEASURED'
+            or record.get('component_scope') != 'engineering_routed_odb_parasitics'
+            or record.get('fill_sensitive_parasitics') != fill_scope):
+        raise AdmissionRefusal('D69_COMPONENT_SCOPE_CHANGED',
+                               'routed-ODB component cannot claim fill-sensitive parasitics')
+    return fill_scope
+
+
 def operation_sources():
     paths = (Path(__file__), Path(signoff.__file__), Path(files.__file__),
              Path(density.__file__), Path(__file__).with_name('spef_extraction_check.py'))
@@ -70,6 +102,8 @@ def execute(project, context):
         bridge = files.validate_bridge(project, manifest.get('stream_bridge'))
         if bridge['d62_receipt'] != manifest['d62_receipt'] or bridge['odb'] != d62['odb']:
             raise AdmissionRefusal('D69_FINAL_GEOMETRY_MISMATCH', 'stream-out and D62 ODB differ')
+        fill_scope = _fill_extraction_scope(d62)
+        result['fill_sensitive_parasitics'] = fill_scope
         native = manifest.get('librelane') or {}
         if set(native) != {'image', 'pdk_root', 'pdk'}:
             raise AdmissionRefusal('D69_NATIVE_CONFIGURATION_ABSENT', 'image/pdk_root/pdk required')
@@ -93,8 +127,9 @@ def execute(project, context):
         if bad:
             raise AdmissionRefusal('D69_SPEF_CONSUMER_FAILED', str(bad), status='FAIL')
         final_spefs = {c: files._record(project, Path(p)) for c, p in run['spef'].items()}
-        result.update(component_status='PASS', reason='D69_FINAL_FILLED_ODB_RCX_MEASURED',
+        result.update(component_status='PASS', reason='D69_ROUTED_ODB_RCX_MEASURED',
                       producer='flow109_final_extract',
+                      component_scope='engineering_routed_odb_parasitics',
                       d62_receipt=manifest['d62_receipt'], stream_bridge=manifest['stream_bridge'],
                       adopted_views=views, inputs=basis,
                       operation_sources=sources,
@@ -130,6 +165,7 @@ def validate_final_parasitics(project, receipt_ref):
             or record.get('final_geometry') != bridge['odb']
             or record.get('final_spefs') != record.get('spefs')):
         raise AdmissionRefusal('D69_FINAL_OUTPUT_BINDING_MISMATCH', 'final ODB/SPEF aliases drifted')
+    fill_scope = _component_scope(record, d62)
     for path, sha in record['inputs'].items():
         if not Path(path).is_file() or _sha(path) != sha:
             raise AdmissionRefusal('D69_INPUT_CHANGED', path)
@@ -144,4 +180,5 @@ def validate_final_parasitics(project, receipt_ref):
             'adopted_views': record['adopted_views'],
             'spefs': record['spefs'], 'final_geometry': record['final_geometry'],
             'final_spefs': record['final_spefs'], 'parasitic_receipt': receipt_ref,
+            'fill_sensitive_parasitics': fill_scope,
             'component_parasitics_current': True, 'flow109_acceptance': 'NOT_MEASURED'}

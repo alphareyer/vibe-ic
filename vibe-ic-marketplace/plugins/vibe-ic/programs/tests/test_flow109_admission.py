@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -108,6 +109,92 @@ def test_scope_cannot_qualify_cts_with_version_probe(tmp_path, monkeypatch):
 def test_legacy_launch_has_no_new_requirement(tmp_path, monkeypatch):
     monkeypatch.delenv('VIBEIC_FLOW109_CONTEXT', raising=False)
     assert admission.require_launch_admission(tmp_path, '19', {}) is None
+
+
+@pytest.mark.parametrize('step', ['D45', 'D69', 'D70', 'D71'])
+def test_registered_default_native_owner_does_not_claim_generic_qualification(tmp_path, step):
+    features = next(p['features'] for p in flow109.load_registry()['reference_profiles']
+                    if p['name'] == 'Small digital IC without DFT')
+    context = flow109.execution_context(flow109.resolve_plan(features), step, step)
+    result = admission.require_launch_admission(tmp_path, 'flow109.' + step,
+                                                {'flow109_context': context})
+    assert result['admitted'] is True
+    assert result['status'] == 'NOT_APPLICABLE'
+    assert result['qualification_status'] == 'NOT_CLAIMED'
+    assert result['flow109_acceptance'] == 'NOT_MEASURED'
+
+
+def test_registered_default_backend_owner_uses_existing_native_admission(
+        tmp_path, monkeypatch):
+    import _delivery_route
+    assert _delivery_route.admit(tmp_path, 'ic') is None
+    # prepare_front_door installs these directly.  Record their absent state
+    # with monkeypatch so this test cannot leave D31 authority in a later
+    # ordinary producer running in the same pytest worker.
+    for name in (flow109.CONTEXT_ENV, flow109.ATTEMPT_ENV):
+        monkeypatch.setenv(name, os.environ.get(name, ''))
+        monkeypatch.delenv(name)
+    features = next(p['features'] for p in flow109.load_registry()['reference_profiles']
+                    if p['name'] == 'Small digital IC without DFT')
+    plan = flow109.resolve_plan(features)
+    context = flow109.execution_context(plan, 'D31', 'D31')
+    dispatch = flow109.source_owned_native_dispatch(context['resolved_row'])
+    assert dispatch['kind'] == 'canonical_backend_window'
+    assert dispatch['native_step_id'] == '15'
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text(json.dumps({'features': plan['features']}))
+    args = SimpleNamespace(flow='109', flow109_manifest=manifest,
+                           flow109_plan_only=False, execution_mode='default',
+                           entry_step='D31', exit_step='D31')
+    assert flow109.prepare_front_door(args, tmp_path) is None
+    assert (args.entry_step, args.exit_step) == ('15', '15')
+    recorded = json.loads(
+        (tmp_path / 'reports/flow109/admission.json').read_text())
+    assert recorded['qualification_status'] == 'NOT_CLAIMED'
+    result = admission.require_launch_admission(
+        tmp_path, '15', {'flow109_context': context})
+    assert result['admitted'] is True
+    assert result['status'] == 'NOT_APPLICABLE'
+    assert result['qualification_status'] == 'NOT_CLAIMED'
+    assert result['acceptance_scope'] == 'existing_native_component_only'
+    assert result['flow109_acceptance'] == 'NOT_MEASURED'
+
+
+def test_explicit_backend_qualification_claim_stays_strict(tmp_path):
+    features = next(p['features'] for p in flow109.load_registry()['reference_profiles']
+                    if p['name'] == 'Small digital IC without DFT')
+    context = flow109.execution_context(
+        flow109.resolve_plan(features), 'D31', 'D31',
+        runtime_tool_uses=[], qualification_registry='missing.json')
+    with pytest.raises(admission.AdmissionRefusal,
+                       match='QUALIFICATION_RUNTIME_ABSENT'):
+        admission.require_launch_admission(
+            tmp_path, '15', {'flow109_context': context})
+
+
+@pytest.mark.parametrize('step', ['D45', 'D69', 'D70', 'D71'])
+def test_caller_cannot_forge_registered_native_owner(tmp_path, step):
+    features = next(p['features'] for p in flow109.load_registry()['reference_profiles']
+                    if p['name'] == 'Small digital IC without DFT')
+    context = flow109.execution_context(flow109.resolve_plan(features), step, step)
+    context['resolved_row']['profile']['dispatch']['adapter'] = 'caller_plugin'
+    rebind(context)
+    with pytest.raises(admission.AdmissionRefusal, match='FLOW109_CONTEXT_INVALID'):
+        admission.require_launch_admission(tmp_path, 'flow109.' + step,
+                                           {'flow109_context': context})
+
+
+@pytest.mark.parametrize('step', ['D69', 'D70', 'D71'])
+def test_final_native_explicit_qualification_claim_stays_strict(tmp_path, step):
+    features = next(p['features'] for p in flow109.load_registry()['reference_profiles']
+                    if p['name'] == 'Small digital IC without DFT')
+    context = flow109.execution_context(
+        flow109.resolve_plan(features), step, step, runtime_tool_uses=[],
+        qualification_registry='missing-qualifications.json')
+    with pytest.raises(admission.AdmissionRefusal,
+                       match='QUALIFICATION_RUNTIME_ABSENT'):
+        admission.require_launch_admission(
+            tmp_path, 'flow109.' + step, {'flow109_context': context})
 
 
 def test_worker_refuses_before_native_producer(tmp_path, monkeypatch):

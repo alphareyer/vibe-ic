@@ -45,7 +45,12 @@ def resolver(monkeypatch):
     calls = []
 
     def run(cmd, **_kw):
-        design_json, requested, root = Path(cmd[-5]), Path(cmd[-4]), Path(cmd[-3])
+        boundary = cmd.index('--entrypoint')
+        assert cmd[boundary + 1] == 'python3'
+        assert cmd[boundary + 3] == '-c'
+        formal = cmd[boundary + 5:]
+        assert len(formal) == 6, formal
+        design_json, requested, root = map(Path, formal[:3])
         d = json.loads(design_json.read_text())
         calls.append(d)
         for s in json.loads(requested.read_text()):
@@ -121,6 +126,59 @@ def test_a_declared_die_the_runner_disagrees_with_is_refused(tmp_path, resolver)
     with pytest.raises(contract.Refusal, match='LL_DERIVED_DIE_CONFLICT'):
         resolve(tmp_path, p)
     assert resolver == []
+
+
+def test_a_source_bound_provisional_slot_may_replace_its_declared_target(
+        tmp_path):
+    old = [0, 0, 2000, 2100]
+    new = [0, 0, 2600, 2300]
+    p = chip(tmp_path, die_area_um=old)
+    source = p / 'input/submission_template_source/larger.json'
+    put(source, '{"SLOT":"larger","DIE_AREA":"0 0 2600 2300"}\n')
+    source_hash = contract.digest(source)
+    slot = {"slot": "larger", "source_relpath": "larger.json",
+            "source_sha256": source_hash,
+            "die_area": {"rect": [str(v) for v in new]}}
+    put(p / 'input/submission_template/slots/larger.yaml', json.dumps(slot))
+    record = dict(RECORD, die_rect_um=new,
+                  die_intent={
+                      "intent": "DERIVED_PROVISIONAL_SLOT",
+                      "declared_slot": "small",
+                      "declared_die_um": "2000x2100",
+                      "resolved_slot": "larger",
+                      "resolved_die_um": "2600x2300",
+                      "source_relpath": "larger.json",
+                      "source_sha256": source_hash})
+    put(p / DD.FLOORPLAN_RECTANGLES_REL, record)
+    config = {'DIE_AREA': old}
+    sources = {'DIE_AREA': 'input declaration'}
+    contract._apply_runner_floorplan(p, config, sources, CHAIN)
+    assert config['DIE_AREA'] == new
+    assert 'source-bound provisional slot small -> larger' in sources['DIE_AREA']
+
+
+def test_a_provisional_slot_with_stale_source_keeps_conflict_fail_closed(
+        tmp_path):
+    old = [0, 0, 2000, 2100]
+    new = [0, 0, 2600, 2300]
+    p = chip(tmp_path, die_area_um=old)
+    source = p / 'input/submission_template_source/larger.json'
+    put(source, 'changed\n')
+    slot = {"slot": "larger", "source_relpath": "larger.json",
+            "source_sha256": "0" * 64, "die_area": {"rect": new}}
+    put(p / 'input/submission_template/slots/larger.yaml', json.dumps(slot))
+    record = dict(RECORD, die_rect_um=new,
+                  die_intent={"intent": "DERIVED_PROVISIONAL_SLOT",
+                              "declared_slot": "small",
+                              "declared_die_um": "2000x2100",
+                              "resolved_slot": "larger",
+                              "resolved_die_um": "2600x2300",
+                              "source_relpath": "larger.json",
+                              "source_sha256": "0" * 64})
+    put(p / DD.FLOORPLAN_RECTANGLES_REL, record)
+    with pytest.raises(contract.Refusal, match='LL_DERIVED_DIE_CONFLICT'):
+        contract._apply_runner_floorplan(
+            p, {'DIE_AREA': old}, {'DIE_AREA': 'input declaration'}, CHAIN)
 
 
 def test_a_declared_relative_sizing_cannot_carry_a_pad_ring(tmp_path, resolver):

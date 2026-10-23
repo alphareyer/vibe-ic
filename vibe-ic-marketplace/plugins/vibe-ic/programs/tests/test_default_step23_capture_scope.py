@@ -4,7 +4,9 @@ These are scheduling/consumer controls with native instruments controlled.
 They establish neither a native DRV measurement nor whole-IC acceptance.
 """
 import copy
+import importlib
 import shlex
+import sys
 
 import pytest
 
@@ -77,17 +79,30 @@ def test_default_current_consumer_does_not_borrow_final_drv_credit(tmp_path, mon
         status = 'PASS' if point is None else 'NOT_MEASURED'
         return compliance.StepResult(id=row['id'], name=row['name'], stage=row['stage'], status=status)
 
-    monkeypatch.setattr(compliance, 'check_step', controlled_in_flow_instrument)
+    # Reproduce the full-process alias shape: a package-qualified alias retains
+    # the module this test imported, while the evaluator's top-level dynamic
+    # import resolves a distinct current module instance. Patch that actual
+    # consumer, not this stale alias and not either evaluator.
+    monkeypatch.setitem(sys.modules, 'programs.flow_compliance_check', compliance)
+    monkeypatch.delitem(sys.modules, 'flow_compliance_check')
+    consumed_compliance = importlib.import_module('flow_compliance_check')
+    assert consumed_compliance is not compliance
+    assert sys.modules['programs.flow_compliance_check'] is compliance
+    assert worker.evaluate is gates.evaluate
+    monkeypatch.setattr(consumed_compliance, 'check_step', controlled_in_flow_instrument)
     monkeypatch.setattr(worker, '_current_step_producer_authority',
                         lambda *a, **k: (True, '', 'PASS'))
     monkeypatch.setattr(worker, 'resolve_contract', lambda *a: ({}, []))
     result = worker.execute_current_step(tmp_path, step_id='23', producer={'verdict': 'PASS'})
     assert result['verdict'] == 'PASS', result
     assert observed == [None]
+    assert worker.evaluate is gates.evaluate
+    assert sys.modules['flow_compliance_check'] is consumed_compliance
     assert worker.ROWS['23']['canonical_row'] == canonical
     final = gates.evaluate(tmp_path, final_row)
     assert observed == [None, 'post_stream']
     assert final['status'] == 'NOT_MEASURED'
+    assert worker.evaluate is gates.evaluate
     assert worker.ROWS['31']['canonical_row'] == final_row
 
 
