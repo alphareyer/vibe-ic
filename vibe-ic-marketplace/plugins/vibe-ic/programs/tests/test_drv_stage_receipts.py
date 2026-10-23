@@ -1228,6 +1228,8 @@ def test_retained_backend_synth_census_mounts_staged_pdk(tmp_path, monkeypatch, 
 
     def transport(argv, *, supervised, log):
         calls.append(argv)
+        flags = backend._dmem.docker_memory_flags()
+        assert flags and argv[2:2 + len(flags)] == flags
         assert supervised is True
         assert log == evidence / 'census.log'
         assert argv[argv.index('test-image') + 1] == '--skip'

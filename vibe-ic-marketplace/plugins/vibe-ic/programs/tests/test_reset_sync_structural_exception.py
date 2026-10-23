@@ -238,3 +238,20 @@ def test_synth_admits_valid_source_before_controller_dispatch(tmp_path, monkeypa
     assert len(calls) == 1
     assert result.status == 'NOT_MEASURED'
     assert not (project / 'reports/phase2/reset_source_admission.json').exists()
+
+
+@pytest.mark.parametrize('expression,active_low', [('!RESET_B', True), ('RESET_B', False)])
+def test_liberty_boolean_negation_is_material_to_structural_proof(expression, active_low):
+    liberty = LIBERTY.replace('!RESET_B', expression)
+    assert S._liberty_ffs(liberty)['DFFRN']['clear'] == expression
+    policies = copy.deepcopy(_policies())
+    for policy in policies['rst_n']:
+        policy['polarity'] = 'active_low' if active_low else 'active_high'
+    _, report = S.build_structural_exception(NETLIST, liberty, policies)
+    assert report['verdict'] == 'PASS'
+    for policy in policies['rst_n']:
+        policy['polarity'] = 'active_high' if active_low else 'active_low'
+    with pytest.raises(S.StructuralResetRefusal):
+        S.build_structural_exception(NETLIST, liberty, policies)
+    with pytest.raises(S.StructuralResetRefusal):
+        S.build_structural_exception(NETLIST, LIBERTY.replace('!RESET_B', 'RESET_B & ENABLE'), policies)

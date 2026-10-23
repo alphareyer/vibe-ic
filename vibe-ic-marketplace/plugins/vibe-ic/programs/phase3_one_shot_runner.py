@@ -79796,33 +79796,9 @@ def _default_ic_release_docs(project: Path, top: str, pdk: PdkConfig,
             'canonical_consumer': consumer}
 
 
-def _refresh_default_step32_sdc(project: Path, top: str, pdk: PdkConfig,
-                                container: str) -> Path:
-    """Derive the analysis SDC before Step32 binds its inputs.
-
-    Re-authoring constraints is not synthesis or physical implementation. Keep
-    both prior copies, including Step7 files its canonical author may refresh,
-    so an interrupted or refused derivation cannot erase the earlier evidence.
-    """
-    import tempfile
-    constraints = _pl.constraints_dir(project)
-    pnr = _pl.pnr_dir(project)
-    archive_root = project / 'reports/phase3/sdc_resume_history'
-    archive_root.mkdir(parents=True, exist_ok=True)
-    archive = Path(tempfile.mkdtemp(
-        prefix=time.strftime('%Y%m%dT%H%M%SZ-', time.gmtime()), dir=archive_root))
-    previous = [pnr / 'constraint.sdc', pnr / 'constraint_sdc_provenance.json',
-                constraints / _ppa_timing.ASIC_SDC_RECORD,
-                *sorted(constraints.glob('*.sdc'))]
-    for source in previous:
-        if source.is_file():
-            destination = archive / source.relative_to(project)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-    record = _ppa_timing.asic_sdc_for_pnr(
-        sys.modules[__name__], project, top, pdk, container)
-    return _ppa_timing.publish_pnr_sdc(record, pnr)
-
+# Compatibility entry point; implementation belongs to the timing module.
+_refresh_default_step32_sdc = functools.partial(
+    _ppa_timing.refresh_default_step32_sdc, sys.modules[__name__])
 
 def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
                       step_ids: List[str], *, die_um: Optional[str] = None,

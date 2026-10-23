@@ -18,6 +18,7 @@ from types import SimpleNamespace
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _docker_memory as _dmem
 import execution_backend_snapshot as snap
 import execution_modes as em
 from librelane_contract import Refusal as LibrelaneRefusal
@@ -461,7 +462,7 @@ def _retained_synth_census(project, params, R, ll, pdk):
     def execute(cmd, marker, log_path):
         network, command = ll.native_tool_command(image, shlex.split(cmd))
         result = ll.run_container([
-            'docker', 'run', '--rm', '--network', network,
+            'docker', 'run', *_dmem.docker_memory_flags(), '--rm', '--network', network,
             '-v', f'{project}:{project}', '-v', f'{root}:{root}:ro',
             image, '--skip', *command], supervised=True, log=log_path)
         return result.returncode, result.stdout, result.stderr

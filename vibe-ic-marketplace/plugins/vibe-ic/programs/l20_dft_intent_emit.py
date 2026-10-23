@@ -9,11 +9,16 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from l_doc_consumer_contract import input_doc_texts, project_relative_source
 import l_doc_generator_stamp as _stamp
+from _atomic_artefact import write_json
 
 TOOL = "l20_dft_intent_emit"
 _L20 = "L20_DFT_SCAN_TOPOLOGY.json"
@@ -143,7 +148,7 @@ def main(argv=None) -> int:
     rep = run(args.project.resolve(), dry_run=args.dry_run)
     out = json.dumps(rep, indent=2, ensure_ascii=False)
     if args.json:
-        Path(args.json).write_text(out + "\n")
+        write_json(Path(args.json), rep)
     print(out)
     return 1 if rep["status"] in {"ERROR", "REFUSED"} else 0
 
