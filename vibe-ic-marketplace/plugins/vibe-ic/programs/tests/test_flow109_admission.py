@@ -153,6 +153,7 @@ def test_real_worker_process_refuses_without_launching_native(tmp_path, monkeypa
     """Actual worker process, no producer/evaluator mocks; not positive qualification."""
     import subprocess
     import sys
+    monkeypatch.setenv('VIBEIC_EXECUTION_BINDING', json.dumps({'required_gates': []}))
     inputs = tmp_path / 'inputs'
     project = inputs / 'project'
     project.mkdir(parents=True)

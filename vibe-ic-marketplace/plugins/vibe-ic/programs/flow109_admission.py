@@ -1,6 +1,9 @@
 """Per-use qualification consumed immediately before flow109 native dispatch.
 
 Legacy execution has no flow109 context and retains its existing contract.
+The registry is a pre-established, reviewed qualification input. This reader
+checks its bindings; it does not assess reference measurements or grant tool
+qualification. Arbitrary hashed files are not native qualification evidence.
 This reader never creates qualification records or updates historical receipts.
 """
 from __future__ import annotations
@@ -10,6 +13,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
+
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 
 
 class AdmissionRefusal(ValueError):
@@ -107,7 +115,7 @@ def require_admission(project, context):
         for artifact in evidence:
             _artifact(project, artifact, use_id=uid)
         qualified.append({'use_id': uid, 'qualification_sha256': actual['qualification_sha256']})
-    return {'status': 'PASS', 'reason': 'TOOL_USES_QUALIFIED', 'uses': qualified,
+    return {'status': 'PASS', 'reason': 'QUALIFICATION_BINDINGS_CURRENT', 'uses': qualified,
             'context_sha256': context['context_sha256'], 'native_started': False}
 
 
