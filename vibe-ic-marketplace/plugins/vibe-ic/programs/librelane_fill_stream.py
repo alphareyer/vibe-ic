@@ -176,6 +176,8 @@ def _native_fill_child(bare, filled, parsed, mapping):
         if added:
             raise Refusal('FILL_STREAM_HIERARCHY_CHANGED', 'unexpected new cells without fills')
         return set(), {}
+    if not added:
+        raise Refusal('FILL_STREAM_FILL_GEOMETRY_MISMATCH', 'declared fill cell missing')
     if len(added) != 1:
         raise Refusal('FILL_STREAM_NATIVE_CELL_UNSUPPORTED', str(sorted(added)))
     name = next(iter(added))
