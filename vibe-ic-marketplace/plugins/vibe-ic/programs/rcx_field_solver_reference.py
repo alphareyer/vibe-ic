@@ -307,18 +307,25 @@ def solve_final_gds(gds: Path, cell: str, kpex_pdk: str, out: Path, *,
     the electrical roles to collect_final_gds(). Existing measure() is unchanged.
     """
     import importlib.metadata
+    import os
     import shutil
     from klayout_pex.pdk_config import PDK
+    from klayout_pex.env import Env, EnvVar
     gds, out = Path(gds).resolve(), Path(out).resolve()
     if not gds.is_file() or not cell or tolerance <= 0 or threads < 1:
         raise Refusal('RCX_FINAL_INPUT_INVALID', 'GDS, cell and positive solver settings required')
     config = PDK(kpex_pdk).config
     model = Path(config.tech_pb_json_path)
     deck = Path(config.pex_lvs_script_path)
-    kpex, solver = shutil.which('kpex'), shutil.which('FasterCap')
-    if not kpex or not solver:
-        raise Refusal('RCX_FINAL_TOOL_ABSENT', 'KPEX and FasterCap required')
-    sources = [gds, model, deck, *sorted(deck.parent.rglob('*.lvs')), Path(kpex), Path(solver)]
+    native_env = Env.from_os_environ()
+    kpex = shutil.which('kpex')
+    solver = shutil.which(native_env[EnvVar.FASTERCAP_EXE])
+    klayout = shutil.which(native_env[EnvVar.KLAYOUT_EXE])
+    if not kpex or not solver or not klayout:
+        raise Refusal('RCX_FINAL_TOOL_ABSENT', 'KPEX, selected FasterCap and KLayout required')
+    launch_env = {**os.environ, str(EnvVar.FASTERCAP_EXE): solver,
+                  str(EnvVar.KLAYOUT_EXE): klayout}
+    sources = [gds, model, deck, *sorted(deck.parent.rglob('*.lvs')), Path(kpex), Path(solver), Path(klayout)]
     inputs = {str(p): digest(p) for p in sources}
     out.mkdir(parents=True, exist_ok=False)
     work = out / 'work'; work.mkdir()
@@ -326,7 +333,7 @@ def solve_final_gds(gds: Path, cell: str, kpex_pdk: str, out: Path, *,
             '--fastercap', '--mode', 'CC', '--threads', str(threads),
             '--tolerance', str(tolerance), '--out_dir', str(out / 'kpex')]
     with (out / 'native.log').open('w') as log:
-        process = subprocess.run(argv, cwd=work, stdout=log, stderr=subprocess.STDOUT)
+        process = subprocess.run(argv, cwd=work, env=launch_env, stdout=log, stderr=subprocess.STDOUT)
     if process.returncode != 0:
         raise Refusal('RCX_FINAL_NATIVE_FAILED', f'rc={process.returncode}; {out}/native.log')
     if any(not Path(p).is_file() or digest(Path(p)) != sha for p, sha in inputs.items()):

@@ -79,3 +79,13 @@ def test_consumer_refuses_matrix_omitting_extracted_conductor(tmp_path):
     (tmp_path/'matrix_receipt.json').write_text(json.dumps(record))
     with pytest.raises(Refusal,match='RCX_FINAL_CONDUCTOR_ABSENT'):
         ref.collect_final_gds(tmp_path,victim='VICTIM',grounded=['GROUND'],floating=['FILL'])
+
+
+def test_missing_configured_solver_refuses_before_native(tmp_path,monkeypatch):
+    gds=tmp_path/'unit.gds';gds.write_bytes(b'unit input, no native call')
+    monkeypatch.setenv('KPEX_FASTERCAP_EXE',str(tmp_path/'missing-solver'))
+    launches=[]
+    monkeypatch.setattr(ref.subprocess,'run',lambda *a,**kw:launches.append(a))
+    with pytest.raises(Refusal,match='RCX_FINAL_TOOL_ABSENT'):
+        ref.solve_final_gds(gds,'UNIT','gf180mcuD',tmp_path/'out')
+    assert launches==[]
