@@ -683,11 +683,19 @@ class TestEmitterPass:
         manifest fallback (or constant-folding it) is caught."""
         rd = _build_rundir(
             tmp_path, rtl=_RTL_LSB, l2=_L2_SIGNED,
-            oracle_manifest={"framing": "self-calibrated offset=7"})
+            oracle_manifest={"calibrated_latency": 7,
+                             "calibrated_latency_origin": "settled_edge_offset"})
         r = _run_emitter(rd)
         assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
         d = json.loads((rd / "plugin_output" / "declaration.json").read_text())
         assert d == {**_DECL_LSB, "latency_cycles": 7}
+
+    def test_untyped_legacy_framing_is_not_measured_latency(self, tmp_path):
+        rd = _build_rundir(
+            tmp_path, rtl=_RTL_LSB, l2=_L2_SIGNED,
+            oracle_manifest={"framing": "self-calibrated offset=7"})
+        result = _run_emitter(rd)
+        _assert_ran_and_refused(result, rd, field_keys=("latency_cycles",))
 
     def test_verify_scale_wins_over_gls(self, tmp_path):
         """Documented precedence: _verify_scale first, GLS second.  Both

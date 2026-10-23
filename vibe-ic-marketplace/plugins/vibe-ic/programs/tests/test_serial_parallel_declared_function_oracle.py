@@ -212,6 +212,21 @@ def test_testbench_gen_emits_per_case_golden_oracles(tmp_path):
     cases["test_cases"][-1]["expected"] = (
         "During reset, reset release, and reset assertion during calculation")
     l10.write_text(json.dumps(cases))
+    # The fixed-schedule producer now consumes explicit clock/reset/rearm
+    # contracts. These describe the existing generic DUT; no alignment search
+    # or replacement DUT is introduced to satisfy this positive author test.
+    l9 = proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    interface = json.loads(l9.read_text())
+    interface.update(clocks=[{"name": "clk", "period_ns": 10}],
+                     reset_domains=[{"name": "rst", "sync": "synchronous",
+                                     "polarity": "active_high"}])
+    l9.write_text(json.dumps(interface))
+    declaration = proj / "plugin_output/declaration.json"
+    choices = json.loads(declaration.read_text())
+    choices.update(transaction_rearm="clocked_reset", rearm_reset_cycles=1,
+                   parallel_hold="through_final_product_bit",
+                   latency_cycles_origin="pre_nba_sample_offset")
+    declaration.write_text(json.dumps(choices))
     report: dict = {}
     n = tbg.emit_unit_tbs(proj, "serpar_mul", kind="functional_vector",
                           report=report)
@@ -221,8 +236,18 @@ def test_testbench_gen_emits_per_case_golden_oracles(tmp_path):
                  "corner_operand", "reset"):
         txt = (tb_dir / f"{case}.v").read_text()
         assert "VIBEIC_TB_ORACLE: NONE" not in txt, case  # real oracle
-        assert "ORACLE_TB_DONE" in txt, case              # golden compare
-    assert sorted(report.get("golden_oracle_cases", [])) == sorted(
+        # Reset/operand scenario producers publish typed comparison counts;
+        # the older generic oracle publishes ORACLE_TB_DONE. Each case must
+        # still contain a real independent golden comparator and fatal error.
+        if case in report.get("arithmetic_scenario_cases", []):
+            plan = aotg._scenario_header(tb_dir / f"{case}.v")
+            assert plan and plan["comparisons"] > 0, case
+            assert "ARITH_SCENARIO_DONE" in txt and "$fatal" in txt, case
+            assert "!==" in txt and "gv" in txt, case
+        else:
+            assert "ORACLE_TB_DONE" in txt, case
+    assert sorted(report.get("golden_oracle_cases", []) +
+                  report.get("arithmetic_scenario_cases", [])) == sorted(
         ["random_multiplication_functional_equivalence", "corner_operand",
          "reset"])
 
