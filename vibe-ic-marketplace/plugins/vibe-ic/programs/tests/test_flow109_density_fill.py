@@ -134,3 +134,16 @@ def test_handoff_refuses_changed_receipt_before_reading_output(tmp_path):
     receipt.write_text('{"component_status":"PASS"}')
     with pytest.raises(AdmissionRefusal, match='receipt.json'):
         fill.validate_filled_odb(tmp_path, reference)
+
+
+def test_native_call_keeps_owner_supervision_and_nonzero_failure(tmp_path, monkeypatch):
+    calls = []
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 9)
+    monkeypatch.setattr(fill.subprocess, 'run', run)
+    with pytest.raises(AdmissionRefusal, match='rc=9'):
+        fill._call(Path('/actual/openroad'), {}, tmp_path / 'native.log')
+    assert len(calls) == 1
+    assert calls[0][0] == ['/actual/openroad', '-no_init', '-exit', str(fill.SCRIPT)]
+    assert 'timeout' not in calls[0][1]

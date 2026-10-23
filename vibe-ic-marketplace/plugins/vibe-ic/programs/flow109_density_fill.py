@@ -110,7 +110,7 @@ def _call(executable, env, log):
     with log.open('w') as stream:
         result = subprocess.run([str(executable), '-no_init', '-exit', str(SCRIPT)],
                                 env={**os.environ, **env}, stdout=stream,
-                                stderr=subprocess.STDOUT, timeout=120)
+                                stderr=subprocess.STDOUT)
     if result.returncode:
         raise AdmissionRefusal('D62_NATIVE_FAILED', f'rc={result.returncode}; {log}', status='FAIL')
 
