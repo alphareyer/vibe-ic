@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
+import flow109
 import flow109_metric_acceptance as metrics
+import flow109_analog as analog
 from programs.tests._hostpaths import require_repo
 from test_flow109_analog_a01 import _case, _run
 
@@ -122,6 +124,25 @@ def test_actual_measurement_that_misses_approved_required_set_is_fail(tmp_path):
     report, _ = _report_and_context(tmp_path)
     assert report["metric_acceptance_status"] == "FAIL"
     assert report["metric_acceptance"]["delivery_blocked"] is True
+
+
+def test_actual_unmeasured_a01_component_with_valid_authority_stays_typed(tmp_path, monkeypatch):
+    manifest, _ = _case(tmp_path, specs=False)
+    _authority(tmp_path, "analog_specs_with_units", ("block", "name", "unit"),
+               [{"block": "regulator_alpha", "name": "vout", "unit": "V"}])
+    _authority(tmp_path, "required_measurements", ("block", "name"),
+               [{"block": "regulator_alpha", "name": "vout"}])
+    context = flow109.execution_context(flow109.resolve_plan(manifest["features"]), "A01", "A01",
+        runtime_tool_uses=manifest["runtime_tool_uses"], qualification_registry="qualifications.json")
+    # Obtain the real producer/gate NOT_MEASURED component without recursively
+    # invoking the metric layer we are about to exercise.
+    monkeypatch.setattr(analog, "accept_a01", lambda *_: {
+        "status": "NOT_MEASURED", "obligations": []})
+    component = analog.execute(tmp_path, context)
+    assert component["component_status"] == "NOT_MEASURED"
+    result = metrics.accept_a01(tmp_path, context, component)
+    assert result["status"] == "NOT_MEASURED"
+    assert {item["status"] for item in result["obligations"]} == {"NOT_MEASURED"}
 
 
 @pytest.mark.parametrize("damage, reason", [

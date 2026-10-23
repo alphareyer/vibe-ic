@@ -379,10 +379,11 @@ def accept_a01(project: Path, context: Mapping[str, Any],
         try:
             authority, _ = _approved_authority(project, binding["authority"], binding["item_fields"])
             measured = dict(measured_by_id[oid])
-            measured["identity"] = dict(measured["identity"])
-            measured["identity"]["requirements"] = {
-                "path": authority["path"], "sha256": authority["sha256"],
-                "source": authority["source"]}
+            if measured.get("status") == "MEASURED":
+                measured["identity"] = dict(measured["identity"])
+                measured["identity"]["requirements"] = {
+                    "path": authority["path"], "sha256": authority["sha256"],
+                    "source": authority["source"]}
             status, detail = evaluate_operator(binding["operator"], measured, authority)
             result["obligations"].append({"id": oid, "metric": obligation.get("metric"),
                 "operator": binding["operator"], "status": status, "detail": detail,
