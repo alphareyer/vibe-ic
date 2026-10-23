@@ -11,8 +11,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
+
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _path_layout as PL
 from fault_cut_async_observe import async_pin_and_polarity, parse_instances

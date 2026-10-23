@@ -314,7 +314,9 @@ def test_default_floorplan_records_synthesis_under_the_current_sdc_before_native
     monkeypatch.setattr(runner, "_chip_path_requests_pad_ring", lambda *a: True)
     monkeypatch.setattr(runner, "_prepare_librelane_floorplan_for_route", native)
     with pytest.raises(RuntimeError, match="native floorplan boundary reached"):
-        producers.produce_pnr(tmp_path, {"step_id": "15", "top": "unit", "die_um": "100,100", "util": .2})
+        producers.produce_pnr(tmp_path, {"step_id": "15", "top": "unit",
+            "die_um": "100,100", "util": .2, "pdk_root": str(tmp_path / "pdk"),
+            "image_id": "unit-image"})
 
 
 def test_default_floorplan_closes_pad_record_sdc_cycle_in_one_invocation(
@@ -852,14 +854,157 @@ def test_ultra_signoff_retains_its_existing_dispatch(monkeypatch):
     assert {'DT2', 'DT3'}.issubset(runner._phase3_window_steps('23', '24'))
 
 
-def test_default_retains_the_existing_individual_layout_release_producers(tmp_path, monkeypatch):
+def _full_gds_lvs_transport(monkeypatch, project, pdk, selected, case, calls=None):
+    """Neutral config/process I/O; real bridge, chain, publisher and consumers."""
+    import librelane_contract as lc
+    import librelane_pv_signoff as pv
+    import shutil
+    from test_lvs_report_check import _PRIMARY_MATCH
+    original_run = lc.run_container
+
+    def configs(root, image, name, steps, **kwargs):
+        assert root == project and steps == list(pv.LVS_CHAIN)
+        assert kwargs['overlay']['MAGIC_EXT_USE_GDS'][0] is True
+        assert kwargs['overlay']['MAGIC_EXT_ABSTRACT'][0] is False
+        result = {}
+        active_case = case() if callable(case) else case
+        for step in steps:
+            path = project / 'phase3/librelane/31-lvs-config' / (step + '.json')
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({'meta': {'step': step},
+                'DESIGN_NAME': selected['design'], 'TECH_LEFS': {'nom_*': pdk.tech_lef},
+                'MAGIC_EXT_USE_GDS': True, 'MAGIC_EXT_ABSTRACT': False,
+                'SOURCE_CONTROL_COMPARE_CASE': active_case, 'CELL_LEFS': [pdk.cell_lef]}))
+            views = {'step': step,
+                'inputs': ['gds', 'def'] if step == pv.LVS_CHAIN[0] else ['spice', 'pnl'],
+                'outputs': ['spice'] if step == pv.LVS_CHAIN[0] else []}
+            lc.views_path(path).write_text(json.dumps(views))
+            result[step] = path
+        return result
+
+    def process(argv, **kwargs):
+        if '--id' not in argv:
+            return original_run(argv, **kwargs)
+        step = argv[argv.index('--id') + 1]
+        if step not in pv.LVS_CHAIN:
+            return original_run(argv, **kwargs)
+        active_case = case() if callable(case) else case
+        folder = Path(argv[argv.index('-o') + 1])
+        incoming = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
+        if calls is not None:
+            calls.append({'native_step': step, 'folder': str(folder),
+                          'input_state': incoming, 'command': __import__('shlex').join(argv)})
+        assert Path(incoming['gds']).read_bytes() == selected['gds'].read_bytes()
+        shutil.copyfile(argv[argv.index('-c') + 1], folder / 'config.json')
+        (folder / 'state_in.json').write_text(json.dumps(incoming))
+        outgoing = dict(incoming, metrics=dict(incoming.get('metrics') or {}))
+        outgoing['metrics'].update({key: int(active_case == 'lvs_error' and step == 'Netgen.LVS')
+                                   for key in pv.PRODUCED[step]})
+        if step == 'Magic.SpiceExtraction':
+            spice = folder / 'layout.spice'
+            spice.write_text(f".subckt {selected['design']} a y VDD VSS\nRsignal a y 1\n.ends\n")
+            outgoing['spice'] = str(spice)
+            if active_case != 'missing_feedback':
+                feedback = ('box 0 0 10 10\nfeedback add "Illegal overlap between a and b" pale\n'
+                            if active_case == 'illegal_overlap' else '')
+                (folder / 'feedback.txt').write_text(feedback)
+        else:
+            report = folder / 'reports/lvs.netgen.rpt'
+            report.parent.mkdir(parents=True, exist_ok=True)
+            text = _PRIMARY_MATCH.replace('user_project_wrapper', selected['design'])
+            if active_case == 'lvs_error':
+                text = text.replace('Final result: Circuits match uniquely.',
+                                    'Netlists do not match.\nFinal result: Top level cell failed pin matching.')
+            report.write_text(text)
+        (folder / 'state_out.json').write_text(json.dumps(outgoing))
+        return SimpleNamespace(returncode=0, stdout='SOURCE_CONTROL LibreLane process leaf\n', stderr='')
+
+    monkeypatch.setattr(pv, 'resolve_step_configs', configs)
+    monkeypatch.setattr(lc, 'run_container', process)
+    monkeypatch.setattr(lc, 'image_capability', lambda *a, **k: None)
+
+
+@pytest.mark.parametrize('case', ['current', 'missing_fullgds', 'lvs_error',
+                                 'missing_lvs_inputs', 'wrong_lvs_inputs_hash',
+                                 'missing_feedback', 'illegal_overlap'])
+def test_default_retains_the_existing_individual_layout_release_producers(tmp_path, monkeypatch, case):
     monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'default'})
     assert runner._phase3_window_sites('37', '37') == ['default_backend']
     from execution_provider_catalog import BACKEND_ROWS
     assert '37' in BACKEND_ROWS
     assert runner._phase3_window_sites('31', '31') == ['default_backend']
     import test_default_step31_owner as current31
-    current31.current_window(tmp_path, monkeypatch)
+    import librelane_contract as lc
+    import _physical_current as physical
+    # Reuse the finished-stream owners, not the older bare-GDS fixture. Only
+    # expensive native process leaves are neutral; all current readers remain.
+    identity = lc.local_image_attestation()
+    image = SimpleNamespace(image=identity['image'],
+        receipt=Path(identity['attestation_path']), readonly_attestation=True)
+    project, pdk, selected, calls, attempt = current31._checkpoint31_fixture(
+        tmp_path, monkeypatch, image)
+    attempt['first'] = False
+    _full_gds_lvs_transport(monkeypatch, project, pdk, selected, case)
+    if case in ('missing_lvs_inputs', 'wrong_lvs_inputs_hash'):
+        original_writer = runner._write_lvs_verdict
+
+        def corrupt_after_compare(*args, **kwargs):
+            result = original_writer(*args, **kwargs)
+            path = project / 'reports/phase3/lvs_inputs.json'
+            assert path.is_file(), 'the actual producer must publish compare inputs'
+            if case == 'missing_lvs_inputs':
+                path.unlink()
+            else:
+                value = json.loads(path.read_text())
+                value['schematic_netlist']['sha256'] = '0' * 64
+                path.write_text(json.dumps(value))
+            return result
+
+        monkeypatch.setattr(runner, '_write_lvs_verdict', corrupt_after_compare)
+    if case == 'missing_fullgds':
+        selected['gds'].unlink()
+    retained_channels = {}
+    if case == 'current':
+        import magic_illegal_overlap_check as overlap
+        for name in (*overlap.FEEDBACK_NAMES, *overlap.TRANSCRIPT_NAMES):
+            previous = project / overlap.EXTRACTED_REL / name
+            previous.parent.mkdir(parents=True, exist_ok=True)
+            payload = f'Prior invocation only: {name}\nIllegal overlap between old and old\n'.encode()
+            previous.write_bytes(payload)
+            retained_channels[name] = payload
+    before = {role: selected[role].read_bytes() for role in ('def', 'netlist', 'sdc', 'gds')
+              if selected[role].is_file()}
+    rc, record, retained, row, connectivity = current31._public_native31_window(
+        project, pdk, monkeypatch, case='current', native_processes=calls)
+    if case != 'current':
+        assert rc != 0 and not record['canonical_pass'] and retained is None, record
+        if case == 'lvs_error':
+            assert record['result']['producer_verdict'] == 'FAIL', record
+        return
+    assert rc == 0, record
+    assert record['canonical_pass'] and record['result']['producer_verdict'] == 'PASS'
+    assert record['result']['canonical_step_result']['status'] == 'PASS'
+    assert retained and retained['current_inputs']
+    assert len(row['required_outputs']) == 13
+    assert all((project / name).is_file() for name in row['required_outputs'])
+    assert physical.read_direct_half(project, 'drc')['verdict'] == 'CURRENT'
+    import librelane_signoff_evidence as native_evidence
+    assert native_evidence.obligation(project, 'lvs')['verdict'] == 'PASS'
+    drv = json.loads((project / 'reports/phase3/sta/drv_signoff.json').read_text())
+    assert drv['verdict'] == 'PASS' and drv['capture_point'] == 'post_stream', drv
+    inputs = project / 'reports/phase3/lvs_inputs.json'
+    verdict = json.loads((project / 'reports/phase3/lvs_verdict.json').read_text())
+    assert verdict['lvs_inputs']['sha256'] == current31.sha(inputs)
+    bound = json.loads(inputs.read_text())
+    for role, field in (('def', 'layout_def'), ('netlist', 'schematic_netlist'),
+                        ('gds', 'layout_gds')):
+        assert bound[field]['sha256'] == current31.sha(selected[role])
+    assert connectivity['rc'] == 0, connectivity
+    for name, payload in retained_channels.items():
+        copies = list((project / 'reports/phase3').glob(
+            f'librelane_lvs_reference_*/prior_extraction_channels/{name}'))
+        assert len(copies) == 1 and copies[0].read_bytes() == payload
+    assert all(selected[role].read_bytes() == payload for role, payload in before.items())
     assert runner._phase3_window_sites('37.3', '37.3') == ['default_backend']
     # The legacy individual XOR site belongs to the explicit Ultra context.
     monkeypatch.setattr(execution_policy, 'request', lambda: {'mode': 'ultra'})
@@ -1409,9 +1554,10 @@ def test_default_dfm_produces_its_report_before_its_canonical_consumer(tmp_path,
     monkeypatch.setattr(worker, 'resolve_input_contract', lambda *args: [])
     report = tmp_path / 'reports/phase3/dfm_screen.json'
 
-    def program(project, sid):
+    def program(project, sid, manifest):
         calls.append(('producer', sid))
         assert project == tmp_path and sid == '35'
+        assert isinstance(manifest, dict)
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text('{"verdict":"PASS"}\n')
         return {'verdict': 'PRODUCED'}

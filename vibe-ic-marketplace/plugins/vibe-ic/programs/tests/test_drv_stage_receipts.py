@@ -873,7 +873,7 @@ def test_io_library_cells_without_pad_cell_are_io_class(tmp_path):
 
 
 def _cold_native_synthesis(tmp_path, monkeypatch):
-    """Actual chain/receipt/handoff; only the native process writes are neutral.
+    """Actual chain/receipt/handoff; synthesis mapping is a neutral substitute.
 
     No ABC/EDA/native qualification is claimed by this software fixture.
     Synthesis intentionally precedes the first Phase3 run claim.
@@ -897,6 +897,8 @@ def _cold_native_synthesis(tmp_path, monkeypatch):
     config = put(project / 'phase3/librelane/synthesis_resolved.json', {
         'meta': {'step': 'Yosys.Synthesis'}, 'PDK': 'neutral',
         'DESIGN_NAME': 'core', 'VERILOG_FILES': [str(rtl)],
+        'SYNTH_ELABORATE_ONLY': False, 'SYNTH_CHECKS_ALLOW_TRISTATE': False,
+        'TRISTATE_CELLS': [],
         'SYNTH_TIEHI_CELL': 'TIE_H/Y', 'SYNTH_TIELO_CELL': 'TIE_L/Y'})
     calls = []
     netlist = 'module core(input a, output y);\nBUF_X1 u_buf (.A(a), .Y(y));\nendmodule\n'
@@ -909,6 +911,23 @@ def _cold_native_synthesis(tmp_path, monkeypatch):
         put(folder / 'state_out.json', {'nl': str(raw), 'metrics': {
             'design__instance_unmapped__count': 0, 'synthesis__check_error__count': 0}})
         put(folder / 'reports/stat.json', {'modules': {'\\core': {'num_submodules': 0}}})
+        # Produce both CHECK reports with the installed Yosys, on the actual
+        # neutral input and mapped output. The mapping/ABC envelope remains a
+        # software transport fixture, never a native synthesis qualification.
+        import subprocess
+        cells = folder / 'neutral_cells.v'
+        cells.write_text('module BUF_X1(input A, output Y); assign Y = A; endmodule\n')
+        for name, files in (('pre_synth_chk.rpt', [rtl]),
+                            ('chk.rpt', [cells, raw])):
+            report = folder / 'reports' / name
+            script = '; '.join([
+                'read_verilog ' + ' '.join('"' + str(f) + '"' for f in files),
+                'hierarchy -check -top core', 'proc',
+                'tee -o "' + str(report) + '" check'])
+            checked = subprocess.run(['yosys', '-Q', '-T', '-p', script],
+                                     capture_output=True, text=True)
+            assert checked.returncode == 0, checked.stdout + checked.stderr
+            assert 'Found and reported 0 problems.' in report.read_text()
         temp = folder / '_tmp_yosys-abc-neutral'
         temp.mkdir()
         recipe = temp / 'mapping.abc'
@@ -1228,6 +1247,8 @@ def test_retained_backend_synth_census_mounts_staged_pdk(tmp_path, monkeypatch, 
 
     def transport(argv, *, supervised, log):
         calls.append(argv)
+        flags = backend._dmem.docker_memory_flags()
+        assert flags and argv[2:2 + len(flags)] == flags
         assert supervised is True
         assert log == evidence / 'census.log'
         assert argv[argv.index('test-image') + 1] == '--skip'
@@ -1270,3 +1291,25 @@ def test_bounded_step32_refreshes_retained_census_before_native_consumer(tmp_pat
         'step_id': '32', 'top': 'neutral', 'pdk_root': str(tmp_path), 'image_id': 'test-image'})
     assert calls == ['retained_census', 'step32']
     assert result == {'verdict': 'FAIL', 'detail': 'real design failure'}
+
+
+@pytest.mark.parametrize('damage', ['missing_pre', 'changed_final', 'warning'])
+def test_cold_native_handoff_keeps_critical_check_refusals(tmp_path, monkeypatch, damage):
+    import synth_handoff_netlist_check as handoff
+    import hashlib
+    project, folder, mapped, _, _, _, _ = _cold_native_synthesis(tmp_path, monkeypatch)
+    if damage == 'missing_pre':
+        (folder / 'reports/pre_synth_chk.rpt').unlink()
+    else:
+        target = folder / 'reports/chk.rpt'
+        target.write_text('Warning: Wire core.\\missing is used but has no driver.\n'
+                          'Found and reported 1 problems.\n')
+        if damage == 'warning':
+            # Bind the bad CHECK bytes as if produced by the native transport:
+            # matching hashes must not excuse a genuine measured check failure.
+            receipt = folder / 'vibeic_receipt.json'
+            doc = json.loads(receipt.read_text())
+            doc['sha256']['reports/chk.rpt'] = hashlib.sha256(target.read_bytes()).hexdigest()
+            receipt.write_text(json.dumps(doc))
+    with pytest.raises((ValueError, OSError)):
+        handoff.publish_handoff(project, folder, mapped, 'core')

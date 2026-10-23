@@ -125,6 +125,15 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "reset_sync_structural_exception::_liberty_ffs":
+        "Reads cell/ff groups and quoted Liberty Boolean attributes, not prose. "
+        "Logical negation (!RESET_B) is retained verbatim and interpreted by "
+        "async_pin_and_polarity; the structural consumer rejects a control "
+        "whose actual polarity contradicts the requested reset policy. "
+        "No natural-language denial is a Liberty attribute value. Exercised "
+        "by test_reset_sync_structural_exception::"
+        "test_liberty_boolean_negation_is_material_to_structural_proof, including "
+        "both active polarities and an unsupported compound expression.",
     "arith_oracle_tb_gen::capture_arithmetic_scenario_execution":
         "EXACT NATIVE NUMERIC RECORDS, NOT HUMAN SCENARIO PROSE. The reader "
         "takes its emitted JSON plan header and complete line-anchored "

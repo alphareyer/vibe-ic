@@ -518,9 +518,14 @@ def test_the_gate_is_spawned_inline_and_blocks_before_netgen():
         assert gate_at < body.index(invocation), (
             f"the gate must run BEFORE {invocation!r} — a compare over an "
             f"undecided netlist is not evidence about the design")
-    helper = src[src.index("def _run_illegal_overlap_gate("):]
-    assert "magic_illegal_overlap_check.py" in helper[:1600]
-    assert "subprocess.run(" in helper[:1600]
+    import ast
+    function = next(node for node in ast.parse(src).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "_run_illegal_overlap_gate")
+    helper = ast.get_source_segment(src, function)
+    assert "magic_illegal_overlap_check.py" in helper
+    assert "subprocess.run(" in helper
+    assert "_verify_runtime_command(cmd)" in helper
+    assert "timeout=_ILLEGAL_OVERLAP_GATE_TIMEOUT" in helper
 
 
 def test_the_gate_declares_the_enforcement_it_is_wired_for():

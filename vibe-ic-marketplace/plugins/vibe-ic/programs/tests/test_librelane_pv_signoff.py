@@ -407,11 +407,22 @@ def test_dual_mode_needs_both_halves_clean(tmp_path, runner, monkeypatch,
     assert (row.extras["dual_direct"], row.extras["dual_librelane"]) == (direct, tool)
 
 
-def _published_half(tmp_path, runner, monkeypatch, half, record, files):
+def _published_half(tmp_path, runner, monkeypatch, half, record, files, *, extraction=True):
     project = tmp_path / "p"
     for path, text in files.items():
         (project / path).parent.mkdir(parents=True, exist_ok=True)
         (project / path).write_text(text)
+    if half == "lvs" and extraction:
+        folder = project / "phase3/librelane/31-lvs/01-magic-spiceextraction"
+        folder.mkdir(parents=True)
+        spice = folder / "layout.spice"
+        spice.write_text(".subckt chip a y\nRsignal a y 1\n.ends\n")
+        (folder / "feedback.txt").write_text("")
+        (folder / "invocation.log").write_text("SOURCE_CONTROL extraction: 0 problems occurred.\n")
+        _put(folder / "state_out.json", {"spice": str(spice)})
+        record["metrics"]["magic__illegal_overlap__count"] = {
+            "step": "Magic.SpiceExtraction", "status": "MEASURED", "value": 0,
+            "folder": str(folder)}
     monkeypatch.setattr(contract, "resolve_image", lambda p: "img")
     monkeypatch.setattr(contract, "resolve_pdk_root", lambda *a, **k: tmp_path)
     monkeypatch.setattr(pv, "run_half", lambda *a, **k: _put(
@@ -534,6 +545,19 @@ def test_librelane_lvs_publishes_netgens_report_and_a_verdict_the_aggregator_rea
     assert verdict["compare_performed"] is True
     cell = agg._lvs_from_runner_verdict(project, "design__lvs_error__count", "x")
     assert cell.value == 0
+
+
+
+def test_lvs_publication_refuses_missing_extraction_evidence(tmp_path, runner, monkeypatch):
+    folder = "phase3/librelane/31-lvs/02-netgen-lvs"
+    record = {"verdict": "PASS", "reasons": [], "metrics": {
+        "design__lvs_error__count": {"step": "Netgen.LVS", "status": "MEASURED", "value": 0,
+                                    "folder": str(tmp_path / "p" / folder)}}}
+    project, row = _published_half(tmp_path, runner, monkeypatch, "lvs", record,
+        {f"{folder}/reports/lvs.netgen.rpt": "Final result: Circuits match uniquely.\n"},
+        extraction=False)
+    assert row.status == "FAIL" and "current Magic extraction feedback" in row.detail
+    assert not (project / "reports/phase3/lvs_verdict.json").exists()
 
 
 def test_a_librelane_lvs_mismatch_is_not_published_as_a_match(tmp_path, runner, monkeypatch):

@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1455
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1455)
+- **Total programs (excluding helpers / shims):** 1456
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1456)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1446 |
+| `any` | 1447 |
 
 ## Alphabetical listing
 
@@ -697,6 +697,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `l1_electrical_specs_typed_depth_check` | any | Wave 38 | Audit-driven typed sub-field depth gate. Closes the residual ~70 |
 | `l1_pin_bus_width_actionable_check` | any | — | VERDICT SEMANTICS: **BLOCKS** (exit 1 on FAIL). |
 | `l1_pin_table_aliases_typed_check` | any | Wave 38 | Audit-driven typed sub-field depth gate. Vendor docs commonly use |
+| `l20_dft_intent_emit` | any | — | Project explicit planned/unmeasured DFT intent into L20. |
 | `l20_dft_scan_topology_actionable_check` | any | — | SEMANTIC gate for L20_DFT_SCAN_TOPOLOGY (batch layergate-7). |
 | `l20_dft_scan_topology_extract` | any | — | Extract an explicit, typed scan topology from design-owned input docs. |
 | `l21_doc_supply_rail_synth` | any | — | Derive the power-intent rail set from a supply table the design's OWN docs STATE. |
@@ -1527,7 +1528,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1446 programs)
+### `any` (1447 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2196,6 +2197,7 @@ _(no programs in this group)_
 - `l1_electrical_specs_typed_depth_check` — Audit-driven typed sub-field depth gate. Closes the residual ~70  _[Wave 38]_
 - `l1_pin_bus_width_actionable_check` — VERDICT SEMANTICS: **BLOCKS** (exit 1 on FAIL).
 - `l1_pin_table_aliases_typed_check` — Audit-driven typed sub-field depth gate. Vendor docs commonly use  _[Wave 38]_
+- `l20_dft_intent_emit` — Project explicit planned/unmeasured DFT intent into L20.
 - `l20_dft_scan_topology_actionable_check` — SEMANTIC gate for L20_DFT_SCAN_TOPOLOGY (batch layergate-7).
 - `l20_dft_scan_topology_extract` — Extract an explicit, typed scan topology from design-owned input docs.
 - `l21_doc_supply_rail_synth` — Derive the power-intent rail set from a supply table the design's OWN docs STATE.

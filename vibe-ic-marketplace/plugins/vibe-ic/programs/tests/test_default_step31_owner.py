@@ -194,155 +194,73 @@ def post_stream_transport(project, pdk, monkeypatch, calls):
 
 
 def fixture(tmp_path, monkeypatch, case):
-    # Reuse the shipped neutral DRC transport and its calibrated report grammar.
-    _, _, _, calls, project = _step31_control(tmp_path, monkeypatch, "clean")
-    import shutil
-    shutil.copytree(_project(tmp_path / "dependencies"), project,
-                    dirs_exist_ok=True, ignore=shutil.ignore_patterns("provenance.jsonl"))
-    pnr = R._pl.pnr_dir(project)
-    pdk_root = project / "input/pdk"
-    pdk = R.PdkConfig("open_fixture", str(pdk_root / "cells.lib"),
-        str(pdk_root / "tech.lef"), str(pdk_root / "cell.lef"),
-        None, "neutral", str(pdk_root / "neutral.lydrc"))
-    for name in ("chip_top.def", "routed.def"):
-        put(project, "phase3/stage3/pnr/" + name, LAYOUT)
-    _write_gds(pnr / "chip_top.gds", n_shapes=12, cell="chip_top")
-    put(project, "phase3/stage3/pnr/chip_top_pnr.v",
-        "module chip_top(input a, output b); wire n; logic u (.Y(n)); assign b = a; endmodule\n")
-    put(project, "phase2/stage2/synth/chip_top_synth.v",
-        "module chip_top(input a, output b); wire n; logic u (.Y(n)); assign b = a; endmodule\n")
-    put(project, "input/step_0_5ic_answers.json", "{}\n")
-    put(project, "input/submission_template/neutral.json", "{}\n")
-    put(project, "phase2/stage2/constraints/pvt_matrix.json", "{}\n")
-    lib = put(project, "input/pdk/cells.lib", 'library(neutral) { time_unit : "1ns"; }\n')
-    pdk.liberty = str(lib)
-    pdk.bridge_magicrc = str(pdk_root / "neutral.magicrc")
-    pdk.bridge_netgen_setup = str(put(project, "input/pdk/neutral_setup.tcl",
-                                    "# neutral native comparison setup\n"))
-    put(project, "reports/density.json", json.dumps({
-        "tool": "klayout neutral density instrument",
-        "layers": [{"name": "met1", "density_pct": 45.0}]}))
-    put(project, "phase3/stage3/pnr/routed.odb",
-        "SOURCE_CONTROL neutral routed checkpoint\n")
-    post_stream_transport(project, pdk, monkeypatch, calls)
-    native = R._docker_exec
+    """Full current finished-stream fixture; native leaves remain explicit controls."""
+    import librelane_contract as lc
+    from test_default_pnr_row_boundaries import _full_gds_lvs_transport
+    identity = lc.local_image_attestation()
+    image = SimpleNamespace(image=identity['image'],
+        receipt=Path(identity['attestation_path']), readonly_attestation=True)
+    project, pdk, selected, calls, attempt = _checkpoint31_fixture(tmp_path, monkeypatch, image)
+    attempt['first'] = False
+    _full_gds_lvs_transport(monkeypatch, project, pdk, selected,
+                           'lvs_error' if case == 'lvs_fail' else 'current', calls)
     observed = []
-
-    def provenance(tool, outputs, command=None):
-        files = {str(Path(p).relative_to(project)): "sha256:" + sha(p)
-                 for p in outputs if Path(p).is_file()}
-        with (project / "provenance.jsonl").open("a") as stream:
-            stream.write(json.dumps({"record": "invocation", "tool": tool,
-                "measured": True, "exit_code": 0, "scope": "SOURCE_CONTROL",
-                "command": command or tool,
-                "measurement": {"schema": "mcp-eda/measurement/1",
-                    "measured": True, "tool": tool,
-                    "operation": "neutral source-control instrument",
-                    "read": [str(pnr / "chip_top.def"), str(pnr / "chip_top.gds")],
-                    "wrote": [str(p) for p in outputs]},
-                "inputs": {str((pnr / name).relative_to(project)):
-                           "sha256:" + sha(pnr / name)
-                           for name in ("chip_top.def", "chip_top.gds")},
-                "outputs": files}) + "\n")
-
-    def transport(container, command, **kwargs):
-        if "netgen -batch lvs" in command:
-            calls.append("netgen")
-            report = project / "reports/phase3/lvs.rpt"
-            text = ("Final result: Circuits do NOT match.\n" if case == "lvs_fail" else
-                    "Final result: Circuits match uniquely.\n")
-            body = _PRIMARY_MATCH.replace("user_project_wrapper", "chip_top")
-            if case == "lvs_fail":
-                body = body.replace("Final result: Circuits match uniquely.",
-                    "Netlists do not match.\nFinal result: Top level cell failed pin matching.")
-            report.write_text(body)
-            log = report.with_suffix(".log")
-            log.write_text("Netgen source-control instrument completed\n" + text)
-            provenance("netgen", [report, log], command)
-            return 0, text, ""
-        if "/erc_chip_top.tcl" in command:
-            calls.append("erc")
-            text = "0 floating nets\n0 floating pins\nERC_NATIVE_DONE\n"
-            for output in kwargs.get("outputs", []):
-                Path(output).write_text(text)
-            provenance("openroad", kwargs.get("outputs", []))
-            return 0, text, ""
-        result = native(container, command, **kwargs)
-        outputs = kwargs.get("outputs", [])
-        if outputs and ("klayout -b" in command or command.startswith("magic ")):
-            provenance("klayout" if "klayout -b" in command else "magic", outputs, command)
-        return result
-
-    def extraction(container, command, outputs, **kwargs):
-        calls.append("extraction")
-        for output in outputs:
-            output = Path(output)
-            if output.suffix == ".sp":
-                output.write_text(".subckt chip_top a b\nRwire a b 1\n.ends\n")
-            elif output.name == "ext2spice.log":
-                output.write_text("0 errors\nMAGIC_EXT2SPICE_DONE chip_top_extracted.sp\n")
-            else:
-                output.write_text("")
-        provenance("magic", outputs)
-        return 0, "0 errors\nMAGIC_EXT2SPICE_DONE chip_top_extracted.sp\n", ""
-
-    monkeypatch.setattr(R, "_docker_exec", transport)
-    monkeypatch.setattr(R, "_declared_session_exec", extraction)
-    monkeypatch.setattr(R, "_backend_parameter_values", lambda *_: {
-        "pdk_root": str(project / "input/pdk"), "image_id": "SOURCE_CONTROL_ONLY"})
-    monkeypatch.setattr(B, "_parameters", lambda *_: (R, None, pdk, "SOURCE_CONTROL_ONLY"))
-    monkeypatch.setattr(P, "request", lambda: {"mode": "default"})
-    monkeypatch.setattr(P, "_ordinary_runtime", None)
     real_declared, real_gate = D.run_for_step, W.evaluate
 
     def declared(root, sid, *args, **kwargs):
         result = real_declared(root, sid, *args, **kwargs)
-        observed.append(("declared", str(sid), result))
-        if case == "missing_erc":
-            (root / "reports/phase3/erc.rpt").unlink(missing_ok=True)
-        elif case == "changed_perc":
-            path = root / "reports/phase3/perc_sweep.json"
-            path.write_text(path.read_text() + "\nchanged after producer\n")
+        observed.append(('declared', str(sid), result))
+        if case == 'missing_erc':
+            (root / 'reports/phase3/erc.rpt').unlink(missing_ok=True)
+        elif case == 'changed_perc':
+            path = root / 'reports/phase3/perc_sweep.json'
+            path.write_text(path.read_text() + '\nchanged after producer\n')
         return result
 
     def consume(root, row):
-        observed.append(("consumer", str(row["id"]), None))
+        observed.append(('consumer', str(row['id']), None))
         return real_gate(root, row)
 
-    monkeypatch.setattr(D, "run_for_step", declared)
-    monkeypatch.setattr(W, "evaluate", consume)
+    monkeypatch.setattr(D, 'run_for_step', declared)
+    monkeypatch.setattr(W, 'evaluate', consume)
+    monkeypatch.setattr(P, 'request', lambda: {'mode': 'default'})
+    monkeypatch.setattr(P, '_ordinary_runtime', None)
     import _flow_yaml
-    row = next(r for r in _flow_yaml.load()["steps"] if str(r["id"]) == "31")
-    for name in row["required_outputs"]:
+    row = next(row for row in _flow_yaml.load()['steps'] if str(row['id']) == '31')
+    for name in row['required_outputs']:
         (project / name).unlink(missing_ok=True)
-    assert all(not (project / name).exists() for name in row["required_outputs"])
-    # Use the unchanged layout identity and admission contract on these
-    # source-control inputs; the selected native transports remain neutral.
-    basis, error = R._layout_basis(project, 'chip_top', pdk, 'SOURCE_CONTROL_ONLY')
-    assert not error, error
-    put(project, 'reports/phase3/prestream_gate.json', json.dumps({
-        'verdict': 'PASS', 'layout_digest': basis,
-        'scope': 'SOURCE_CONTROL existing pre-stream transport'}))
-    R._ga.admit_gds(project, pnr / 'chip_top.gds', basis,
-                    R._layout_basis_paths(project, 'chip_top'))
+    assert all(not (project / name).exists() for name in row['required_outputs'])
     calls.clear()
     return project, pdk, calls, observed, row
+
+
+def _assert_full_gds_chain(project, calls):
+    import librelane_contract as lc
+    rows = [row for row in calls if isinstance(row, dict) and 'native_step' in row]
+    assert [row['native_step'] for row in rows] == ['Magic.SpiceExtraction', 'Netgen.LVS']
+    for row in rows:
+        receipt = lc.validate_step_receipt(Path(row['folder']), row['native_step'])
+        assert receipt['input']['step'] == row['native_step']
+    extraction, compare = rows
+    assert compare['input_state']['spice'] == str(Path(extraction['folder']) / 'layout.spice')
+    assert Path(compare['input_state']['pnl']).is_file()
+    assert sum('erc' in row for row in calls if isinstance(row, dict)) == 1
 
 
 def current_window(tmp_path, monkeypatch):
     """Real current Default owner/declared writers/full thirteen-output consumer."""
     project, pdk, calls, observed, row = fixture(tmp_path, monkeypatch, 'current')
     before = {name: (R._pl.pnr_dir(project) / name).read_bytes()
-              for name in ('routed.def', 'chip_top.gds')}
+              for name in ('routed.def', 'spm.gds')}
     selected = R._phase3_window_sites('31', '31')
     assert selected == ['default_backend']
     args = SimpleNamespace(entry_step='31', exit_step='31',
-                           container='SOURCE_CONTROL_ONLY', die_um=None,
+                           container='', die_um=None,
                            util=None, spare_density=None)
-    rc = R._run_phase3_window(project, 'chip_top', pdk, args, selected)
+    rc = R._run_phase3_window(project, 'spm', pdk, args, selected)
     assert rc == 0
     assert [value[:2] for value in observed] == [('declared', '31'), ('consumer', '31')]
-    assert calls.count('erc') == calls.count('extraction') == calls.count('netgen') == 1
+    _assert_full_gds_chain(project, calls)
     assert observed[0][2]['verdict'] == 'PRODUCED'
     current = V.latest_pass(project, '31')
     assert current and current['canonical_pass'] and current['current_inputs']
@@ -361,9 +279,9 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
     put(project, "ROUTE_OBSERVATION.json", json.dumps({"selected": selected,
         "required_owner": "Default31 native producer and current-step declared writers"}))
     assert selected == ["default_backend"], selected
-    args = SimpleNamespace(entry_step="31", exit_step="31", container="SOURCE_CONTROL_ONLY",
+    args = SimpleNamespace(entry_step="31", exit_step="31", container="",
                            die_um=None, util=None, spare_density=None)
-    rc = R._run_phase3_window(project, "chip_top", pdk, args, selected)
+    rc = R._run_phase3_window(project, "spm", pdk, args, selected)
     result = V.latest_pass(project, "31")
     receipt_path = project / "reports/phase3/default_steps/31/backend_result.json"
     receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else None
@@ -373,9 +291,7 @@ def test_bounded_default31_owns_all_current_outputs_before_the_consumer(
                              for name in definition["required_outputs"]},
         "scope": "source-only neutral native instruments; complete real Default31 consumer"}
     put(project, "API_OBSERVATION.json", json.dumps(observation, indent=2))
-    assert calls.count("erc") == 1
-    assert calls.count("extraction") == 1
-    assert calls.count("netgen") == 1
+    _assert_full_gds_chain(project, calls)
     order = [x[:2] for x in observed]
     if case == "lvs_fail":
         assert rc != 0
@@ -430,24 +346,24 @@ def test_resumed_default31_uses_fresh_admission_basis_before_physical_views(
                 "MACRO recorded_macro\n CLASS BLOCK ;\n SIZE 1 BY 1 ;\nEND recorded_macro\n")
     put(project, R.PHYSICAL_VIEW_INVENTORY_REL, json.dumps({
         "read_lef_paths": [pdk.tech_lef, pdk.cell_lef, str(macro)]}))
-    fresh_basis, error = R._layout_basis(project, "chip_top", pdk, "SOURCE_CONTROL_ONLY")
+    fresh_basis, error = R._layout_basis(project, "spm", pdk, "")
     assert not error
-    assert R._ga.admitted_gds(project, pnr / "chip_top.gds", fresh_basis)
+    assert R._ga.admitted_gds(project, pnr / "spm.gds", fresh_basis)
     restored_pdk = copy.deepcopy(pdk)
-    restored = R._restore_recorded_physical_views(project, restored_pdk, "SOURCE_CONTROL_ONLY")
+    restored = R._restore_recorded_physical_views(project, restored_pdk, "")
     assert restored["macro_lefs"] == [str(macro)]
     restored_basis, error = R._layout_basis(
-        project, "chip_top", restored_pdk, "SOURCE_CONTROL_ONLY")
+        project, "spm", restored_pdk, "")
     assert not error and restored_basis != fresh_basis
-    assert not R._ga.admitted_gds(project, pnr / "chip_top.gds", restored_basis)
+    assert not R._ga.admitted_gds(project, pnr / "spm.gds", restored_basis)
     before = {str(path.relative_to(project)): path.read_bytes() for path in
-              [*R._layout_basis_paths(project, "chip_top"), pnr / "chip_top.gds",
+              [*R._layout_basis_paths(project, "spm"), pnr / "spm.gds",
                R._ga.admission_path(project), project / R.PHYSICAL_VIEW_INVENTORY_REL]}
     if case == "changed_pdk":
         path = Path(pdk.liberty)
         path.write_text(path.read_text() + "\n/* changed source material */\n")
     elif case == "changed_gds":
-        _write_gds(pnr / "chip_top.gds", n_shapes=13, cell="chip_top")
+        _write_gds(pnr / "spm.gds", n_shapes=13, cell="spm")
     elif case == "refused_restore":
         put(project, "reports/pdk_via_patch_legalization.json", json.dumps({
             "status": "APPLIED", "derived_tech_lef": "input/pdk/missing_recorded.lef",
@@ -456,9 +372,9 @@ def test_resumed_default31_uses_fresh_admission_basis_before_physical_views(
     # memoized while the neutral fixture published its original admission.
     monkeypatch.setattr(R, "_STEP_PDK_HASH_CACHE", {})
     calls.clear()
-    args = SimpleNamespace(entry_step="31", exit_step="31", container="SOURCE_CONTROL_ONLY",
+    args = SimpleNamespace(entry_step="31", exit_step="31", container="",
                            die_um=None, util=None, spare_density=None)
-    rc = R._run_phase3_window(project, "chip_top", pdk, args,
+    rc = R._run_phase3_window(project, "spm", pdk, args,
                               R._phase3_window_sites("31", "31"))
     receipt = json.loads((project / "reports/phase3/default_steps/31/backend_result.json").read_text())
     current = V.latest_pass(project, "31")
@@ -478,7 +394,7 @@ def test_resumed_default31_uses_fresh_admission_basis_before_physical_views(
         return
     assert rc == 0 and receipt["producer_verdict"] == "PASS", receipt
     assert [x[:2] for x in observed] == [("declared", "31"), ("consumer", "31")]
-    assert calls.count("erc") == calls.count("extraction") == calls.count("netgen") == 1
+    _assert_full_gds_chain(project, calls)
     assert str(macro) in pdk.macro_lefs, "instruments still require restored physical views"
     assert current and current["canonical_pass"] and current["current_inputs"]
     assert len(row["required_outputs"]) == 13
@@ -486,8 +402,8 @@ def test_resumed_default31_uses_fresh_admission_basis_before_physical_views(
         assert (project / name).read_bytes() == payload
 
 
-# Native Step31 coupled-owner controls. The pre-existing module prefix above is
-# retained byte-for-byte; this lane never replaces native owners or validators.
+# Native Step31 coupled-owner controls share retained finished-stream fixtures;
+# native owners and validators execute unchanged.
 def _public_native31_window(project, pdk, monkeypatch, *, case, native_processes, file_top="spm"):
     """Executable public-entry skeleton shared by the new native-leaf controls."""
     import _flow_yaml
@@ -716,7 +632,12 @@ def _native31_process_leaf(project, selected, case, calls):
             report.write_text(_GOOD.replace("ab" * 32, sha(selected["gds"])))
             return 0, report.read_text(), ""
         if "openroad" in argv and any("erc_" in token for token in argv):
-            return 0, "0 floating nets\n0 floating pins\nERC_NATIVE_DONE\n", ""
+            transcript = "0 floating nets\n0 floating pins\nERC_NATIVE_DONE\n"
+            # Match the native shell tee before the real logger hashes output.
+            log = Path(argv[argv.index("tee") + 1])
+            log.write_text(transcript)
+            observed['erc'] = {'tee': str(log)}
+            return 0, transcript, ""
         raise AssertionError("unexpected expensive native process: " + command)
     return leaf
 
@@ -735,8 +656,9 @@ def test_public_default31_native_owner_closes_retained_subject(
     import _physical_current as current
     import librelane_fill_dfm as fill
 
-    project, pdk, selected, calls = _native31_runtime_fixture(
+    project, pdk, selected, calls, attempt = _checkpoint31_fixture(
         tmp_path, monkeypatch, local_image, case)
+    attempt['first'] = False
     before = {role: path.read_bytes() for role, path in selected.items()
               if role in ("def", "netlist", "sdc", "gds")}
     closure_calls = (_observe_native31_closure_calls(monkeypatch)
@@ -752,7 +674,8 @@ def test_public_default31_native_owner_closes_retained_subject(
         assert rc != 0 and record["result"]["producer_verdict"] == "FAIL", record
         assert not record["canonical_pass"] and retained is None
         if case == "legacy_feedback":
-            assert "FEEDBACK_LAYOUT_DIGEST_MISMATCH_OR_UNMEASURED" in record["result"]["detail"]
+            assert 'FEEDBACK_LAYOUT_DIGEST_MISMATCH_OR_UNMEASURED' in record['result']['detail']
+            assert 'LL_PV_VIEW_MISSING' in record['result']['detail']
         return
     assert rc == 0 and record["canonical_pass"] is True, record
     assert record["result"]["producer_verdict"] == "PASS"
@@ -761,36 +684,35 @@ def test_public_default31_native_owner_closes_retained_subject(
     assert len(row["required_outputs"]) == 13
     assert all((project / path).is_file() for path in row["required_outputs"])
     assert current.read_direct_half(project, "drc")["verdict"] == "CURRENT"
-    assert current.read_direct_half(project, "lvs")["verdict"] == "CURRENT"
-    # Same subject requirements, after the actual public window has returned
-    # and retained its own Step31 result. Expensive leaves only observed argv.
+    import librelane_contract as lc
+    import librelane_signoff_evidence as native_evidence
+    assert native_evidence.obligation(project, 'lvs')['verdict'] == 'PASS'
+    _assert_full_gds_chain(project, calls)
     for call in (item for item in calls if isinstance(item, dict)):
-        if "extraction" in call:
-            observed = call["extraction"]
-            assert Path(observed["def"]) == selected["def"]
-            assert observed["top"] == selected["design"]
-            assert Path(observed["tee"]) == Path(observed["log_path"])
-        if "comparison" in call:
-            observed = call["comparison"]
-            assert observed["layout_top"] == observed["schematic_top"] == selected["design"]
-            assert Path(observed["layout"]).suffix == ".sp"
-            assert observed["schematic_exists"]
-            assert selected["gds"].as_posix() not in call["command"]
-            if "power_aware_text" in observed:
-                assert ".VDD(" in observed["power_aware_text"] and ".VSS(" in observed["power_aware_text"]
-        if "drc" in call:
-            assert Path(call["drc"]["input"]) == selected["gds"]
-            assert call["drc"]["top_cell"] == selected["design"]
-    direct = json.loads((project / "reports/phase3/direct_current_lvs.json").read_text())
-    assert direct["design"] == selected["design"] != "spm"
-    assert direct["inputs"]["def"]["sha256"] == sha(selected["def"])
-    assert direct["inputs"]["netlist"]["sha256"] == sha(selected["netlist"])
-    invocation = direct["execution"]["native_invocation"]
-    assert selected["gds"].as_posix() not in invocation["command"]
-    assert all(Path(path).suffix != ".gds" for path in invocation["inputs"])
-    verdict = json.loads((project / "reports/phase3/lvs_verdict.json").read_text())
-    assert verdict["power_aware_stats"]["instances_patched"] > 0
-    assert any("pwraware" in call["command"] for call in calls)
+        if 'native_step' in call:
+            state = call['input_state']
+            assert Path(state['gds']) == selected['gds']
+            assert Path(state['def']) == selected['def']
+        if 'drc' in call:
+            assert Path(call['drc']['input']) == selected['gds']
+            assert call['drc']['top_cell'] == selected['design']
+    inputs_path = project / 'reports/phase3/lvs_inputs.json'
+    inputs = json.loads(inputs_path.read_text())
+    assert selected['design'] != 'spm'
+    for role, field in (('def', 'layout_def'), ('netlist', 'schematic_netlist'), ('gds', 'layout_gds')):
+        assert inputs[field]['path'] == str(selected[role].resolve())
+        assert inputs[field]['sha256'] == sha(selected[role])
+    verdict = json.loads((project / 'reports/phase3/lvs_verdict.json').read_text())
+    assert verdict['lvs_inputs']['sha256'] == sha(inputs_path)
+    power_aware = Path(inputs['powered_reference']['path']).read_text()
+    assert '.VDD(' in power_aware and '.VSS(' in power_aware
+    extraction = next(Path(call['folder']) for call in calls
+                      if isinstance(call, dict) and call.get('native_step') == 'Magic.SpiceExtraction')
+    comparison = next(Path(call['folder']) for call in calls
+                      if isinstance(call, dict) and call.get('native_step') == 'Netgen.LVS')
+    native_state = json.loads((comparison / 'state_in.json').read_text())
+    assert Path(native_state['pnl']) == Path(inputs['powered_reference']['path'])
+    assert Path(native_state['spice']) == Path(inputs['extracted_spice']['path'])
     for role, payload in before.items():
         assert selected[role].read_bytes() == payload
     if case == "current":
@@ -822,10 +744,10 @@ def test_public_default31_native_owner_closes_retained_subject(
         assert "LVS compared a layout DEF other than the judged DEF" in wrong_result["failures"]
         return
     if case == "missing_report":
-        target = project / direct["outputs"]["native_report"]["path"]
+        target = comparison / 'reports/lvs.netgen.rpt'
         target.unlink()
     elif case == "changed_log":
-        target = project / direct["outputs"]["log"]["path"]
+        target = comparison / 'invocation.log'
         target.write_text(target.read_text() + "\nchanged native transcript\n")
     elif case == "changed_extraction":
         inputs = json.loads((project / "reports/phase3/lvs_inputs.json").read_text())
@@ -869,7 +791,15 @@ def test_public_default31_native_owner_closes_retained_subject(
                    for item in vacuity["summary"]["per_file"]), vacuity
         target = project / "reports/phase3/lvs.rpt"
         target.write_text(target.read_text() + "\nchanged canonical publication\n")
-    assert current.read_direct_half(project, "lvs")["verdict"] != "CURRENT"
+    if case == 'changed_alias':
+        # Native comparison remains valid; the changed publication must fail
+        # its separate, unchanged provenance consumer.
+        import provenance_check
+        assert native_evidence.obligation(project, 'lvs')['verdict'] == 'PASS'
+        assert provenance_check.main([str(project), '--output', 'reports/phase3/lvs.rpt',
+            '--tool', 'netgen,magic,klayout', '--require-measured']) == 1
+    else:
+        assert native_evidence.obligation(project, 'lvs')['verdict'] != 'PASS'
     assert W.evaluate(project, row)["status"] != "PASS"
 
 
@@ -1107,6 +1037,11 @@ def _native31_runtime_fixture(tmp_path, monkeypatch, local_image, case):
     # Same neutral public input as the original Step31 fixture; freeze it
     # before the original DRV checkpoint records the specification.
     put(project, "input/step_0_5ic_answers.json", "{}\n")
+    put(project, "phase1/generated_docs/L8_TIMING_WAVEFORM.json", json.dumps({
+        "doc_id": "L8_TIMING_WAVEFORM", "clock_domains": [
+            {"role": "primary", "source_pin": "a", "period_ns": 24}]}))
+    put(project, "phase1/generated_docs/L19_CONSTRAINTS_PDK.json", json.dumps({
+        "doc_id": "L19_CONSTRAINTS_PDK", "constraint_declarations": []}))
     _native31_synthesis_handoff(project, pdk, selected["netlist"])
     _native31_drv_peripheral(project, pdk, monkeypatch, calls, root=root, master=master)
     monkeypatch.setattr(lc._ce, "no_container_route", lambda: True)
@@ -1147,6 +1082,12 @@ def _native31_runtime_fixture(tmp_path, monkeypatch, local_image, case):
         "scope": "SOURCE_CONTROL retained upstream prestream fixture"}))
     R._ga.admit_gds(project, pnr / "spm.gds", basis,
                     R._layout_basis_paths(project, "spm"))
+    from test_default_pnr_row_boundaries import _full_gds_lvs_transport
+    _full_gds_lvs_transport(monkeypatch, project, pdk, selected,
+        'lvs_error' if case == 'netgen_mismatch' else 'current', calls)
+    # The real declaration emitter reads the actual L8/L9/L19 documents.
+    cfg = lc.emit_config(project, pdk.name, project / 'phase3/native31_declared_config.json')
+    assert cfg['CLOCK_PERIOD'] == 24 and cfg['CLOCK_PORT'] == 'a'
     if case == "legacy_feedback":
         (project / fill.DEFAULT_STREAM_REL).unlink()
     return project, pdk, selected, calls
@@ -1182,6 +1123,23 @@ def _native31_synthesis_handoff(project, pdk, source_netlist):
     put(folder, "state_out.json", json.dumps({"nl": str(raw), "metrics": {
         "design__instance_unmapped__count": 0, "synthesis__check_error__count": 0}}))
     put(folder, "reports/stat.json", json.dumps({"modules": {"\\spm": {"num_submodules": 0}}}))
+    # CHECK reports are actual Yosys measurements of this neutral antecedent.
+    # Mapping remains a software fixture; no native synthesis PASS is claimed.
+    import subprocess
+    masters = set(re.findall(r"(?m)^\s*(\w+)\s+\w+\s*\(", text)) - {"module"}
+    assert len(masters) == 1, masters
+    cells = put(folder, "neutral_cells.v", "\n".join(
+        f"module {master}(input I, output Z); assign Z = I; endmodule" for master in masters))
+    for name, sources in (("pre_synth_chk.rpt", [rtl]), ("chk.rpt", [cells, raw])):
+        report = folder / "reports" / name
+        script = '; '.join([
+            'read_verilog ' + ' '.join('"' + str(path) + '"' for path in sources),
+            'hierarchy -check -top spm', 'proc',
+            'tee -o "' + str(report) + '" check'])
+        done = subprocess.run(['yosys', '-Q', '-T', '-p', script],
+                              capture_output=True, text=True)
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert 'Found and reported 0 problems.' in report.read_text()
     put(folder, "pdk_root.json", json.dumps({"cli_pdk_root": "/pdk",
         "stated_by": "run_chain(pdk_root=...)", "mounts_under_it": []}))
     inputs = {"step": "Yosys.Synthesis", "config": sha(resolved),
@@ -1227,7 +1185,7 @@ def _observe_native31_closure_calls(monkeypatch):
     return observed
 
 
-def _checkpoint31_fixture(tmp_path, monkeypatch, local_image):
+def _checkpoint31_fixture(tmp_path, monkeypatch, local_image, case="current"):
     """Supply a normal installed Magic path before the original fixture freezes."""
     import shlex
     import sys
@@ -1248,12 +1206,12 @@ def _checkpoint31_fixture(tmp_path, monkeypatch, local_image):
 
     monkeypatch.setattr(sys.modules[__name__], "_native31_retained_stream", installed_magic)
     project, pdk, selected, calls = _native31_runtime_fixture(
-        tmp_path, monkeypatch, local_image, "current")
+        tmp_path, monkeypatch, local_image, case)
     attempt = {"first": True}
 
     def leaf(container, command, marker, **kwargs):
         process = _native31_process_leaf(project, selected,
-            "netgen_mismatch" if attempt["first"] else "current", calls)
+            "netgen_mismatch" if attempt["first"] else case, calls)
         result = process(container, command, marker, **kwargs)
         argv = shlex.split(command)
         if "magic" in argv and "SPICE_OUT=" not in command:
@@ -1269,6 +1227,9 @@ def _checkpoint31_fixture(tmp_path, monkeypatch, local_image):
         return result
 
     monkeypatch.setattr(R._dwd, "run_docker_supervised", leaf)
+    from test_default_pnr_row_boundaries import _full_gds_lvs_transport
+    _full_gds_lvs_transport(monkeypatch, project, pdk, selected,
+        lambda: 'lvs_error' if attempt['first'] or case == 'netgen_mismatch' else 'current', calls)
     return project, pdk, selected, calls, attempt
 
 
@@ -1336,4 +1297,4 @@ def test_public_default31_retains_valid_drc_across_failed_lvs(
                    for row in adopted["evidence"])
     else:
         assert observed["second_native_calls"] == {"klayout": 1, "magic_drc": 1}
-    assert any("comparison" in x for x in calls[offset:] if isinstance(x, dict))
+    assert any(x.get('native_step') == 'Netgen.LVS' for x in calls[offset:] if isinstance(x, dict))

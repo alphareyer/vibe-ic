@@ -116,12 +116,53 @@ def _derive_integer_encoding(run_dir: Path) -> str | None:
     if not l2.exists():
         return None
     text = l2.read_text(errors="replace")
-    # Look for explicit signed_2c mention first
+    declaration = run_dir / "plugin_output" / "declaration.json"
+    try:
+        choice = json.loads(declaration.read_text()).get("integer_encoding")
+    except FileNotFoundError:
+        choice = None
+    except (OSError, ValueError, AttributeError):
+        return None
+    if choice is not None and choice not in {"unsigned", "signed_2c"}:
+        return None
+    # An explicit FRS encoding cannot silently overwrite a producer conflict.
+    explicit = set()
     if re.search(r'signed_2c', text):
-        return "signed_2c"
+        explicit.add("signed_2c")
     if re.search(r'"unsigned"', text):
-        return "unsigned"
-    return None
+        explicit.add("unsigned")
+    if explicit:
+        if len(explicit) != 1:
+            return None
+        encoding = next(iter(explicit))
+        return encoding if choice is None or choice == encoding else None
+    # Equivalent modulo bit patterns permit a producer choice; they do not
+    # select one. Reuse only an explicit existing supported choice.
+    from _prose_polarity import is_denied
+    def strings(value):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for child in value.values():
+                yield from strings(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from strings(child)
+    try:
+        clauses = [clause for value in strings(json.loads(text))
+                   for clause in re.split(r"[.\n;]", value)]
+    except ValueError:
+        return None
+    equivalent = False
+    for clause in clauses:
+        match = re.search(
+            r"\bunsigned and signed two['’]s[- ]complement operands "
+            r"have identical modulo output bit patterns\b", clause, re.IGNORECASE)
+        if match and not is_denied(clause[:match.start()]):
+            equivalent = True
+    if not equivalent:
+        return None
+    return choice if choice in {"unsigned", "signed_2c"} else None
 
 
 def _derive_latency_from_verify_scale(run_dir: Path) -> int | None:
@@ -290,14 +331,25 @@ def main(argv: list[str] | None = None) -> int:
         print("No file written.", file=sys.stderr)
         return 1
 
-    declaration = {
+    out_path = run_dir / "plugin_output" / "declaration.json"
+    try:
+        declaration = json.loads(out_path.read_text()) if out_path.is_file() else {}
+    except (OSError, ValueError):
+        print(f"{FAIL_CLOSED_BANNER} — existing declaration is unreadable", file=sys.stderr)
+        return 1
+    if not isinstance(declaration, dict):
+        print(f"{FAIL_CLOSED_BANNER} — existing declaration is not an object", file=sys.stderr)
+        return 1
+    declaration.update({
         "bit_order": bit_order,
         "reset_polarity": reset_polarity,
         "latency_cycles": latency_cycles,
         "integer_encoding": integer_encoding,
         "multiplier_algorithm": multiplier_algorithm,
         "size_param": size_param,
-    }
+        # All latency derivations above return the settled-edge convention.
+        "latency_cycles_origin": "settled_edge_offset",
+    })
 
     out_dir = run_dir / "plugin_output"
     out_dir.mkdir(parents=True, exist_ok=True)
