@@ -71,6 +71,7 @@ def case(project):
 def test_actual_default_synthesis_uses_native_librelane_and_complete_existing_consumer(tmp_path,monkeypatch):
     context,path=case(tmp_path);monkeypatch.setenv('VIBEIC_FLOW109_CONTEXT',str(path))
     result=frontend.execute(tmp_path,context)
+    print('D22_NATIVE_RESULT', json.dumps(result, default=str))
     assert result['native_started'], result
     assert 'Yosys.Synthesis' in result['native_operations']
     receipt=tmp_path/result['native_receipt']['path']
