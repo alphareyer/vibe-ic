@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1456
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1456)
+- **Total programs (excluding helpers / shims):** 1461
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1461)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1447 |
+| `any` | 1452 |
 
 ## Alphabetical listing
 
@@ -480,6 +480,11 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `floorplan_contract` | any | — | G-FIXED-DIE-1 — shared design-PROVIDED fixed-floorplan-contract helpers. |
 | `floorplan_knobs` | any | — | CR-3 L9 floorplan knob parsing and pinned flow defaults. |
 | `floorplan_pdn_check` | any | — | Step 15 (Floorplan + PDN) SUBSTANCE gate. |
+| `flow109` | any | — | Source-owned 109-flow selection and existing Default dispatch bindings. |
+| `flow109_admission` | any | — | Per-use qualification consumed immediately before flow109 native dispatch. |
+| `flow109_analog` | any | — | A01 component adapter for the existing spec producer and read-only gate. |
+| `flow109_density_fill` | any | — | Blocking D62 ODB density-fill component, not a density/tapeout signoff. |
+| `flow109_final_lec` | any | — | Blocking D44 component: native LibreLane EQY on the adopted final netlist. |
 | `flow_compliance_check` | any | Wave 91 | Strict Vibe-IC phase 2+3 gate (40 main-track steps + A1-A9 analog + M1-M4 mixed-signal + P0 structural-RTL umbrella in v1.6.15). |
 | `flow_condition_reachability_check` | any | — | the self-disabling-condition guard. |
 | `flow_dashboard` | any | — | unified entry for the Vibe-IC flow execution dashboard. |
@@ -1528,7 +1533,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1447 programs)
+### `any` (1452 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1980,6 +1985,11 @@ _(no programs in this group)_
 - `floorplan_contract` — G-FIXED-DIE-1 — shared design-PROVIDED fixed-floorplan-contract helpers.
 - `floorplan_knobs` — CR-3 L9 floorplan knob parsing and pinned flow defaults.
 - `floorplan_pdn_check` — Step 15 (Floorplan + PDN) SUBSTANCE gate.
+- `flow109` — Source-owned 109-flow selection and existing Default dispatch bindings.
+- `flow109_admission` — Per-use qualification consumed immediately before flow109 native dispatch.
+- `flow109_analog` — A01 component adapter for the existing spec producer and read-only gate.
+- `flow109_density_fill` — Blocking D62 ODB density-fill component, not a density/tapeout signoff.
+- `flow109_final_lec` — Blocking D44 component: native LibreLane EQY on the adopted final netlist.
 - `flow_compliance_check` — Strict Vibe-IC phase 2+3 gate (40 main-track steps + A1-A9 analog + M1-M4 mixed-signal + P0 structural-RTL umbrella in v1.6.15).  _[Wave 91]_
 - `flow_condition_reachability_check` — the self-disabling-condition guard.
 - `flow_dashboard` — unified entry for the Vibe-IC flow execution dashboard.
