@@ -18,15 +18,15 @@ def artifact(project, name, content):
     return {'path': name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
-def fixture_context(project, monkeypatch):
+def fixture_context(project, monkeypatch, step="D38"):
     features = next(p['features'] for p in flow109.load_registry()['reference_profiles']
                     if p['name'] == 'Small digital IC without DFT')
     plan = flow109.resolve_plan(features)
-    use = flow109.resolve_step(plan, 'D38')['tool_uses'][0]
+    use = flow109.resolve_step(plan, step)['tool_uses'][0]
     exe = artifact(project, 'unit-openroad', 'unit test executable identity, not a real tool')
     exe['path'] = str(project / exe['path'])
-    monkeypatch.setattr(admission.shutil, 'which', lambda name: exe['path'] if name == 'openroad' else None)
-    identity = {'use_id': use['use_id'], 'tool_id': 'openroad', 'version': 'unit-control',
+    monkeypatch.setattr(admission.shutil, 'which', lambda name: exe['path'] if name == use.get('executable_name', use['tool_id']) else None)
+    identity = {'use_id': use['use_id'], 'tool_id': use['tool_id'], 'version': 'unit-control',
                 'build_sha256': exe['sha256'], 'executable': exe,
                 'config': artifact(project, 'config.json', '{}'),
                 'pdk': artifact(project, 'pdk.ref', 'unit PDK'),
@@ -36,7 +36,7 @@ def fixture_context(project, monkeypatch):
               'reference_evidence': [artifact(project, 'reference.json', '{"unit_control":true}') ]}
     registry = {'schema': 'vibeic.flow109.qualifications.v1', 'uses': [record]}
     (project / 'qualifications.json').write_text(json.dumps(registry))
-    context = flow109.execution_context(plan, 'D38', 'D38',
+    context = flow109.execution_context(plan, step, step,
         runtime_tool_uses=[{**identity, 'qualification_sha256': admission.canonical_sha(record)}],
         qualification_registry='qualifications.json')
     return context, registry
@@ -214,3 +214,10 @@ def test_worker_current_unit_contract_reaches_producer(tmp_path, monkeypatch):
     assert calls == ['producer']
     assert result['flow109_admission']['status'] == 'PASS'
     assert result['verdict'] == 'NOT_MEASURED'
+
+
+def test_standalone_sta_uses_source_owned_executable_alias(tmp_path, monkeypatch):
+    context, _ = fixture_context(tmp_path, monkeypatch, step='D48')
+    assert context['resolved_row']['tool_uses'][0]['tool_id'] == 'opensta'
+    assert context['resolved_row']['tool_uses'][0]['executable_name'] == 'sta'
+    assert admission.require_admission(tmp_path, context)['status'] == 'PASS'
