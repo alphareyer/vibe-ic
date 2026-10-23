@@ -854,7 +854,7 @@ def test_ultra_signoff_retains_its_existing_dispatch(monkeypatch):
     assert {'DT2', 'DT3'}.issubset(runner._phase3_window_steps('23', '24'))
 
 
-def _full_gds_lvs_transport(monkeypatch, project, pdk, selected, case):
+def _full_gds_lvs_transport(monkeypatch, project, pdk, selected, case, calls=None):
     """Neutral config/process I/O; real bridge, chain, publisher and consumers."""
     import librelane_contract as lc
     import librelane_pv_signoff as pv
@@ -867,12 +867,14 @@ def _full_gds_lvs_transport(monkeypatch, project, pdk, selected, case):
         assert kwargs['overlay']['MAGIC_EXT_USE_GDS'][0] is True
         assert kwargs['overlay']['MAGIC_EXT_ABSTRACT'][0] is False
         result = {}
+        active_case = case() if callable(case) else case
         for step in steps:
             path = project / 'phase3/librelane/31-lvs-config' / (step + '.json')
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({'meta': {'step': step},
                 'DESIGN_NAME': selected['design'], 'TECH_LEFS': {'nom_*': pdk.tech_lef},
-                'MAGIC_EXT_USE_GDS': True, 'MAGIC_EXT_ABSTRACT': False}))
+                'MAGIC_EXT_USE_GDS': True, 'MAGIC_EXT_ABSTRACT': False,
+                'SOURCE_CONTROL_COMPARE_CASE': active_case, 'CELL_LEFS': [pdk.cell_lef]}))
             views = {'step': step,
                 'inputs': ['gds', 'def'] if step == pv.LVS_CHAIN[0] else ['spice', 'pnl'],
                 'outputs': ['spice'] if step == pv.LVS_CHAIN[0] else []}
@@ -886,27 +888,31 @@ def _full_gds_lvs_transport(monkeypatch, project, pdk, selected, case):
         step = argv[argv.index('--id') + 1]
         if step not in pv.LVS_CHAIN:
             return original_run(argv, **kwargs)
+        active_case = case() if callable(case) else case
         folder = Path(argv[argv.index('-o') + 1])
         incoming = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
+        if calls is not None:
+            calls.append({'native_step': step, 'folder': str(folder),
+                          'input_state': incoming, 'command': __import__('shlex').join(argv)})
         assert Path(incoming['gds']).read_bytes() == selected['gds'].read_bytes()
         shutil.copyfile(argv[argv.index('-c') + 1], folder / 'config.json')
         (folder / 'state_in.json').write_text(json.dumps(incoming))
         outgoing = dict(incoming, metrics=dict(incoming.get('metrics') or {}))
-        outgoing['metrics'].update({key: int(case == 'lvs_error' and step == 'Netgen.LVS')
+        outgoing['metrics'].update({key: int(active_case == 'lvs_error' and step == 'Netgen.LVS')
                                    for key in pv.PRODUCED[step]})
         if step == 'Magic.SpiceExtraction':
             spice = folder / 'layout.spice'
             spice.write_text(f".subckt {selected['design']} a y VDD VSS\nRsignal a y 1\n.ends\n")
             outgoing['spice'] = str(spice)
-            if case != 'missing_feedback':
+            if active_case != 'missing_feedback':
                 feedback = ('box 0 0 10 10\nfeedback add "Illegal overlap between a and b" pale\n'
-                            if case == 'illegal_overlap' else '')
+                            if active_case == 'illegal_overlap' else '')
                 (folder / 'feedback.txt').write_text(feedback)
         else:
             report = folder / 'reports/lvs.netgen.rpt'
             report.parent.mkdir(parents=True, exist_ok=True)
             text = _PRIMARY_MATCH.replace('user_project_wrapper', selected['design'])
-            if case == 'lvs_error':
+            if active_case == 'lvs_error':
                 text = text.replace('Final result: Circuits match uniquely.',
                                     'Netlists do not match.\nFinal result: Top level cell failed pin matching.')
             report.write_text(text)

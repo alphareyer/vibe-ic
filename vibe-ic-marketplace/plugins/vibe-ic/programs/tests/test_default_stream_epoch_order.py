@@ -30,7 +30,7 @@ def _geometry(path, number=0):
     layout.write(str(path))
 
 
-def _transport(tmp_path, monkeypatch, *, finished_geometry=False):
+def _transport(tmp_path, monkeypatch, *, finished_geometry=False, native_views=False):
     neutral_declared_windows.__wrapped__(tmp_path, monkeypatch)
     monkeypatch.setattr(policy, 'request', lambda: {'mode': 'default'})
     monkeypatch.setattr(policy, '_ordinary_runtime', None)
@@ -43,6 +43,18 @@ def _transport(tmp_path, monkeypatch, *, finished_geometry=False):
     for name in ('routed.def', 'top.def'):
         (pnr / name).write_text(text)
     fill = BF.fill_record(p)
+    if native_views:
+        state_path = Path(fill['state'])
+        netlist = state_path.parent / 'cal_pg_pnr.v'
+        netlist.write_text('module cal_pg; endmodule\n')
+        sdc = state_path.parent / 'constraint.sdc'
+        sdc.write_text('create_clock -period 10 [get_ports clk]\n')
+        state = json.loads(state_path.read_text())
+        state.update(nl=str(netlist), sdc=str(sdc))
+        BF.put(state_path, state)
+        refresh_receipt(state_path.parent)
+        fill['state_sha256'] = LC.digest(state_path)
+        fill['binding']['receipt_sha256'] = LC.digest(state_path.parent / 'vibeic_receipt.json')
     BF.consume_fill(p, fill)
     LF.update_record(p, 'odb', {'shipped': 'librelane', 'tool': fill,
                               'def_sha256': LC.digest(pnr / 'routed.def')})
@@ -188,7 +200,7 @@ def test_actual_373_owner_only_reaches_transport_with_current_bound_filled_def(
     import _native373_current as native
     import gds_xor_check as xor
     import librelane_pv_signoff as pv
-    p, pdk, calls, _ = _transport(tmp_path, monkeypatch)
+    p, pdk, calls, _ = _transport(tmp_path, monkeypatch, native_views=True)
     record = LF.default_stream(p, 'top', pdk, '')
     pnr = p / 'phase3/stage3/pnr'
     filled = pnr / 'filled.def'
@@ -218,8 +230,16 @@ def test_actual_373_owner_only_reaches_transport_with_current_bound_filled_def(
         assert source == filled and source != pnr / 'routed.def'
         assert shipped == Path(record['canonical'])
         with pytest.raises(ReachedNativeTransport): native.produce(p, source)
-        assert observed == [{'def': str(filled), 'nl': str(pnr / 'cal_pg_pnr.v'),
-                             'sdc': str(pnr / 'constraint.sdc')}]
+        consumed = json.loads((p / LF.RECORD_REL).read_text())['odb']['tool']
+        state_path = Path(consumed['state'])
+        state = json.loads(state_path.read_text())
+        receipt = LC.validate_step_receipt(state_path.parent, LF.ODB_FILL_STEP)
+        assert observed == [{'def': str(filled), 'nl': state['nl'], 'sdc': state['sdc']}]
+        for role in ('nl', 'sdc'):
+            output = Path(state[role])
+            assert output.parent == state_path.parent
+            assert receipt['sha256'][output.name] == LC.digest(output)
+        assert Path(state['nl']) != pnr / 'cal_pg_pnr.v'
     else:
         with pytest.raises((LC.Refusal, OSError, ValueError, KeyError)):
             native.produce(p, pnr / 'routed.def' if damage == 'wrong_def' else filled)
