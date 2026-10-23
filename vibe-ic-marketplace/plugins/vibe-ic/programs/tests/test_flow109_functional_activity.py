@@ -117,7 +117,7 @@ def test_actual_front_door_runs_gls_and_consumes_all_data_ports_not_only_clock(t
     ('mode', 'D55_REQUIRED_MODE_COVERAGE'), ('rtl', 'D55_ACTIVITY_BASIS_UNIMPLEMENTED'),
     ('load', 'D55_LOAD_REQUIREMENT_MISMATCH'), ('source', 'D55_OPERATION_SOURCE_CHANGED'),
     ('stale', 'D55_STALE_OR_MISSING_INPUT'), ('approval', 'D55_REQUIREMENTS_NOT_APPROVED'),
-    ('unsupported', 'TOOL_USE_NOT_QUALIFIED')])
+    ('unsupported', 'QUALIFICATION_UNSUPPORTED')])
 def test_bad_scope_or_unqualified_inputs_never_launch_native(tmp_path, monkeypatch, damage, reason):
     context = _case(tmp_path)
     manifest = json.loads((tmp_path / activity.INPUT).read_text())
