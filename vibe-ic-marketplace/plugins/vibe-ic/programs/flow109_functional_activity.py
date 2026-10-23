@@ -272,10 +272,14 @@ def execute(project, context):
         prepared = prepare(project, context)
         record.update(operation_sources=prepared['sources'], inputs=prepared['inputs'])
         def native(argv, cwd):
+            if not argv or argv[0] not in prepared['tools']:
+                _fail('D55_UNDECLARED_ENGINE', str(argv[0] if argv else None))
             _before(project, context, prepared)
-            argv = [prepared['tools'].get(argv[0], argv[0]), *argv[1:]]
+            argv = [prepared['tools'][argv[0]], *argv[1:]]
             record['native_started'] = True
-            result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=120)
+            # Native lifetime belongs to owner/progress supervision; a fixed
+            # wall-clock timeout is not evidence that an EDA operation failed.
+            result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
             log = attempt / f'command-{len(record["commands"])}.log'
             log.write_text(result.stdout + result.stderr)
             record['commands'].append({'argv': argv, 'rc': result.returncode, 'log': _record(project, log)})
@@ -318,7 +322,7 @@ def execute(project, context):
         record['freeze'] = _record(project, attempt / 'freeze.json')
     except AdmissionRefusal as exc:
         record.update(component_status=exc.status, reason=exc.code, detail=str(exc))
-    except (ImportError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+    except (ImportError, OSError, ValueError) as exc:
         record.update(component_status='NOT_MEASURED', reason='D55_NATIVE_UNAVAILABLE_OR_UNSUPPORTED', detail=str(exc))
     record['receipt'] = {'path': str((attempt / 'component.json').relative_to(project))}
     write_json(attempt / 'component.json', record)

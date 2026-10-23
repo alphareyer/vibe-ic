@@ -285,3 +285,31 @@ def test_unbound_transitive_file_inputs_are_rejected_before_native(tmp_path, mon
     assert record['reason'] == reason, record
     assert record['component_status'] == 'NOT_MEASURED'
     assert not calls and not record['native_started']
+
+
+
+def test_native_lifetime_uses_owner_supervision_not_fixed_wall_clock_kill(tmp_path, monkeypatch):
+    context = _case(tmp_path)
+    original = subprocess.run
+    launched = []
+    def supervised(argv, *args, **kwargs):
+        assert 'timeout' not in kwargs
+        launched.append(argv)
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(activity.subprocess, 'run', supervised)
+    record = activity.execute(tmp_path, context)
+    assert record['component_status'] == 'PASS', record
+    assert len(launched) == len(record['commands']) == 3
+    assert record['flow109_acceptance'] == record['final_power_adoption'] == 'NOT_MEASURED'
+
+
+def test_unknown_engine_from_producer_has_no_raw_argv_fallback(tmp_path, monkeypatch):
+    context = _case(tmp_path)
+    def undeclared(*args):
+        return args[-1](['unqualified-engine', 'do-not-start'], str(tmp_path))
+    monkeypatch.setattr(activity.dump, 'dump', undeclared)
+    record = activity.execute(tmp_path, context)
+    assert record['component_status'] == 'NOT_MEASURED'
+    assert record['reason'] == 'D55_UNDECLARED_ENGINE'
+    assert not record['native_started'] and not record['commands']
+    assert not (tmp_path / activity.FREEZE).exists()

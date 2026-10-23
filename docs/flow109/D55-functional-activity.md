@@ -35,7 +35,8 @@ nominal voltage must match. The adapter does not choose product thresholds.
 Each compiler, simulator and OpenSTA use needs an independent current D03
 qualification, with exact executable, library/model scope, operation source
 closure and configuration. Native launch rechecks qualification, source and
-input identities. Generated VCD, scope manifest, Tcl and power report are
+input identities, refuses undeclared engines, and leaves native lifetime to
+owner/progress supervision instead of imposing a fixed wall-clock kill. Generated VCD, scope manifest, Tcl and power report are
 also hash-bound before consumption/publication. Tests' developer control
 records are not production PDK/tool qualification.
 
