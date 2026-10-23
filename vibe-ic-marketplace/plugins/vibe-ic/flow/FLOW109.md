@@ -132,10 +132,35 @@ A proven component publishes
 `adopted/final_lec/sta_lvs_release_netlist_mapping.json` with the common logical
 netlist source and proof identity. This prepares the downstream source chain;
 it does not claim that STA, LVS, or release consumers have run/adopted it.
-`flow109_acceptance` and `baseline_adoption` remain `NOT_MEASURED` until their
-individual metric/consumer bindings are implemented.
+The D44 component also evaluates its two row-local runtime bindings. The
+`final_lec_unproved` count is derived from the complete declared EQY partition
+census (including counterexamples, undecided partitions, and gold-X partitions),
+not from the component verdict. The `sta_lvs_release_netlist_mapping` binding
+revalidates the current manifest, qualification/source closure, proof receipt,
+and exact common netlist bytes for all three named roles. Missing or stale
+evidence cannot pass. Its `consumer_adoption: NOT_MEASURED` explicitly means the
+mapping is proven here but downstream STA/LVS execution is not.
+
+The source-whitelisted runtime-metric consumer re-evaluates both bindings from
+current evidence and applies the registry's typed `eq` and
+`matches_adopted_reference` operators. Its row record sets `delivery_blocked`
+for missing/stale or failing evidence, and only both current obligations may
+produce row-metric `PASS`. The canonical single-component dispatcher still
+returns the component verdict rather than this row record; changing that shared
+policy is outside D44 registration. This does not convert a component result
+into whole-flow acceptance:
+`flow109_acceptance` and `baseline_adoption` remain `NOT_MEASURED`, downstream
+production qualification is not inferred, and G1-G9 remain separately
+unmeasured.
 
 ## D62 ODB metal-density fill component
+
+Default execution preserves the existing native fill/readback checks. Missing
+additional density/keepout audit documents do not prevent that native operation
+or its engineering handoff. They leave metric acceptance `NOT_MEASURED` and
+delivery blocked. Supplied documents must remain current and valid. The native
+checkers run when their approved limits are available; missing limits never
+become assumed passing density results.
 
 `--entry-step D62 --exit-step D62` uses OpenROAD `density_fill` on the bound
 input ODB, writes a new ODB in an immutable attempt directory, and opens it in
@@ -146,15 +171,27 @@ previous fill cannot disappear, and the independent fill census must agree.
 
 `flow109_density_fill.validate_filled_odb` verifies the current receipt and
 output hashes before a downstream consumer can use them. The synthetic native
-control proves fill persistence; it does not qualify GF180 rules or establish
-that an extractor models floating-fill capacitance. The handoff therefore
-keeps `extraction_fill_sensitivity: NOT_VERIFIED`. D69 must consume a common
-final ODB/GDS geometry identity and qualified extraction evidence; an old
-pre-fill GDS or SPEF cannot satisfy that requirement.
+control proves fill persistence. The D62 runtime metric checker separately runs
+OpenROAD `check_metal_density` over the current filled ODB using approved,
+rules/PDK-bound per-layer limits and an approved core window/step. It also
+counts actual intersections between `dbFill` rectangles and OpenDB
+`isFillObstruction` rectangles. The receipt binds the three exact native argv
+and read sets, checker sources, authority documents, ODB/DEF outputs, and tool
+identity. An empty keepout set is measured only when the requirements owner has
+explicitly validated its absence.
+
+These are source-qualified D62 current-ODB measurements, not a foundry DFM deck
+signoff. D63 still owns final-GDS DFM semantics; D62 does not reuse fill counts
+as density or invent a zero keepout result. The fixture controls do not qualify
+GF180 rules or establish that an extractor models floating-fill capacitance.
+The handoff therefore keeps `extraction_fill_sensitivity: NOT_VERIFIED`. D69
+must consume a common final ODB/GDS geometry identity and qualified extraction
+evidence; an old pre-fill GDS or SPEF cannot satisfy that requirement.
 
 This adapter does not adopt an old GDS-finishing result, update STA/LVS release
-acceptance, or grant a full D62 or 109-flow PASS. Those metric and downstream
-bindings remain separate implementation work.
+acceptance, or grant a 109-flow PASS. A D62 row PASS covers only its three
+current metric obligations; downstream and whole-flow acceptance remain
+separate.
 
 ## Measured final-extraction blocker
 
