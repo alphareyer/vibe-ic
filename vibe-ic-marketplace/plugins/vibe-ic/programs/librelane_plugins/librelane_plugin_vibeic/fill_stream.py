@@ -47,7 +47,7 @@ class FillAwareStreamOut(StreamOut):
         for def_file, gds_file in [(bare, bare_gds), (source, Path(argv[output_index]))]:
             if any(bridge._sha(Path(p)) != sha for p, sha in inputs.items()):
                 raise StepError('FILL_STREAM_INPUT_CHANGED')
-            command = list(argv)
+            command = list(map(str, argv))
             command[1] = str(PROGRAMS / 'librelane_fill_stream_native.py')
             command[2], command[output_index] = str(def_file), str(gds_file)
             super().run_pya_script(command, **kwargs)
