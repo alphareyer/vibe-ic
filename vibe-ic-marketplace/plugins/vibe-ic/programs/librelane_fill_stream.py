@@ -144,8 +144,10 @@ def native_script():
 
 def operation_sources():
     paths = [Path(__file__), HERE / 'librelane_fill_stream_native.py', HERE / 'flow109_density_fill.py', HERE / 'flow109_density_fill.tcl']
+    # Host-side consumers may not have LibreLane installed; the actual native
+    # launch separately enforces this exact script digest before compilation.
     return {**{'programs/' + p.name: _sha(p) for p in paths},
-            'native/librelane/scripts/klayout/stream_out.py': _sha(native_script())}
+            'native/librelane/scripts/klayout/stream_out.py': NATIVE_STREAM_SHA256}
 
 
 def _instances(cell):
@@ -386,3 +388,25 @@ def stream_d62(project, d62_receipt_ref, native_inputs, attempt, *, before_launc
     receipt.update(d62_receipt=d62_receipt_ref, odb=d62['odb'])
     write_json(path, receipt)
     return _record(Path(project), path)
+
+
+def validate_native_stage(folder, filled_def, filled_gds):
+    """Independent consumer of the native Step's own geometry publication."""
+    folder = Path(folder)
+    receipt = json.loads((folder / 'fill_stream_geometry.json').read_text())
+    if receipt.get('schema') != SCHEMA or receipt.get('component_status') != 'PASS':
+        raise Refusal('FILL_STREAM_RECEIPT_UNACCEPTED', str(folder))
+    if receipt.get('operation_sources') != operation_sources():
+        raise Refusal('FILL_STREAM_OPERATION_CHANGED', str(folder))
+    for path, sha in receipt['inputs'].items():
+        if not Path(path).is_file() or _sha(path) != sha:
+            raise Refusal('FILL_STREAM_INPUT_CHANGED', str(path))
+    if receipt['inputs'].get(str(Path(filled_def))) != _sha(filled_def):
+        raise Refusal('FILL_STREAM_INPUT_CHANGED', str(filled_def))
+    if _bound(folder, receipt['filled_gds']).resolve() != Path(filled_gds).resolve():
+        raise Refusal('FILL_STREAM_WRONG_GDS', str(filled_gds))
+    bare = _bound(folder, receipt['bare_gds'])
+    proof = geometry_proof(filled_def, bare, filled_gds, receipt['geometry_proof']['layers'])
+    if proof != receipt['geometry_proof']:
+        raise Refusal('FILL_STREAM_PROOF_CHANGED', str(folder))
+    return receipt

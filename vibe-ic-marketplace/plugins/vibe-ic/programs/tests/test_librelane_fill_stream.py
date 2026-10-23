@@ -189,3 +189,65 @@ def test_reader_fill_cell_does_not_authorize_changed_position_or_other_geometry(
     top.insert(db.CellInstArray(child.cell_index(), db.Trans(10, 0) if damage == 'transform' else db.Trans()))
     with pytest.raises(Refusal, match='FILL_STREAM_NATIVE_CELL_TRANSFORM|FILL_STREAM_FILL_GEOMETRY_MISMATCH'):
         stream._native_fill_child(bare, filled, parsed, {'M': [10, 4]})
+
+
+def test_native_librelane_subclass_retains_state_and_executes_verified_fill_producer(tmp_path):
+    import sys
+    sys.path.insert(0, str(stream.HERE / 'librelane_plugins'))
+    from librelane_plugin_vibeic.fill_stream import FillAwareStreamOut
+    from librelane.config import Config
+    from librelane.state import State, DesignFormat
+    from librelane.common import Path as LLPath
+    d62, inputs = _native_case(tmp_path)
+    source = json.loads((tmp_path / d62['path']).read_text())
+    filled = stream._bound(tmp_path, source['outputs']['filled.def'])
+    mapping = tmp_path / 'inputs/derived.map'
+    stream.derive_map(stream._bound(tmp_path, inputs['base_map']),
+                      stream._bound(tmp_path, source['inputs']['rules']), filled, mapping)
+    config, _ = Config.load({'DESIGN_NAME': 'fill_smoke', 'PDK': 'gf180mcuD',
+        'STD_CELL_LIBRARY': 'gf180mcu_fd_sc_mcu7t5v0',
+        'TECH_LEFS': {'nom_*': str(tmp_path / 'inputs/tech.lef')},
+        'CELL_LEFS': [], 'CELL_GDS': [], 'PRIMARY_GDSII_STREAMOUT_TOOL': 'klayout',
+        'KLAYOUT_TECH': str(tmp_path / 'inputs/control.lyt'),
+        'KLAYOUT_PROPERTIES': str(tmp_path / 'inputs/control.lyp'),
+        'KLAYOUT_DEF_LAYER_MAP': str(mapping)}, FillAwareStreamOut.get_all_config_variables(),
+        design_dir=str(tmp_path), pdk_root='/foss/pdks')
+    step = FillAwareStreamOut(config=config, state_in=State({DesignFormat.DEF: LLPath(str(filled))}))
+    folder = tmp_path / 'native-step'
+    state = step.start(step_dir=str(folder))
+    gds = Path(state[DesignFormat.KLAYOUT_GDS])
+    result = stream.validate_native_stage(folder, filled, gds)
+    assert result['geometry_proof']['fill_count'] == source['measurements']['fill_count_after']
+    assert state[DesignFormat.GDS] == str(folder / 'fill_smoke.gds')
+    command_text = (folder / 'COMMANDS').read_text()
+    assert str(stream.HERE / 'librelane_fill_stream_native.py') in command_text
+    assert 'fill-proof-bare.def' in command_text and str(filled) in command_text
+
+
+def test_default_stream_selects_fill_producer_only_from_actual_fills_and_bound_rule_authority(tmp_path, monkeypatch):
+    import librelane_fill_dfm as finishing
+    d62, inputs = _native_case(tmp_path)
+    source = json.loads((tmp_path / d62['path']).read_text())
+    filled = stream._bound(tmp_path, source['outputs']['filled.def'])
+    config_path = tmp_path / 'base-config.json'
+    config_path.write_text(json.dumps({'KLAYOUT_DEF_LAYER_MAP': str(tmp_path / inputs['base_map']['path'])}))
+    configs = {'KLayout.StreamOut': config_path}
+    calls = []
+    def resolve(project, image, pdk, steps, **kwargs):
+        calls.append((steps, kwargs))
+        assert steps == [finishing.FILL_STREAM_STEP]
+        derived = Path(kwargs['overlay']['KLAYOUT_DEF_LAYER_MAP'][0])
+        assert 'M1 FILL 1 4' in derived.read_text()
+        return {finishing.FILL_STREAM_STEP: derived}
+    monkeypatch.setattr(finishing, 'resolve_step_configs', resolve)
+    _put(tmp_path, 'reports/flow109/components/D62.json', {'receipt': d62})
+    (tmp_path / 'phase3/librelane/34-config').mkdir(parents=True)
+    selected, _ = finishing._select_fill_stream(tmp_path, 'test_image', tmp_path, 'test_pdk', filled, configs)
+    assert selected == finishing.FILL_STREAM_STEP and len(calls) == 1
+    before = stream._bound(tmp_path, source['outputs']['before.def'])
+    assert finishing._select_fill_stream(tmp_path, 'test_image', tmp_path, 'test_pdk', before, configs) == ('KLayout.StreamOut', configs)
+    assert len(calls) == 1
+    filled.write_text(filled.read_text() + '\n# changed after producer\n')
+    with pytest.raises(admission.AdmissionRefusal, match='STALE'):
+        finishing._select_fill_stream(tmp_path, 'test_image', tmp_path, 'test_pdk', filled, configs)
+    assert len(calls) == 1

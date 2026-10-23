@@ -68,6 +68,7 @@ RECORD_REL = 'reports/phase3/fill_librelane.json'
 #: The cells step 34 placed, per master and class (F20b reads it).
 CELLS_REL = 'reports/phase3/fill_cells_placed.json'
 CONFIG_FOLDER = '34-config'
+FILL_STREAM_STEP = 'Vibeic.FillAwareStreamOut'
 
 
 def _mounts(pdk_root: Path, pdk: str) -> list:
@@ -1263,8 +1264,11 @@ def validate_default_stream(project: Path) -> dict:
     record = doc['default_stream']
     if _load(project / DEFAULT_STREAM_REL) != record:
         raise Refusal('LL_FINISHING_PROMOTION_CHANGED', DEFAULT_STREAM_REL)
+    stream_step = record.get('stream_step', 'KLayout.StreamOut')
+    if stream_step not in ('KLayout.StreamOut', FILL_STREAM_STEP):
+        raise Refusal('LL_STREAM_STEP_UNSUPPORTED', str(stream_step))
     stream_fp = validate_step_receipt(
-        Path(record['stream_state']).parent, 'KLayout.StreamOut')['input']
+        Path(record['stream_state']).parent, stream_step)['input']
     if (record.get('image') != stream_fp.get('image')
             or record.get('image') != _record_provider_binding(project, stream_fp)):
         raise Refusal('LL_FINISHING_IMAGE_CHANGED', str(record.get('image')))
@@ -1289,8 +1293,8 @@ def validate_default_stream(project: Path) -> dict:
     stream_state = Path(record['stream_state'])
     if digest(stream_state) != record['stream_state_sha256']:
         raise Refusal('LL_FINISHING_STATE_CHANGED', str(stream_state))
-    before, after = _current_stage(project, stream_state, 'KLayout.StreamOut')
-    config = _load(project / 'phase3/librelane' / CONFIG_FOLDER / 'KLayout.StreamOut.json')
+    before, after = _current_stage(project, stream_state, stream_step)
+    config = _load(project / 'phase3/librelane' / CONFIG_FOLDER / (stream_step + '.json'))
     if (Path(before['def']).resolve() != filled.resolve()
             or _def_design_name(filled) != config.get('DESIGN_NAME')
             or config.get('DESIGN_NAME') != record['design_name']
@@ -1361,7 +1365,10 @@ def validate_default_stream(project: Path) -> dict:
             or len(argv) < 3 or Path(argv[2]).resolve() != filled.resolve()
             or not cli.get('inputs')):
         raise Refusal('LL_STREAM_COMMAND_UNBOUND', str(cli))
-    native_receipt = validate_step_receipt(stream_state.parent, 'KLayout.StreamOut')
+    native_receipt = validate_step_receipt(stream_state.parent, stream_step)
+    if stream_step == FILL_STREAM_STEP:
+        from librelane_fill_stream import validate_native_stage
+        validate_native_stage(stream_state.parent, Path(record['filled_def']), Path(record['stream']))
     # _current_stage already re-hashed these guest-side configuration paths
     # through its declared mounts; the CLI must name exactly those materials.
     for entry in cli['inputs']:
@@ -1375,8 +1382,14 @@ def validate_default_stream(project: Path) -> dict:
     return record
 
 
-def _default_stream_recipe(project: Path, image: str, root: Path) -> tuple[Path, str]:
+def _default_stream_recipe(project: Path, image: str, root: Path,
+                           step: str = 'KLayout.StreamOut') -> tuple[Path, str]:
     """Retain the actual image's native recipe before starting stream-out."""
+    if step == FILL_STREAM_STEP:
+        source = Path(__file__).parent / 'librelane_fill_stream_native.py'
+        recipe = project / 'phase3/stage3/pnr/stream_out.py'
+        recipe.write_bytes(source.read_bytes())
+        return recipe, str(source.resolve())
     probe = ('import json; from pathlib import Path; '
              'from librelane.common import get_script_dir; '
              'p=Path(get_script_dir())/"klayout/stream_out.py"; '
@@ -1401,7 +1414,8 @@ def _default_stream_inputs(project: Path, top: str, folder: Path, image: str,
     import _stream_input_record as sir
     commands = [shlex.split(line) for line in (folder / 'COMMANDS').read_text().splitlines()
                 if line.strip()]
-    calls = [argv for argv in commands if len(argv) > 2 and argv[1] == native_script]
+    calls = [argv for argv in commands if len(argv) > 2 and argv[1] == native_script
+             and Path(argv[2]).resolve() == filled.resolve()]
     if len(calls) != 1:
         raise Refusal('LL_STREAM_COMMAND_UNBOUND', str(commands))
     argv = calls[0]
@@ -1429,6 +1443,7 @@ def _default_stream_inputs(project: Path, top: str, folder: Path, image: str,
              'for p in json.loads(sys.argv[1])}))')
     cp = run_container(['docker', 'run', '--rm', *_dmem.docker_memory_flags(),
                         '-v', f'{project}:{project}:ro', '-v', f'{root}:/pdk:ro',
+                        '-v', f'{Path(__file__).parent}:{Path(__file__).parent}:ro',
                         image, '--skip', 'python3', '-c', probe,
                         json.dumps([native_script, *[p for _, p in paths]])],
                        probe_deadline_s=PROBE_DEADLINE_S)
@@ -1446,6 +1461,44 @@ def _default_stream_inputs(project: Path, top: str, folder: Path, image: str,
                                        for i, path in paths]}
     sir.write(project / 'phase3/stage3/pnr' / f'{top}.gds', record)
     return record
+
+
+def _select_fill_stream(project: Path, image: str, root: Path, pdk: str,
+                        filled: Path, configs: dict) -> tuple[str, dict]:
+    """Choose the explicit native fill producer only when actual FILLS exist."""
+    from librelane_fill_stream import fill_records, derive_map, _record
+    if not fill_records(filled)['shapes']:
+        return 'KLayout.StreamOut', configs
+    cfg = _load(configs['KLayout.StreamOut'])
+    base = _host_pdk_path(cfg['KLAYOUT_DEF_LAYER_MAP'], root, pdk)
+    target = project / 'phase3/librelane' / CONFIG_FOLDER / 'explicit-fill.map'
+    rules = None
+    try:
+        derive_map(base, None, filled, target)
+    except Refusal as exc:
+        if exc.code != 'FILL_STREAM_RULE_AUTHORITY_ABSENT':
+            raise
+        # A genuine D62 producer receipt binds the actual rules AND this DEF.
+        # An arbitrary manifest claiming a rule path is insufficient authority.
+        import flow109_density_fill as density
+        from librelane_fill_stream import _bound
+        component = _load(project / 'reports/flow109/components/D62.json')
+        receipt_ref = _record(project, project / component['receipt']['path'])
+        density.validate_filled_odb(project, receipt_ref)
+        receipt = _load(_bound(project, receipt_ref))
+        if receipt['outputs']['filled.def']['sha256'] != digest(filled):
+            raise Refusal('LL_FILL_STREAM_WRONG_D62_SUBJECT', str(filled))
+        rules = _bound(project, receipt['inputs']['rules'])
+        derive_map(base, rules, filled, target)
+    authority = {'base_map': str(base), 'base_map_sha256': digest(base),
+                 'rules': str(rules) if rules else None,
+                 'rules_sha256': digest(rules) if rules else None,
+                 'derived_map': str(target), 'derived_map_sha256': digest(target)}
+    write_json(target.with_suffix('.authority.json'), authority)
+    selected = resolve_step_configs(project, image, pdk, [FILL_STREAM_STEP],
+        pdk_root=root, folder=CONFIG_FOLDER,
+        overlay={'KLAYOUT_DEF_LAYER_MAP': (str(target), 'verified DEF FILL layer purposes')})
+    return FILL_STREAM_STEP, selected
 
 
 @_spf.retained_step('37')
@@ -1527,16 +1580,18 @@ def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
     image, root = runner._librelane_step_ctx(project, '34', pdk.name)
     configs = resolve_step_configs(project, image, pdk.name, ['KLayout.StreamOut'],
                                    pdk_root=root, folder=CONFIG_FOLDER)
+    stream_step, configs = _select_fill_stream(project, image, root, pdk.name, filled, configs)
     odb = _load(project / RECORD_REL)['odb']['tool']
     state = _load(Path(odb['state']))
     state['def'] = str(filled)
     initial = project / 'phase3/librelane/37-default-state.json'
     write_json(initial, state)
-    recipe, native_script = _default_stream_recipe(project, image, root)
-    folder = run_chain(project, image, [('KLayout.StreamOut', configs['KLayout.StreamOut'], initial)],
+    recipe, native_script = (_default_stream_recipe(project, image, root) if stream_step == 'KLayout.StreamOut'
+                             else _default_stream_recipe(project, image, root, stream_step))
+    folder = run_chain(project, image, [(stream_step, configs[stream_step], initial)],
                        mounts=_mounts(root, pdk.name), lane='37-default-stream',
                        pdk_root=PDK_GUEST_ROOT)[0]
-    before, after = _current_stage(project, folder / 'state_out.json', 'KLayout.StreamOut')
+    before, after = _current_stage(project, folder / 'state_out.json', stream_step)
     stream = Path(after['klayout_gds'])
     _default_stream_inputs(project, top, folder, image, root, pdk.name,
                            recipe, native_script, filled, stream)
@@ -1570,11 +1625,12 @@ def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
     # Existing output gates judge the actual filled subject, before promotion.
     from librelane_step37 import _vibeic_gds_gates
     gates = _vibeic_gds_gates(project, image, root, pdk.name, pnr_gds, filled,
-                             'default', configs['KLayout.StreamOut'])
+                             'default', configs[stream_step])
     if any(row['rc'] != 0 or not row['sha256'] for row in gates.values()):
         raise Refusal('LL_FINISHED_GDS_GATE_FAILED', str(gates))
     shutil.copyfile(pnr_gds, canonical)
     record = {'file_top': top, 'design_name': _def_design_name(filled),
+              'stream_step': stream_step,
               'image': image, 'pdk': pdk.name, 'gates': gates,
               'prior_promotion_refusal': reuse_refusal,
               'finishing_status': finishing.status,

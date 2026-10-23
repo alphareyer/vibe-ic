@@ -1832,6 +1832,7 @@ _EARLY_STEP_INPUTS: dict[str, tuple[str, ...]] = {
     'Magic.SpiceExtraction': ('gds', 'def'),
     'Netgen.LVS': ('spice', 'pnl'), 'KLayout.LVS': ('cdl', 'gds'),
     # Stream-level checks and finishing read the stream alone (steps 26, 26.5ic).
+    'Vibeic.FillAwareStreamOut': ('def',),
     'KLayout.Antenna': ('gds',), 'Checker.KLayoutAntenna': (),
     'KLayout.SealRing': ('gds',), 'KLayout.XOR': ('mag_gds', 'klayout_gds'),
     # Step 34's stream finishing (the PDK fill script, its density deck).
@@ -3153,7 +3154,8 @@ def class_defaults_in_force(project: Path) -> dict[str, str]:
 PLUGIN_ROOT = Path(__file__).resolve().parent / 'librelane_plugins'
 PLUGIN_STEP_PREFIX = 'Vibeic.'
 #: The `programs/` modules the plugin's steps import (inputs of those steps).
-PLUGIN_HOST_MODULES = ('_spare_plan.py', 'dynamic_ir_vectored_emit.py')
+PLUGIN_HOST_MODULES = ('_spare_plan.py', 'dynamic_ir_vectored_emit.py',
+                       'librelane_fill_stream.py', 'librelane_fill_stream_native.py')
 
 
 def _plugin_args(step_ids: list[str]) -> list[str]:
