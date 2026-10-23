@@ -1,6 +1,7 @@
 """A02 actual-ngspice component controls; these are not PDK signoff."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ import subprocess
 import flow109
 import flow109_admission as admission
 import flow109_analog_a02 as analog
+import flow109_analog_model_check as model_check
 from _analog_producer_fixture import block, make_project
 
 
@@ -179,3 +181,64 @@ def test_unsupported_qualification_refuses_before_component_dispatch(tmp_path):
     assert result.returncode == 2, result.stdout + result.stderr
     assert 'QUALIFICATION_UNSUPPORTED' in result.stderr
     assert not (tmp_path / 'reports/flow109/attempts').exists()
+
+
+def test_a02_diagnostic_prose_polarity_counterexample_and_source_reverse(tmp_path, monkeypatch):
+    """A denied fatal phrase is clean; a live fatal phrase still blocks."""
+    _case(tmp_path)
+    native = _run(tmp_path)
+    assert native.returncode == 0, native.stdout + native.stderr
+    component_path = tmp_path / 'reports/flow109/components/A02.json'
+    report = json.loads(component_path.read_text())
+    requirements = json.loads((tmp_path / 'input/flow109/A02-requirements.json').read_text())
+    row = report['smokes'][0]
+    log = tmp_path / row['log']['path']
+    original = log.read_bytes()
+
+    log.write_bytes(original + b'\nno fatal error occurred\n')
+    row['log']['sha256'] = hashlib.sha256(log.read_bytes()).hexdigest()
+    consulted = model_check.consume(tmp_path, requirements, report)
+    _put(tmp_path, 'reports/flow109/A02-polarity-consulted.json', consulted)
+    assert consulted['verdict'] == 'PASS', consulted
+
+    canonical = model_check._polarity.is_denied
+    monkeypatch.setattr(model_check._polarity, 'is_denied', lambda *_a, **_k: None)
+    reversed_result = model_check.consume(tmp_path, requirements, report)
+    _put(tmp_path, 'reports/flow109/A02-source-reverse.json', reversed_result)
+    assert reversed_result['verdict'] == 'FAIL'
+    assert reversed_result['reason'] == 'A02_NATIVE_MODEL_LOAD_FAILED'
+
+    monkeypatch.setattr(model_check._polarity, 'is_denied', canonical)
+    restored = model_check.consume(tmp_path, requirements, report)
+    _put(tmp_path, 'reports/flow109/A02-source-restored.json', restored)
+    assert restored['verdict'] == 'PASS', restored
+
+    # Here "no" belongs to the diagnostic itself: it constitutes failure and
+    # must not be mistaken for prose that retracts the diagnostic.
+    log.write_bytes(original + b'\nno simulations run\n')
+    row['log']['sha256'] = hashlib.sha256(log.read_bytes()).hexdigest()
+    constitutive_fatal = model_check.consume(tmp_path, requirements, report)
+    _put(tmp_path, 'reports/flow109/A02-constitutive-fatal.json', constitutive_fatal)
+    assert constitutive_fatal['verdict'] == 'FAIL'
+    assert constitutive_fatal['reason'] == 'A02_NATIVE_MODEL_LOAD_FAILED'
+
+    log.write_bytes(original + b'\nfatal error occurred\n')
+    row['log']['sha256'] = hashlib.sha256(log.read_bytes()).hexdigest()
+    live_fatal = model_check.consume(tmp_path, requirements, report)
+    _put(tmp_path, 'reports/flow109/A02-live-fatal.json', live_fatal)
+    assert live_fatal['verdict'] == 'FAIL'
+    assert live_fatal['reason'] == 'A02_NATIVE_MODEL_LOAD_FAILED'
+
+    # Measurement identifiers are formal ngspice tokens.  A token containing
+    # an English denial spelling is still data, not prose to suppress.
+    formal_report, formal_requirements = copy.deepcopy(report), copy.deepcopy(requirements)
+    formal_row = formal_report['smokes'][0]
+    formal_need = next(item for item in formal_requirements['required_smokes']
+                       if item['id'] == formal_row['id'])
+    formal_row['required_measurements'] = formal_need['required_measurements'] = ['no_gain']
+    log.write_bytes(original + b'\nno_gain = 1.0\n')
+    formal_row['log']['sha256'] = hashlib.sha256(log.read_bytes()).hexdigest()
+    formal = model_check.consume(tmp_path, formal_requirements, formal_report)
+    _put(tmp_path, 'reports/flow109/A02-formal-measurement.json', formal)
+    assert formal['verdict'] == 'PASS', formal
+    assert formal['smokes'][0]['measurements'] == {'no_gain': 1.0}

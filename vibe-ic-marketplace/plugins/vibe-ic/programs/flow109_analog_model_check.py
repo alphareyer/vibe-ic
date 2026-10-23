@@ -6,6 +6,8 @@ import math
 from pathlib import Path
 import re
 
+import _prose_polarity as _polarity
+
 FATAL = (
     'could not find a valid modelname', 'unable to find definition of model',
     'unknown subckt', 'unknown device type', 'no simulations run',
@@ -16,6 +18,26 @@ NUMBER = r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?'
 
 def _sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _fatal_diagnostic(text, polarity):
+    """Return a live ngspice fatal marker, excluding prose that denies it.
+
+    Each log line is a diagnostic record.  A denial *inside* a marker (for
+    example ``no simulations run`` or ``could not find ...``) constitutes the
+    failure and is blanked with the rest of that marker.  A denial elsewhere
+    in the same record (``no fatal error occurred``) retracts the marker.
+    """
+    for marker in FATAL:
+        for match in re.finditer(re.escape(marker), text, re.IGNORECASE):
+            lo, hi = polarity.sentence_scope(
+                text, match.start(), match.end(), extra_breaks=("\n",))
+            clause = text[lo:hi]
+            start, end = match.start() - lo, match.end() - lo
+            without_marker = clause[:start] + (" " * (end - start)) + clause[end:]
+            if polarity.is_denied(without_marker, ignore_bracketed=False) is None:
+                return marker
+    return None
 
 
 def consume(project, requirements, report):
@@ -45,8 +67,11 @@ def consume(project, requirements, report):
         except (KeyError, OSError):
             return {'verdict': 'FAIL', 'reason': 'A02_CURRENT_EVIDENCE_STALE', 'smokes': checked}
         text = log.read_text(errors='replace')
-        lowered = text.lower()
-        if row.get('returncode') != 0 or any(marker in lowered for marker in FATAL):
+        # Diagnostics are prose records, so their polarity is canonical.  The
+        # measurement records below are instead a closed ngspice grammar:
+        # anchored approved identifier, '=', and NUMBER; no prose is inferred.
+        fatal = _fatal_diagnostic(text, _polarity)
+        if row.get('returncode') != 0 or fatal is not None:
             return {'verdict': 'FAIL', 'reason': 'A02_NATIVE_MODEL_LOAD_FAILED', 'smokes': checked}
         values = {}
         for name in need['required_measurements']:
