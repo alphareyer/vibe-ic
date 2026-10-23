@@ -80,7 +80,7 @@ def _before(project, context, prepared):
 
 # The current request is visible at the contract's real config/native launch
 # boundaries too. No request means ordinary old-flow behavior is unchanged.
-def require_librelane_launch(project, operation):
+def require_librelane_launch(project, operation, *, configuration=False):
     context_path = os.environ.get('VIBEIC_FLOW109_CONTEXT')
     if not context_path:
         return
@@ -93,7 +93,8 @@ def require_librelane_launch(project, operation):
     if active is None or active['project'] != Path(project).resolve() or active['context'] != context:
         raise AdmissionRefusal('D22_LAUNCH_CONTEXT_UNBOUND', str(operation))
     _before(Path(project), context, active['prepared'])
-    active['operations'].append(operation)
+    if not configuration:
+        active['operations'].append(operation)
 
 
 def prepare(project, context):

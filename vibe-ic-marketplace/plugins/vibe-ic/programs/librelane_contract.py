@@ -3798,7 +3798,7 @@ def resolve_step_config(project: Path, image: str, source: Path, output: Path,
     # in either case there is no step-specific plugin to mount yet.
     step_id = _load(source).get('meta', {}).get('step', '') if source.is_file() else ''
     from flow109_frontend import require_librelane_launch
-    require_librelane_launch(project, step_id)
+    require_librelane_launch(project, step_id, configuration=True)
     result = run_container([docker, 'run', *_dmem.docker_memory_flags(), '--rm', *volumes,
                             *_plugin_args([step_id]),
                             '--entrypoint', 'python3', image, '-c', script],
