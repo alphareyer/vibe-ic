@@ -464,6 +464,7 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
         producer_manifest['files'] = _declared_input_files(project, input_contract)
     producer = {"verdict": "NOT_MEASURED", "detail": "producer did not run"}
     gate_result = {"status": "NOT_MEASURED", "ledger": []}
+    admission_result = None
     if missing_inputs:
         # Do not launch a producer against an incomplete project.  In
         # particular, a native producer may create or mutate artifacts before
@@ -476,10 +477,14 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
         try:
             params = dict(params, step_id=str(step_id), project=project,
                           resolved_input_manifest=producer_manifest)
+            from flow109_admission import require_launch_admission
+            admission_result = require_launch_admission(project, step_id, params)
             producer = produce(project, params)
             if not isinstance(producer, dict):
                 producer = {"verdict": "NOT_MEASURED", "detail": "producer returned no result"}
         except BaseException as exc:
+            if getattr(exc, 'report', None) is not None:
+                admission_result = exc.report
             producer = {"verdict": "NOT_MEASURED", "detail": f"{type(exc).__name__}: {exc}",
                         "canonical_receipts": [{
                             "schema": "vibeic/backend-producer-receipt/1",
@@ -536,6 +541,7 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
             "current_step_declared_producers"),
         "input_contract": input_contract, "missing_inputs": missing_inputs,
         "resolved_input_manifest": resolved,
+        "flow109_admission": admission_result,
     }
     (outputs / "backend_result.json").write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     return result

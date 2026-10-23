@@ -4,7 +4,7 @@ The Vibe-IC flow has **70<!--figure:flow_steps--> steps**. The 2026-07 audit
 asked **9<!--figure:matrix_dimensions--> questions** of each one.
 70<!--figure:flow_steps--> × 9<!--figure:matrix_dimensions--> =
 **630<!--figure:ledger_cells--> cells**. This package is the substrate that
-all eight dimension test-modules import so they agree on what a step is, what
+all nine dimension test-modules import so they agree on what a step is, what
 a gate says, and which cells exist.
 
 Five of those steps are PATH-SPECIFIC and do not run for every design: 0.5ic,
@@ -94,22 +94,33 @@ unconditionally is forbidden** — that is silent absence wearing a hat.
 
 ---
 
-## The eight dimensions
+## The nine gate layers: G1-G9
 
-| # | name | the question |
+Gate-layer IDs use `G1` through `G9`. They are independent of design-step
+IDs (`D`/`A`/`M` in the new flow) and specification documents (`L1`-`L27`).
+The numeric `dim` coordinates and historical `d1_*` through `d8_*` audit
+fields stay unchanged. Existing `test_matrix_d*.py` module names are retained
+as compatibility aliases for trusted test selections; their filenames are
+not the public gate namespace. New labels and snapshots expose the G IDs.
+Historical receipts and generated census counts are not rewritten by this
+naming change. A later census renders G labels but remains evidence only for
+the flow and source it actually examined, not an automatic 109-by-9 result.
+
+| gate | name | the question |
 |---|------|--------------|
-| 1 | `wiring` | Is the gate actually wired — does something real parse and execute it? |
-| 2 | `falsifiable` | Can the gate fail? Is there a reachable non-zero-exit branch? |
-| 3 | `outputs_produced` | Are the declared `required_outputs` genuinely produced? |
-| 4 | `criteria_match` | Does the gate measure what its name and docstring claim? |
-| 5 | `deps_correct` | Is `blocks_on` the true upstream set — no missing, no phantom edge? |
-| 6 | `skip_discipline` | Is every skip / vacuous-pass disclosed rather than counted as a pass? |
-| 7 | `outputs_list_complete` | Is `required_outputs` complete — does the step emit artefacts it never declares? |
-| 8 | `missing_caught` | When a declared output IS missing, which mechanism catches it? |
+| G1 | `wiring` | Is the gate actually wired — does something real parse and execute it? |
+| G2 | `falsifiable` | Can the gate fail? Is there a reachable non-zero-exit branch? |
+| G3 | `outputs_produced` | Are the declared `required_outputs` genuinely produced? |
+| G4 | `criteria_match` | Does the gate measure what its name and docstring claim? |
+| G5 | `deps_correct` | Is `blocks_on` the true upstream set — no missing, no phantom edge? |
+| G6 | `skip_discipline` | Is every skip / vacuous-pass disclosed rather than counted as a pass? |
+| G7 | `outputs_list_complete` | Is `required_outputs` complete — does the step emit artefacts it never declares? |
+| G8 | `missing_caught` | When a declared output IS missing, which mechanism catches it? |
+| G9 | `verdict_consumed` | When this step fails, does its verdict reach the exit code? |
 
 Dimensions **1–7 ask about the GATE**. Dimension **8 asks about the CATCHER**,
-which is a different *kind* of question, so it sits last and the number equals
-display order. **The audit JSON is already in this numbering.** There is no
+which is a different *kind* of question. Gate G9 was added after the original
+eight-question audit. **The audit JSON keeps its original numbering.** There is no
 legacy mapping to apply and none must be introduced — a maintained old/new
 cross-reference is exactly the maintenance burden this renumbering removes.
 

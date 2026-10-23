@@ -1060,6 +1060,7 @@ def _census_rows_from(CV, SUB, DIMENSIONS, NAMES, QUESTIONS) -> Tuple[
         buckets = [v for (s, d), v in subs.items() if d == dim]
         rows.append({
             "dim": dim,
+            "gate_id": f"G{dim}",
             "name": NAMES[dim],
             "question": QUESTIONS[dim],
             "own": buckets.count(SUB.OWN_MECHANISM),
@@ -1156,7 +1157,7 @@ def _check_table_partitions(rows: List[Dict], totals: Dict[str, int]) -> None:
         printed = sum(r[c] for c in _ENFORCED_COLUMNS + _LABEL_COLUMNS)
         if per_dim and printed != per_dim:
             raise SystemExit(
-                f"the published row for dimension {r['dim']} accounts for "
+                f"the published row for gate G{r['dim']} accounts for "
                 f"{printed} of its {per_dim} cells. A row that does not "
                 f"partition publishes a dimension as smaller than it is; the "
                 f"cells it drops are not reported anywhere. Give every label a "
@@ -1353,7 +1354,7 @@ def render(rows: List[Dict], totals: Dict[str, int]) -> str:
     # below for every ROW as well as the total, so this cannot be lost again by
     # adding a label.
     _check_table_partitions(rows, totals)
-    out.append("| dim | question | ENFORCED: own | ENFORCED: substituted "
+    out.append("| gate | question | ENFORCED: own | ENFORCED: substituted "
                "| ENFORCED: undeclared | CONTRADICTED | NOT MEASURED "
                "| WAIVED | NA |")
     out.append("|-----|----------|--------------:|----------------------:"
@@ -1361,7 +1362,7 @@ def render(rows: List[Dict], totals: Dict[str, int]) -> str:
                "|-------:|---:|")
     for r in rows:
         out.append(
-            f"| {r['dim']} | `{r['name']}` — {r['question']} "
+            f"| G{r['dim']} | `{r['name']}` — {r['question']} "
             f"| {r['own']} | {r['substituted']} | {r['undeclared']} "
             f"| {r['contradicted']} | {r['not_measured']} "
             f"| {r['waived']} | {r['na']} |")
@@ -1448,7 +1449,12 @@ def table_figures(block: str) -> Dict[str, Dict[str, int]]:
             figures.append(int(digits))
         if not figures:
             continue
-        out[cells[0].strip("*").strip()] = dict(zip(_TABLE_COLUMNS, figures))
+        label = cells[0].strip("*").strip()
+        # Read old numeric tables and new G labels into the same numeric
+        # coordinate; a naming migration must not rewrite historical results.
+        match = re.fullmatch(r"G([1-9][0-9]*)", label)
+        coordinate = match.group(1) if match else label
+        out[coordinate] = dict(zip(_TABLE_COLUMNS, figures))
     return out
 
 
@@ -1493,7 +1499,7 @@ def census_drift(committed: str, rendered: str) -> List[str]:
         was_row, now_row = was_t.get(row, {}), now_t.get(row, {})
         for column in _TABLE_COLUMNS:
             if was_row.get(column) != now_row.get(column):
-                name = "total" if row == "total" else f"d{row}"
+                name = "total" if row == "total" else f"G{row}"
                 lines.append(
                     f"  {name}.{column}: committed "
                     f"{was_row.get(column, 'absent')} -> live "

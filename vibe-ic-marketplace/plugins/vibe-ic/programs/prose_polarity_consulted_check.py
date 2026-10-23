@@ -125,6 +125,15 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "flow109_functional_activity::waveform_census":
+        "Reads formal VCD header tokens, integer timestamps and anchored scalar "
+        "0/1/X/Z value-change records, not natural-language requirements. Scalar "
+        "logical values are interpreted by their exact VCD symbol; X/Z are "
+        "rejected for required observed ports. A sentence denying a signal value "
+        "cannot match a canonical value-change record and cannot supply the "
+        "required observation. Falsifier: test_flow109_functional_activity::"
+        "test_vcd_census_consumes_formal_records_not_prose exercises canonical "
+        "records, negated/prefixed/suffixed prose and unknown logical values.",
     "reset_sync_structural_exception::_liberty_ffs":
         "Reads cell/ff groups and quoted Liberty Boolean attributes, not prose. "
         "Logical negation (!RESET_B) is retained verbatim and interpreted by "

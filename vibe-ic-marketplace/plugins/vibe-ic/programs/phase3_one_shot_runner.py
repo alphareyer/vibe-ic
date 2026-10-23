@@ -79933,6 +79933,20 @@ def _default_pnr_rows(project: Path, top: str, pdk: PdkConfig, container: str,
             continue
         started = time.time()
         print(f'[default] step {sid} START: {row_def["name"]}', flush=True)
+        from flow109_admission import require_launch_admission, AdmissionRefusal
+        try:
+            require_launch_admission(project, sid, params)
+        except AdmissionRefusal as exc:
+            rows.append(StepResult(
+                f'default_step_{sid}', 'NOT_MEASURED', time.time() - started,
+                str(exc), extras={'step_id': sid, 'qualification': exc.report},
+                reason_class=_V.ReasonClass.UPSTREAM_REFUSED))
+            attempt = step_versions.begin_step(project, sid)
+            step_versions.finish_step(project, attempt, verdict='NOT_MEASURED',
+                                      result=exc.report)
+            checks[sid] = exc.report
+            _publish_in_progress_steps(project, rows)
+            break
         if sid == '32':
             # The working PNR copy may predate a repaired Step7 author. Refresh
             # before _fixed_inputs hashes it, never from inside the bound worker.

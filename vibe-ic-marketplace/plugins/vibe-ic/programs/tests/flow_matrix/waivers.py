@@ -127,7 +127,7 @@ class Waiver:
 
     @property
     def label(self) -> str:
-        return f"{flowref.normalize_id(self.step_id)}/d{self.dim}"
+        return f"{flowref.normalize_id(self.step_id)}/G{self.dim}"
 
     @property
     def xfail_reason(self) -> str:

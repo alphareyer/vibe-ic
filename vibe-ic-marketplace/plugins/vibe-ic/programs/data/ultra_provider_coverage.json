@@ -815,7 +815,7 @@
           "kind": "lesson"
         },
         {
-          "destination": "librelane_config (the PPA planner writes the supply entries into PAD_SOUTH/EAST/…)",
+          "destination": "librelane_config (the PPA planner writes the supply entries into PAD_SOUTH/EAST/\u2026)",
           "id": "25-H6",
           "kind": "feature"
         },
@@ -1712,6 +1712,7 @@
       "producer_sites": [
         "phase3_one_shot_runner.py:step_drc",
         "phase3_one_shot_runner.py:step_lvs",
+        "_native_erc.py:emit",
         "phase3_one_shot_runner.py:_emit_erc_report",
         "perc_corpus_sweep.py:main"
       ],
@@ -2149,6 +2150,7 @@
       "arm_id": "release_38",
       "canonical_outputs": [
         "reports/audit/tapeout_checklist.json",
+        "phase3/stage4/foundry_handoff/release_manifest.json",
         "phase3/stage4/foundry_handoff/mask_spec.json",
         "phase3/stage4/foundry_handoff/wat_plan.json",
         "phase3/stage4/foundry_handoff/scribe_line_layout.gds OR phase3/stage4/foundry_handoff/scribe_line_layout.PENDING_FOUNDRY.txt",

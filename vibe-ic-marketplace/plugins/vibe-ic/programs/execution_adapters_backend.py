@@ -44,6 +44,7 @@ BACKEND_PARAMETER_DEFAULTS = {
     # ``None`` keeps source-only registration stable; a live worker receives
     # the exact path->digest census from that invocation.
     "resolved_input_manifest": None,
+    "flow109_context": None,
 }
 
 # These are imported by the actual dispatcher/producer call paths.  Binding
@@ -814,6 +815,8 @@ def backend_project_input_contract(project: Path, step_id: str, *,
             "reports/phase2/cdc/netlist.json",
             "reports/phase2/cdc/netlist_front_end.json",
             "reports/phase2/cdc/netlist.yosys.log",
+            "reports/phase2/cdc/netlist.raw.json",
+            "reports/phase2/cdc/netlist.normalize.yosys.log",
             "reports/phase2/cdc/crossing.json",
             "reports/phase2/cdc/async_input.json",
             "reports/phase2/cdc/reset_dep.json",

@@ -1958,3 +1958,55 @@ def test_step32_refreshes_sdc_before_input_binding_without_upstream_rerun(
         assert 'old_result' not in receipt and receipt['outputs'] == {}
         assert (pnr / 'constraint.sdc').read_bytes() == old[Path('phase3/stage3/pnr/constraint.sdc')]
         assert provenance.read_bytes() == old[Path('phase3/stage3/pnr/constraint_sdc_provenance.json')]
+
+
+@pytest.mark.parametrize("exceptional_exit", [False, True])
+def test_inprocess_main_restores_runtime_guard_before_other_consumers(
+        tmp_path, exceptional_exit):
+    """Real main keeps its guard active, then releases test-owned process state."""
+    import os
+    import sys
+    import runtime_program_tree as runtime_tree
+    # Load the fixture module before snapshotting the invocation boundary.
+    import test_phase3_postpnr_disclosure_and_gds_guard as fixture_module
+    original_drive = fixture_module._drive
+    names = ("PROGRAMS_DIR", "_RUNTIME_PROGRAM_TREE", "__file__")
+    before = {name: getattr(runner, name) for name in names}
+    calls = {name: getattr(runner._pr, name) for name in ("run", "run_best_effort")}
+    paths = []
+    env_names = (runtime_tree.ENV_ROOT, runtime_tree.ENV_MANIFEST,
+                 "PYTHONDONTWRITEBYTECODE", "EDA_CONTAINER")
+    environment = {name: os.environ.get(name) for name in env_names}
+    bytecode = sys.dont_write_bytecode
+
+    class EndInvocation(Exception):
+        pass
+
+    try:
+        with pytest.MonkeyPatch.context() as patches:
+            def capture_invocation_boundary(*args, **kwargs):
+                # Project preparation imports helpers; _drive owns main's scope.
+                paths[:] = sys.path
+                return original_drive(*args, **kwargs)
+            patches.setattr(fixture_module, "_drive", capture_invocation_boundary)
+            _prebackend_consumer_control(tmp_path, patches, {"7": "FAIL"})
+            assert runner._RUNTIME_PROGRAM_TREE is not None
+            assert runner.PROGRAMS_DIR != before["PROGRAMS_DIR"]
+            with pytest.raises(runtime_tree.RuntimeTreeError,
+                               match="LIVE_PLUGIN_PATH_AFTER_RETENTION"):
+                runner._verify_runtime_command([sys.executable, before["__file__"]])
+            if exceptional_exit:
+                raise EndInvocation()
+    except EndInvocation:
+        assert exceptional_exit
+
+    assert {name: getattr(runner, name) for name in names} == before
+    assert all(getattr(runner._pr, name) is original for name, original in calls.items())
+    assert paths and sys.path == paths
+    assert sys.dont_write_bytecode == bytecode
+    assert {name: os.environ.get(name) for name in env_names} == environment
+    consumer = runner._pr.run(
+        [sys.executable, "-c", "import sys; print(sys.argv[1])", before["__file__"]],
+        capture_output=True, text=True)
+    assert consumer.returncode == 0
+    assert consumer.stdout.strip() == before["__file__"]

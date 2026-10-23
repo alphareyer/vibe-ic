@@ -1276,22 +1276,22 @@ def test_state_agrees_with_the_waiver_registry_and_the_collected_marks():
         if state == "WAIVED":
             if registry is None:
                 problems.append(
-                    f"{sid}/d{dim}: the module reports WAIVED but "
+                    f"{sid}/G{dim}: the module reports WAIVED but "
                     f"flow_matrix.waivers.WAIVERS has no entry — the accepted "
                     f"gap is invisible in the one place it is supposed to be "
                     f"published")
             if not marked:
                 problems.append(
-                    f"{sid}/d{dim}: reported WAIVED but pytest collected no "
+                    f"{sid}/G{dim}: reported WAIVED but pytest collected no "
                     f"xfail marker, so the cell is being RUN as if enforced")
         else:
             if registry is not None:
                 problems.append(
-                    f"{sid}/d{dim}: reported {state} but a waiver is "
+                    f"{sid}/G{dim}: reported {state} but a waiver is "
                     f"registered for it — a stale waiver excusing nothing")
             if marked:
                 problems.append(
-                    f"{sid}/d{dim}: reported {state} but pytest collected an "
+                    f"{sid}/G{dim}: reported {state} but pytest collected an "
                     f"xfail marker for it; the cell is excused at collection "
                     f"time with no registered, evidence-backed reason")
 
@@ -1438,13 +1438,13 @@ def test_every_na_cell_asserts_a_live_precondition():
         pre = mod.matrix_na_precondition(sid)
         if not (pre or "").strip():
             problems.append(
-                f"{sid}/d{dim}: reported NA but matrix_na_precondition() "
+                f"{sid}/G{dim}: reported NA but matrix_na_precondition() "
                 f"returned {pre!r} — an NA with no stated, live precondition "
                 f"cannot self-invalidate")
         for row in cells[(sid, dim)]:
             if _skip_marks(row):
                 problems.append(
-                    f"{sid}/d{dim}: {row['nodeid']} carries "
+                    f"{sid}/G{dim}: {row['nodeid']} carries "
                     f"{[m['name'] for m in _skip_marks(row)]} — an "
                     f"unconditionally skipped cell is silent absence wearing "
                     f"a hat")
@@ -1505,17 +1505,17 @@ def test_every_not_measured_cell_names_the_evidence_it_lacks():
         reason = _not_measured_reason(dim, sid)
         if reason is None:
             problems.append(
-                f"{sid}/d{dim}: reported {NOT_MEASURED} but its module exposes "
+                f"{sid}/G{dim}: reported {NOT_MEASURED} but its module exposes "
                 f"no matrix_not_measured_reason(step_id) — the state is only "
                 f"available to a dimension that can say what it could not look "
                 f"at")
         elif not str(reason).strip():
             problems.append(
-                f"{sid}/d{dim}: reported {NOT_MEASURED} with an empty reason — "
+                f"{sid}/G{dim}: reported {NOT_MEASURED} with an empty reason — "
                 f"a cell may not enter this state by saying nothing")
         elif len(str(reason).strip()) < 20:
             problems.append(
-                f"{sid}/d{dim}: reason {reason!r} is too short to name the "
+                f"{sid}/G{dim}: reason {reason!r} is too short to name the "
                 f"missing evidence; NOT_MEASURED is not a shrug")
     assert not problems, (
         f"{len(problems)} {NOT_MEASURED} cell(s) do not name what they lack:"
@@ -1575,7 +1575,7 @@ def test_na_cells_are_a_minority_and_are_named():
         for sid in sids:
             pre = dimension_modules()[dim].matrix_na_precondition(sid)
             assert isinstance(pre, str) and len(pre.strip()) >= 20, (
-                f"{sid}/d{dim}: NA precondition {pre!r} is too short to be "
+                f"{sid}/G{dim}: NA precondition {pre!r} is too short to be "
                 f"checkable by someone who has never seen the cell"
             )
 
@@ -1655,7 +1655,7 @@ def test_the_census_is_reported_for_humans(record_property):
         per = [v for (s, d), v in census.items() if d == dim]
         buckets = [v for (s, d), v in subs.items() if d == dim]
         lines.append(
-            f"d{dim} {DIMENSION_NAMES[dim]}: "
+            f"G{dim} {DIMENSION_NAMES[dim]}: "
             f"ENFORCED={per.count('ENFORCED')}"
             f"(own={buckets.count(SUB.OWN_MECHANISM)},"
             f"substituted={buckets.count(SUB.SUBSTITUTED)},"
@@ -3032,7 +3032,7 @@ def _disagreement_verdict(
     for sid, dim in broken:
         verdict = joined[(sid, dim)]
         line = (
-            f"  {sid}/d{dim} ({DIMENSION_NAMES[dim]}): reported "
+            f"  {sid}/G{dim} ({DIMENSION_NAMES[dim]}): reported "
             f"{verdict.state} — which claims its predicate "
             f"{STATE_EXPECTS_OUTCOME[verdict.state]} — but the live run "
             f"says {', '.join(verdict.outcomes) or '<never observed>'}")
@@ -3176,7 +3176,7 @@ def test_a_single_measured_red_still_fails_beside_any_number_of_not_measured_cel
         red_only, enforcement_counter(red_only))
     assert verdict == _VERDICT_FAIL, (verdict, message)
     assert "1 measured red, 0 not measured" in message, message
-    assert "R/d1" in message, message
+    assert "R/G1" in message, message
 
     # (2) NOT MEASURED ALONE -> REFUSE, still enumerating every cell.
     skipped_only = _census({
@@ -3187,7 +3187,7 @@ def test_a_single_measured_red_still_fails_beside_any_number_of_not_measured_cel
     assert "0 measured red, 47 not measured" in message, message
     assert "MEASURED RED —" not in message, message
     for i in range(47):
-        assert f"S{i}/d3" in message, f"cell S{i} vanished from the refusal"
+        assert f"S{i}/G3" in message, f"cell S{i} vanished from the refusal"
 
     # (3) THE MIXED CASE — the one this change could have broken. One measured
     #     red hiding behind 47 not-measured cells must still FAIL, and the
@@ -3201,7 +3201,7 @@ def test_a_single_measured_red_still_fails_beside_any_number_of_not_measured_cel
     assert "1 measured red, 47 not measured" in message, message
     assert "MEASURED RED — the predicate ran" in message, message
     assert "NOT MEASURED — the predicate never" in message, message
-    assert "R/d1" in message and "S0/d3" in message, message
+    assert "R/G1" in message and "S0/G3" in message, message
     # and the closing paragraph is the pre-refusal one, unchanged
     assert "counted as coverage and is not covering anything" in message
     assert "Fix the predicate or waive it on the record" in message
@@ -3219,7 +3219,7 @@ def test_the_enforcement_census_is_reported_for_humans(record_property):
     lines = []
     for dim in DIMENSIONS:
         per = [v.label for (s, d), v in joined.items() if d == dim]
-        lines.append(f"d{dim} {DIMENSION_NAMES[dim]}: "
+        lines.append(f"G{dim} {DIMENSION_NAMES[dim]}: "
                      + " ".join(f"{lab}={per.count(lab)}"
                                 for lab in sorted(set(per))))
     summary = (f"{len(joined)} cells = {len(F.step_ids())} steps x "
