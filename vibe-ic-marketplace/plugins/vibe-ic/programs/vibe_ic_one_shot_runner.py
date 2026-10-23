@@ -2399,6 +2399,12 @@ def _main() -> int:
     _line_buffer_own_stream()
     p = argparse.ArgumentParser()
     p.add_argument("project", type=Path)
+    p.add_argument("--flow", choices=("70", "109"), default="70",
+                   help="Explicitly select the source-owned 109 proposal implementation; omitted preserves the existing flow.")
+    p.add_argument("--flow109-manifest", type=Path,
+                   help="JSON containing explicit Boolean features, step_profiles, runtime_tool_uses and qualification_registry.")
+    p.add_argument("--flow109-plan-only", action="store_true",
+                   help="Resolve 109 configuration without starting any native producer; never reports IC PASS.")
     p.add_argument("--top-name", default=_TOP_NAME_DEFAULT)
     p.add_argument("--container", default=_pin.default_container_name())
     p.add_argument("--area-receipt", default=None,
@@ -2525,6 +2531,26 @@ def _main() -> int:
     if route_refusal:
         print(_delivery_route.refusal_message(route_refusal), file=sys.stderr)
         return 2
+    import flow109
+    try:
+        flow_result = flow109.prepare_front_door(args, project)
+    except flow109.Flow109Error as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        if args.flow != "109" or not hasattr(exc, "report") or not hasattr(exc, "code"):
+            raise
+        from _atomic_artefact import write_json
+        write_json(project / "reports" / "flow109" / "admission.json", exc.report)
+        print(f"REFUSED: {exc.code}: {exc}", file=sys.stderr)
+        return 2
+    except ImportError as exc:
+        if args.flow != "109":
+            raise
+        print(f"REFUSED: FLOW109_ADMISSION_UNIMPLEMENTED: {exc}", file=sys.stderr)
+        return 2
+    if flow_result is not None:
+        return flow_result
     if (args.execution_mode == 'ultra' or args.route_authority_only) and 'VIBEIC_EXECUTION_CAP_FD' not in os.environ:
         from execution_modes import Refusal
         raise Refusal('REQUEST_CAPABILITY_REQUIRED', 'enter through the canonical CLI')
