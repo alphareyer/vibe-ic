@@ -254,7 +254,9 @@ def prepare_front_door(args, project: Path) -> int | None:
         # A stale parent selection cannot turn a later 70-flow launch into 109.
         os.environ.pop(CONTEXT_ENV, None)
         return None
-    if args.execution_mode != "default":
+    # The existing policy parser uses None for an omitted mode and resolves
+    # it to Default. Preserve that CLI contract rather than demanding a flag.
+    if args.execution_mode not in (None, "default"):
         raise Flow109Error("FLOW109_MODE_UNIMPLEMENTED", "109 currently selects Default only")
     if not args.flow109_manifest:
         raise Flow109Error("FLOW109_MANIFEST_REQUIRED", "supply explicit resolved features")
