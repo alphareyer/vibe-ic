@@ -140,6 +140,7 @@ def test_real_front_door_selection_translates_only_the_named_component(tmp_path,
     manifest.write_text(json.dumps({"features": profile(), "runtime_tool_uses": [],
                                     "qualification_registry": "input/qualifications.json"}))
     observed = []
+    monkeypatch.setenv(flow109.CONTEXT_ENV, "")
     # This control observes the selection/dispatch contract only. Qualification
     # behavior itself is covered by the admission module's native controls.
     monkeypatch.setitem(sys.modules, "flow109_admission", SimpleNamespace(
