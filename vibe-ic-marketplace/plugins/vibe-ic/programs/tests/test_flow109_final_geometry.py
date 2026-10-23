@@ -71,7 +71,40 @@ def test_actual_general_frontdoor_consumes_new_d62_geometry_and_native_finishing
     assert record['finishing_xor']['defect_count'] == 0
     assert record['finishing_xor']['design_pair_count'] > 0
     assert (tmp_path / old['path']).read_bytes() == before
-    assert current['gds']['sha256'] != record['adopted_views']['netlist']['sha256']
+    assert current['d62_receipt'] == record['d62_receipt']
+    # Reuse checks the actual current qualification, not merely its old PASS.
+    qualification = tmp_path / 'D64-qualifications.json'
+    original_qualification = qualification.read_bytes()
+    bad = json.loads(original_qualification); bad['uses'][0]['status'] = 'UNSUPPORTED'
+    qualification.write_text(json.dumps(bad))
+    with pytest.raises(admission.AdmissionRefusal, match='QUALIFICATION_UNSUPPORTED'):
+        geometry.validate_final_geometry(tmp_path, record['receipt'])
+    qualification.write_bytes(original_qualification)
+    # A missing final GDS must not inherit the recorded geometry verdict.
+    gds = stream._bound(tmp_path, record['gds']); saved_gds = gds.with_suffix('.saved')
+    gds.rename(saved_gds)
+    try:
+        with pytest.raises((admission.AdmissionRefusal, ValueError)):
+            geometry.validate_final_geometry(tmp_path, record['receipt'])
+    finally:
+        saved_gds.rename(gds)
+    # Even self-consistent hashes and zero JSON counters cannot launder an
+    # actual native RDB that contains a difference.
+    import klayout.rdb as rdb
+    xml = stream._bound(tmp_path, record['finishing_xor']['report']); original_xml = xml.read_bytes()
+    database = rdb.ReportDatabase('negative finishing control')
+    cell = database.create_cell('fill_smoke'); category = database.create_category('changed-core')
+    database.create_item(cell.rdb_id(), category.rdb_id())
+    database.save(str(xml))
+    forged = json.loads(stream._bound(tmp_path, record['receipt']).read_text())
+    forged['finishing_xor']['report'] = stream._record(tmp_path, xml)
+    forged_ref = _put(tmp_path, 'inputs/forged-zero-counter-component.json', forged)
+    try:
+        with pytest.raises(admission.AdmissionRefusal, match='D64_FINISHING_XOR_NOT_CLEAN'):
+            geometry.validate_final_geometry(tmp_path, forged_ref)
+    finally:
+        xml.write_bytes(original_xml)
+    assert geometry.validate_final_geometry(tmp_path, record['receipt'])['component_geometry_current']
 
 
 @pytest.mark.parametrize('damage', ['qualification', 'source', 'd62_rules', 'ic_no_seal'])

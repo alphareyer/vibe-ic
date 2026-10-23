@@ -8,7 +8,6 @@ and is not bypassed by a caller's no-seal flag. Full-row adoption remains open.
 from __future__ import annotations
 
 import hashlib
-import importlib
 import inspect
 import json
 import math
@@ -193,7 +192,8 @@ def execute(project, context):
         result.update(component_status='PASS', reason='D64_CURRENT_D62_GEOMETRY_COMPONENT_MEASURED',
             inputs=prepared['inputs'], operation_sources=prepared['sources'],
             gds=common['gds'], odb=common['odb'], d62_receipt=common['d62_receipt'],
-            adopted_views=prepared['manifest']['adopted_views'], geometry_proof=common['geometry_proof'])
+            adopted_views=prepared['manifest']['adopted_views'], geometry_proof=common['geometry_proof'],
+            execution_context=context)
     except AdmissionRefusal as exc:
         result.update(component_status=exc.status, reason=exc.code, detail=str(exc))
     except Exception as exc:
@@ -218,6 +218,7 @@ def validate_final_geometry(project, receipt_ref):
     record = _read(stream._bound(project, receipt_ref))
     if record.get('schema') != SCHEMA or record.get('component_status') != 'PASS':
         raise AdmissionRefusal('D64_COMPONENT_NOT_ACCEPTED', 'current native geometry receipt required')
+    require_launch_admission(project, 'flow109.D64', {'flow109_context': record.get('execution_context')})
     if record.get('operation_sources') != operation_sources():
         raise AdmissionRefusal('D64_OPERATION_SOURCE_CHANGED', 'current field mapping/native sources required')
     for path, sha in record['inputs'].items():
