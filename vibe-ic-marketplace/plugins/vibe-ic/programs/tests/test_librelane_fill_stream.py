@@ -251,3 +251,25 @@ def test_default_stream_selects_fill_producer_only_from_actual_fills_and_bound_r
     with pytest.raises(admission.AdmissionRefusal, match='STALE'):
         finishing._select_fill_stream(tmp_path, 'test_image', tmp_path, 'test_pdk', filled, configs)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('changed', ['base_map', 'rules', 'filled_def'])
+def test_default_fill_mapping_reuse_keeps_original_rule_and_pdk_authority(tmp_path, monkeypatch, changed):
+    import librelane_fill_dfm as finishing
+    d62, inputs = _native_case(tmp_path)
+    source = json.loads((tmp_path / d62['path']).read_text())
+    filled = stream._bound(tmp_path, source['outputs']['filled.def'])
+    base = stream._bound(tmp_path, inputs['base_map'])
+    cfg = tmp_path / 'config.json'; cfg.write_text(json.dumps({'KLAYOUT_DEF_LAYER_MAP': str(base)}))
+    _put(tmp_path, 'reports/flow109/components/D62.json', {'receipt': d62})
+    (tmp_path / 'phase3/librelane/34-config').mkdir(parents=True)
+    monkeypatch.setattr(finishing, 'resolve_step_configs', lambda *a, **k: {finishing.FILL_STREAM_STEP: cfg})
+    finishing._select_fill_stream(tmp_path, 'image', tmp_path, 'neutral', filled, {'KLayout.StreamOut': cfg})
+    authority = tmp_path / 'phase3/librelane/34-config/explicit-fill.authority.json'
+    record = {'fill_mapping_authority': str(authority), 'fill_mapping_authority_sha256': stream._sha(authority),
+              'filled_def': str(filled)}
+    finishing._validate_fill_stream_authority(tmp_path, record)
+    target = {'base_map': base, 'rules': stream._bound(tmp_path, source['inputs']['rules']), 'filled_def': filled}[changed]
+    target.write_text(target.read_text() + '\n')
+    with pytest.raises(Refusal, match='LL_FILL_STREAM_AUTHORITY_CHANGED|LL_FILL_STREAM_WRONG_D62_SUBJECT'):
+        finishing._validate_fill_stream_authority(tmp_path, record)

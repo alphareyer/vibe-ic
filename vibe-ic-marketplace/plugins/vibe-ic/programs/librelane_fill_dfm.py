@@ -1369,6 +1369,7 @@ def validate_default_stream(project: Path) -> dict:
     if stream_step == FILL_STREAM_STEP:
         from librelane_fill_stream import validate_native_stage
         validate_native_stage(stream_state.parent, Path(record['filled_def']), Path(record['stream']))
+        _validate_fill_stream_authority(project, record)
     # _current_stage already re-hashed these guest-side configuration paths
     # through its declared mounts; the CLI must name exactly those materials.
     for entry in cli['inputs']:
@@ -1473,6 +1474,7 @@ def _select_fill_stream(project: Path, image: str, root: Path, pdk: str,
     base = _host_pdk_path(cfg['KLAYOUT_DEF_LAYER_MAP'], root, pdk)
     target = project / 'phase3/librelane' / CONFIG_FOLDER / 'explicit-fill.map'
     rules = None
+    receipt_ref = None
     try:
         derive_map(base, None, filled, target)
     except Refusal as exc:
@@ -1493,12 +1495,38 @@ def _select_fill_stream(project: Path, image: str, root: Path, pdk: str,
     authority = {'base_map': str(base), 'base_map_sha256': digest(base),
                  'rules': str(rules) if rules else None,
                  'rules_sha256': digest(rules) if rules else None,
-                 'derived_map': str(target), 'derived_map_sha256': digest(target)}
+                 'derived_map': str(target), 'derived_map_sha256': digest(target),
+                 'filled_def_sha256': digest(filled), 'd62_receipt': receipt_ref}
     write_json(target.with_suffix('.authority.json'), authority)
     selected = resolve_step_configs(project, image, pdk, [FILL_STREAM_STEP],
         pdk_root=root, folder=CONFIG_FOLDER,
         overlay={'KLAYOUT_DEF_LAYER_MAP': (str(target), 'verified DEF FILL layer purposes')})
     return FILL_STREAM_STEP, selected
+
+
+def _validate_fill_stream_authority(project: Path, record: dict) -> None:
+    """A derived map does not sever its PDK/rule/producer source identity."""
+    import tempfile
+    from librelane_fill_stream import derive_map
+    path = Path(record['fill_mapping_authority'])
+    if digest(path) != record['fill_mapping_authority_sha256']:
+        raise Refusal('LL_FILL_STREAM_AUTHORITY_CHANGED', str(path))
+    authority = _load(path)
+    for key in ('base_map', 'rules', 'derived_map'):
+        if authority.get(key) is not None and digest(Path(authority[key])) != authority.get(key + '_sha256'):
+            raise Refusal('LL_FILL_STREAM_AUTHORITY_CHANGED', key)
+    filled = Path(record['filled_def'])
+    if authority.get('filled_def_sha256') != digest(filled):
+        raise Refusal('LL_FILL_STREAM_WRONG_D62_SUBJECT', str(filled))
+    if authority.get('d62_receipt') is not None:
+        import flow109_density_fill as density
+        density.validate_filled_odb(project, authority['d62_receipt'])
+    with tempfile.TemporaryDirectory(prefix='fill-map-proof-') as tmp:
+        derived = Path(tmp) / 'fill.map'
+        derive_map(Path(authority['base_map']), Path(authority['rules']) if authority.get('rules') else None,
+                   filled, derived)
+        if digest(derived) != authority['derived_map_sha256']:
+            raise Refusal('LL_FILL_STREAM_AUTHORITY_CHANGED', 'derived mapping recipe')
 
 
 @_spf.retained_step('37')
@@ -1643,6 +1671,10 @@ def default_stream(project: Path, top: str, pdk: Any, container: str) -> dict:
                       'source': Path(arm['subject']), 'pnr_gds': pnr_gds,
                       'canonical': canonical}.items():
         record[key], record[key + '_sha256'] = str(path), digest(path)
+    if stream_step == FILL_STREAM_STEP:
+        authority = project / 'phase3/librelane' / CONFIG_FOLDER / 'explicit-fill.authority.json'
+        record.update(fill_mapping_authority=str(authority),
+                      fill_mapping_authority_sha256=digest(authority))
     if finishing.status == 'PASS':
         report = project / 'reports/phase3/die_finishing.json'
         record.update(finishing_report=str(report), finishing_report_sha256=digest(report))
