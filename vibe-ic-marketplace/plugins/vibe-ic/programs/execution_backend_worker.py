@@ -476,6 +476,8 @@ def execute(inputs: Path, outputs: Path, *, step_id: str, params: dict) -> dict:
         try:
             params = dict(params, step_id=str(step_id), project=project,
                           resolved_input_manifest=producer_manifest)
+            from flow109_admission import require_launch_admission
+            require_launch_admission(project, step_id, params)
             producer = produce(project, params)
             if not isinstance(producer, dict):
                 producer = {"verdict": "NOT_MEASURED", "detail": "producer returned no result"}

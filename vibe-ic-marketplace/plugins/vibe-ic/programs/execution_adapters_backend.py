@@ -44,6 +44,7 @@ BACKEND_PARAMETER_DEFAULTS = {
     # ``None`` keeps source-only registration stable; a live worker receives
     # the exact path->digest census from that invocation.
     "resolved_input_manifest": None,
+    "flow109_context": None,
 }
 
 # These are imported by the actual dispatcher/producer call paths.  Binding
