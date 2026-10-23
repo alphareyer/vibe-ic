@@ -123,6 +123,8 @@ def test_worker_refuses_before_native_producer(tmp_path, monkeypatch):
         'flow109_context': context,
         'resolved_input_manifest': {'declarations': [], 'files': {}, 'missing': []}})
     assert not calls
+    assert result['flow109_admission']['native_started'] is False
+    assert result['flow109_admission']['reason'] == 'QUALIFICATION_IDENTITY_MISMATCH'
     assert result['verdict'] != 'PASS'
 
 
@@ -144,3 +146,49 @@ def test_direct_default_refuses_before_input_refresh_and_native(tmp_path, monkey
     assert result.status == 'NOT_MEASURED'
     assert calls == []
     assert 'QUALIFICATION_IDENTITY_MISMATCH' in result.detail
+
+
+@pytest.mark.parametrize('damage', ['unsupported', 'corner', 'deck'])
+def test_real_worker_process_refuses_without_launching_native(tmp_path, monkeypatch, damage):
+    """Actual worker process, no producer/evaluator mocks; not positive qualification."""
+    import subprocess
+    import sys
+    inputs = tmp_path / 'inputs'
+    project = inputs / 'project'
+    project.mkdir(parents=True)
+    context, registry = fixture_context(project, monkeypatch)
+    if damage == 'unsupported':
+        registry['uses'][0]['status'] = 'UNSUPPORTED'
+        (project / 'qualifications.json').write_text(json.dumps(registry))
+    elif damage == 'corner':
+        context['runtime_tool_uses'][0]['corner'] = 'unsupported-corner'
+        rebind(context)
+    else:
+        (project / 'deck.ref').write_text('unqualified changed deck')
+    context_path = tmp_path / 'context.json'
+    context_path.write_text(json.dumps(context))
+    output = tmp_path / 'outputs'
+    audit = tmp_path / 'process-launches.jsonl'
+    script = tmp_path / 'actual-worker.py'
+    script.write_text('''import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+def audit(event, args):
+    if event == 'subprocess.Popen':
+        with open(sys.argv[5], 'a') as out:
+            out.write(json.dumps(str(args)) + '\\n')
+sys.addaudithook(audit)
+import execution_backend_worker as worker
+context = json.loads(Path(sys.argv[4]).read_text())
+worker.execute(Path(sys.argv[2]), Path(sys.argv[3]), step_id='19', params={
+    'flow109_context': context,
+    'resolved_input_manifest': {'declarations': [], 'files': {}, 'missing': []}})
+''')
+    completed = subprocess.run([sys.executable, str(script), str(Path(__file__).resolve().parents[1]),
+        str(inputs), str(output), str(context_path), str(audit)], capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads((output / 'backend_result.json').read_text())
+    assert result['flow109_admission']['native_started'] is False
+    assert result['verdict'] == 'NOT_MEASURED'
+    assert result['native_receipts'] == []
+    assert not audit.exists(), audit.read_text() if audit.exists() else ''
