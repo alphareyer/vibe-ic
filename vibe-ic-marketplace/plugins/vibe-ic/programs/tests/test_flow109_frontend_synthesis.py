@@ -47,7 +47,7 @@ def case(project):
          'answer_provenance':{'deliverable':{'answered_by':'owner','citation':'Developer neutral IC control'}}})
     put(project,'phase1/generated_docs/L8_TIMING_WAVEFORM.json',{'clock_domains':[{'role':'primary','source_pin':'clk','period_ns':20}]})
     put(project,'phase1/generated_docs/L9_INTEGRATION_SPEC.json',{'top_module':'unit_alpha','synth_top':'unit_alpha'})
-    put(project,'phase1/generated_docs/L19_CONSTRAINTS_PDK.json',{'pdk':'gf180mcuD','constraint_declarations':[],'fields':{'die_area_budget_um':10000}})
+    put(project,'phase1/generated_docs/L19_CONSTRAINTS_PDK.json',{'pdk':'gf180mcuD','constraint_declarations':[],'fields':{'die_area_budget_um':'100x100'}})
     put(project,'phase2/stage1/rtl/unit_alpha.v','module unit_alpha(input clk, input a,b, output reg y); always @(posedge clk) y <= a ^ b; endmodule\n')
     put(project,'phase3/librelane_switch.json',{'steps':{'9':'librelane'},'pdk_root':'/foss/pdks'})
     put(project,frontend.INPUT,{'schema':frontend.SCHEMA,'pdk':'gf180mcuD','top':'unit_alpha'})
@@ -113,3 +113,14 @@ def test_native_contract_launch_rechecks_original_input_census(tmp_path,monkeypa
             frontend.require_librelane_launch(tmp_path,'Yosys.Synthesis')
         assert active['operations']==[]
     finally:frontend._ACTIVE.reset(token)
+
+
+def test_native_synthesis_does_not_promote_missing_area_authority(tmp_path,monkeypatch):
+    context,path=case(tmp_path);monkeypatch.setenv('VIBEIC_FLOW109_CONTEXT',str(path))
+    spec=tmp_path/'phase1/generated_docs/L19_CONSTRAINTS_PDK.json'
+    value=json.loads(spec.read_text());value['fields']={};spec.write_text(json.dumps(value))
+    result=frontend.execute(tmp_path,context)
+    assert result['native_started'],result
+    assert result['producer']['status']=='NOT_MEASURED',result
+    assert result['component_status']=='NOT_MEASURED',result
+    assert result['canonical_current_pass'] is None
