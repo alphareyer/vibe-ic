@@ -438,14 +438,15 @@ def test_local_config_resolution_preserves_declared_mount_paths(local_image, mon
     assert source.read_bytes() == before
 
 
-def test_local_probe_deadline_kills_native_descendant(local_image):
+def test_local_measured_stall_reaps_native_descendant(local_image, monkeypatch):
     pid_file = local_image.tmp / 'child.pid'
     script = ('import subprocess,time;from pathlib import Path;'
         'p=subprocess.Popen(["sleep","60"]);'
         f'Path({str(pid_file)!r}).write_text(str(p.pid));time.sleep(60)')
-    with pytest.raises(contract.Refusal, match='LL_TOOL_DEADLINE'):
+    monkeypatch.setattr(contract, 'TOOL_STALL_GRACE_S', .3)
+    with pytest.raises(contract.Refusal, match='LL_TOOL_STALLED'):
         contract.run_container(['docker', 'run', '--rm', local_image.image, '--skip',
-                                sys.executable, '-c', script], probe_deadline_s=.3)
+                                sys.executable, '-c', script], probe_deadline_s=.05)
     pid = int(pid_file.read_text())
     stat = Path(f'/proc/{pid}/stat')
     assert not stat.exists() or stat.read_text().split()[2] == 'Z'

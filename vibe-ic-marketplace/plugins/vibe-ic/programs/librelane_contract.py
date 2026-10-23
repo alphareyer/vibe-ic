@@ -10,7 +10,6 @@ import math
 import os
 import re
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -589,59 +588,23 @@ def _run_local(argv: list[str], *, probe_deadline_s: float | None,
     with _ce.local_engine_cwd() as scratch:
         if child_cwd is None:
             kw.setdefault('cwd', scratch)
-        if probe_deadline_s is not None:
-            # A probe deadline is a kill contract, unlike a tool session's
-            # advisory hard ceiling.  Give the native launch its own process
-            # group so the same deadline also reaps grandchildren (a bare
-            # subprocess.run(timeout=...) kills only its immediate child).
-            popen_kw = dict(kw)
-            capture_output = bool(popen_kw.pop('capture_output', False))
-            input_data = popen_kw.pop('input', None)
-            # run_container has always returned captured stdout/stderr on both
-            # routes; capture_output is accepted for subprocess.run parity but
-            # omission must not turn a LOCAL result into stdout=None.
-            if capture_output or 'stdout' not in popen_kw:
-                popen_kw.setdefault('stdout', subprocess.PIPE)
-            if capture_output or 'stderr' not in popen_kw:
-                popen_kw.setdefault('stderr', subprocess.PIPE)
-            popen_kw.setdefault('text', True)
-            popen_kw['start_new_session'] = True
-            proc = subprocess.Popen(command, env=environment, **popen_kw)
-            try:
-                out, err = proc.communicate(input=input_data,
-                                            timeout=probe_deadline_s)
-            except subprocess.TimeoutExpired as exc:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                    out, err = proc.communicate(timeout=.2)
-                except (ProcessLookupError, subprocess.TimeoutExpired):
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    out, err = proc.communicate()
-                raise Refusal(
-                    'LL_TOOL_DEADLINE',
-                    f'LOCAL run passed its {probe_deadline_s:g} s probe deadline; '
-                    f'owned process group {proc.pid} reaped; '
-                    f'{_salvage(out or exc.stdout, err or exc.stderr, log)}') from exc
-            result = subprocess.CompletedProcess(command, proc.returncode, out, err)
-        else:
-            import _watchdog as _wd
-            # Tool sessions have an observable ceiling, but only measured
-            # stillness authorizes a kill.
-            grace = (TOOL_STALL_GRACE_S if TOOL_STALL_GRACE_S is not None
-                     else _wd.DEFAULT_STALL_GRACE_S)
-            watched = _wd.run_host_supervised(
-                command, env=environment, stall_grace_s=grace,
-                hard_ceiling_s=TOOL_BUDGET_S,
-                ceiling_notice=_ce.default_ceiling_notice(
-                    'LOCAL LibreLane', TOOL_BUDGET_S), **kw)
-            if watched.outcome == 'stalled':
-                raise Refusal('LL_TOOL_STALLED',
-                              f'LOCAL tool made no progress for {grace:g} s; '
-                              f'{_salvage(watched.out, watched.err, log)}')
-            result = _wd.completed_process(command, watched)
+        import _watchdog as _wd
+        # A LOCAL probe allocation is an observable budget, not permission to
+        # kill a progressing native process.  Only measured stillness permits
+        # the owned process-group reap, for probes and tool sessions alike.
+        budget = TOOL_BUDGET_S if probe_deadline_s is None else probe_deadline_s
+        grace = (TOOL_STALL_GRACE_S if TOOL_STALL_GRACE_S is not None
+                 else _wd.DEFAULT_STALL_GRACE_S)
+        watched = _wd.run_host_supervised(
+            command, env=environment, stall_grace_s=grace,
+            hard_ceiling_s=budget,
+            ceiling_notice=_ce.default_ceiling_notice(
+                'LOCAL LibreLane', budget), **kw)
+        if watched.outcome == 'stalled':
+            raise Refusal('LL_TOOL_STALLED',
+                          f'LOCAL tool made no progress for {grace:g} s; '
+                          f'{_salvage(watched.out, watched.err, log)}')
+        result = _wd.completed_process(command, watched)
     if provider is not None:
         changed = []
         if (provider.librelane_root and
@@ -736,9 +699,10 @@ def session_stop_reason(rc: int | None, evidence: str = "") -> str | None:
 #: How every container this module (and librelane_signoff) starts is bounded.
 #: Two kinds, bounded two different ways:
 #:
-#: * a PROBE (an image probe, a config resolution, a script or flow read) is
-#:   seconds of work. It keeps a short hard client deadline, `PROBE_DEADLINE_S`
-#:   (llv1 W16a), and its container is removed by name when that passes;
+#: * a PROBE (an image probe, a config resolution, a script or flow read) has
+#:   an allocated budget, `PROBE_DEADLINE_S` (llv1 W16a). A remote Docker
+#:   transport can remove its named container at that deadline; typed LOCAL
+#:   execution records the budget but only measured stillness permits a reap;
 #: * a TOOL STEP (a LibreLane step, an OpenROAD session, an STA run) is never
 #:   stopped on a clock (owner ruling vibe-ic#2051/R4). It runs under the
 #:   repo's progress-stall watchdog (`_watchdog.run_host_supervised`), which
@@ -750,9 +714,9 @@ def session_stop_reason(rc: int | None, evidence: str = "") -> str | None:
 #:   `VIBEIC_CEILING_CROSSED` line; it kills nothing.
 PROBE_DEADLINE_S = 600
 TOOL_BUDGET_S = 86_400
-#: The refusals caused by TIME, not by the design or by a tool verdict: a probe
-#: past its deadline, a tool the watchdog reaped as stalled. Only a plain FAIL
-#: is red, so a consumer books these NOT_MEASURED with the refusal as reason.
+#: The refusals caused by TIME, not by the design or by a tool verdict: a remote
+#: probe past its deadline, or a tool the watchdog reaped as stalled. Only a
+#: plain FAIL is red, so a consumer books these NOT_MEASURED with the refusal.
 TIME_REFUSALS = frozenset(TOOL_STOP_REASONS)
 TOOL_STALL_GRACE_S: float | None = None
 _REAP_DEADLINE_S = 30
@@ -848,9 +812,9 @@ def run_container(argv: list[str], *, probe_deadline_s: float | None = None,
     """Run one `docker run` argv, named so it can be removed by that name.
 
     Exactly one bound, stated by the caller:
-      * ``probe_deadline_s=`` -- a probe: `subprocess.run(..., timeout=)`; past
-        the deadline the container is removed by name and `LL_TOOL_DEADLINE` is
-        raised;
+      * ``probe_deadline_s=`` -- a probe allocation. Remote Docker removes its
+        named container at the deadline; typed LOCAL records the same budget
+        but never kills progress, and reaps only on measured stillness;
       * ``supervised=True`` -- a tool step: `_watchdog.run_host_supervised`
         with the ephemeral-container CPU probe and reap-by-name; a stall
         raises `LL_TOOL_STALLED`, and nothing else stops the job.
