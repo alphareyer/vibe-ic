@@ -93,7 +93,9 @@ def test_native_filled_odb_enters_gds_with_exact_purpose_and_preserved_core_seal
     assert result['final_geometry_adoption'] == 'NOT_MEASURED'
     layout = db.Layout(); layout.read(str(tmp_path / result['gds']['path']))
     top = layout.cell('fill_smoke')
-    assert db.Region(top.shapes(layout.layer(1, 4))).count() == result['geometry_proof']['fill_count']
+    fill_cell = layout.cell(result['geometry_proof']['native_fill_cells'][0])
+    assert db.Region(fill_cell.shapes(layout.layer(1, 4))).count() == result['geometry_proof']['fill_count']
+    assert any(i.cell.name == fill_cell.name for i in top.each_inst())
     assert layout.cell('synthetic_seal_source') is not None
     assert any(i.cell.name == 'synthetic_seal_source' for i in top.each_inst())
     assert stream._record(tmp_path, tmp_path / inputs['seal_gds']['path']) == inputs['seal_gds']
@@ -110,6 +112,7 @@ def test_original_native_streamer_rc_zero_silently_drops_fills_and_consumer_reje
     paths.update(lefs=[stream._bound(tmp_path, p) for p in inputs['lefs']], gds_files=[])
     output = tmp_path / 'unfixed.gds'
     cmd = stream._stream_command(paths, stream._bound(tmp_path, source), output, paths['base_map'])
+    cmd[1] = str(stream.native_script())
     proc = subprocess.run(cmd, capture_output=True, text=True)
     assert proc.returncode == 0 and output.is_file()
     assert "No mapping for layer 'M1', purpose 'FILL'" in proc.stdout + proc.stderr
@@ -166,3 +169,8 @@ def test_wrong_gds_or_changed_rule_after_publication_is_not_reusable(tmp_path):
     shutil.copyfile(stream._bound(tmp_path, record['outputs']['bare.gds']), target)
     with pytest.raises(Refusal, match='FILL_STREAM_INPUT_CHANGED'):
         stream.validate_bridge(tmp_path, ref)
+
+
+def test_unknown_native_script_refuses_instead_of_patching_unreviewed_source():
+    with pytest.raises(Refusal, match='FILL_STREAM_NATIVE_VERSION_UNSUPPORTED'):
+        stream.patched_native_source('print("unreviewed")\n')

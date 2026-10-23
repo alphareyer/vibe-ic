@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from fractions import Fraction
 import hashlib
+import ast
 import json
 from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
+import tempfile
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -23,6 +25,8 @@ from _atomic_artefact import write_json
 from librelane_contract import Refusal
 
 SCHEMA = 'vibeic.fill-stream.v1'
+# Exact installed LibreLane script measured in pinned EDA 0.4.29.
+NATIVE_STREAM_SHA256 = '0c8cf2732cb72091e25189fbca24d15790f368453f8035db1882b1d5939e994d'
 
 
 def _sha(path):
@@ -139,7 +143,7 @@ def native_script():
 
 
 def operation_sources():
-    paths = [Path(__file__), HERE / 'flow109_density_fill.py', HERE / 'flow109_density_fill.tcl']
+    paths = [Path(__file__), HERE / 'librelane_fill_stream_native.py', HERE / 'flow109_density_fill.py', HERE / 'flow109_density_fill.tcl']
     return {**{'programs/' + p.name: _sha(p) for p in paths},
             'native/librelane/scripts/klayout/stream_out.py': _sha(native_script())}
 
@@ -149,70 +153,127 @@ def _instances(cell):
                   for i in cell.each_inst())
 
 
-def geometry_proof(filled_def, bare_gds, filled_gds, mapping):
+def _expected_regions(parsed, dbu, mapping):
     import klayout.db as db
-    parsed = fill_records(filled_def)
-    layouts = []
-    for path in (bare_gds, filled_gds):
-        layout = db.Layout()
-        layout.read(str(path))
-        layouts.append(layout)
-    bare, filled = layouts
-    if bare.dbu != filled.dbu or {c.name for c in bare.each_cell()} != {c.name for c in filled.each_cell()}:
-        raise Refusal('FILL_STREAM_HIERARCHY_CHANGED', 'dbu/cell population')
-    top_name = parsed['top']
-    if bare.cell(top_name) is None or filled.cell(top_name) is None:
-        raise Refusal('FILL_STREAM_TOP_ABSENT', top_name)
     expected = {}
     for shape in parsed['shapes']:
         if shape['layer'] not in mapping:
             raise Refusal('FILL_STREAM_MAPPING_MISSING', shape['layer'])
         pair = tuple(mapping[shape['layer']])
-        coords = [Fraction(n, parsed['units']) / Fraction(str(filled.dbu)) for n in shape['rect']]
+        coords = [Fraction(n, parsed['units']) / Fraction(str(dbu)) for n in shape['rect']]
         if any(n.denominator != 1 for n in coords):
             raise Refusal('FILL_STREAM_GRID_UNREPRESENTABLE', str(shape))
         expected.setdefault(pair, db.Region()).insert(db.Box(*map(int, coords)))
-    pairs = {(i.layer, i.datatype) for layout in layouts for i in layout.layer_infos()} | set(expected)
-    def shapes(layout, cell, pair):
-        index = layout.find_layer(*pair)
-        return cell.shapes(index) if index is not None else None
-    def region(layout, cell, pair):
-        value = shapes(layout, cell, pair)
-        return db.Region(value) if value is not None else db.Region()
+    return expected
+
+
+def _native_fill_child(bare, filled, parsed, mapping):
+    """Prove a reader-created child contains only this DEF's declared fills."""
+    import klayout.db as db
+    original = {c.name for c in bare.each_cell()}
+    added = {c.name for c in filled.each_cell()} - original
+    if not parsed['shapes']:
+        if added:
+            raise Refusal('FILL_STREAM_HIERARCHY_CHANGED', 'unexpected new cells without fills')
+        return set(), {}
+    if len(added) != 1:
+        raise Refusal('FILL_STREAM_NATIVE_CELL_UNSUPPORTED', str(sorted(added)))
+    name = next(iter(added))
+    child = filled.cell(name)
+    if list(child.each_inst()):
+        raise Refusal('FILL_STREAM_NATIVE_CELL_UNSUPPORTED', 'fill cell contains hierarchy')
+    expected = _expected_regions(parsed, filled.dbu, mapping)
+    pairs = {(i.layer, i.datatype) for i in filled.layer_infos()} | set(expected)
+    for pair in pairs:
+        index = filled.find_layer(*pair)
+        shapes = child.shapes(index) if index is not None else None
+        if shapes is not None and any(not (v.is_box() or v.is_polygon() or v.is_path()) for v in shapes.each()):
+            raise Refusal('FILL_STREAM_NATIVE_CELL_UNSUPPORTED', 'fill cell has non-geometric content')
+        region = db.Region(shapes) if shapes is not None else db.Region()
+        if not (region ^ expected.get(pair, db.Region())).is_empty():
+            raise Refusal('FILL_STREAM_FILL_GEOMETRY_MISMATCH', name + str(pair))
+    top = filled.cell(parsed['top'])
+    refs = [i for c in filled.each_cell() for i in c.each_inst() if i.cell.name == name]
+    local_refs = [i for i in top.each_inst() if i.cell.name == name]
+    if (len(refs) != 1 or len(local_refs) != 1 or local_refs[0].is_regular_array()
+            or local_refs[0].cplx_trans != db.ICplxTrans()):
+        raise Refusal('FILL_STREAM_NATIVE_CELL_TRANSFORM', 'one identity top-level fill child required')
+    return {name}, expected
+
+
+def preserve_native_fill_cells(layout, design, input_def, layout_options):
+    """Executed immediately before native clearing; no GDS edits or inserts."""
+    import klayout.db as db
+    parsed = fill_records(input_def)
+    if not parsed['shapes']:
+        return set()
+    entries = _map_entries(Path(layout_options.lefdef_config.map_file).read_text())
+    mapping = {}
+    for name in {s['layer'] for s in parsed['shapes']}:
+        pairs = entries.get((name, 'FILL'), set())
+        if len(pairs) != 1:
+            raise Refusal('FILL_STREAM_MAPPING_MISSING', name)
+        mapping[name] = list(next(iter(pairs)))
+    # The exact same reader/options without FILLS identifies reader-created
+    # cells independently of their names; ordinary macro cells are never kept.
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.def', dir=Path(input_def).parent) as tmp:
+        tmp.write(parsed['bare_def']); tmp.flush()
+        bare = db.Layout(); bare.read(tmp.name, layout_options)
+    keep, _ = _native_fill_child(bare, layout, parsed, mapping)
+    return keep
+
+
+def patched_native_source(source):
+    """Minimal exact-version producer patch; upstream license stays intact."""
+    if hashlib.sha256(source.encode()).hexdigest() != NATIVE_STREAM_SHA256:
+        raise Refusal('FILL_STREAM_NATIVE_VERSION_UNSUPPORTED', 'unreviewed native stream script')
+    ast.parse(source)
+    anchor = '        # Clear cells\n'
+    condition = '                if not i.name.startswith("VIA"):'
+    if source.count(anchor) != 1 or source.count(condition) != 1:
+        raise Refusal('FILL_STREAM_NATIVE_VERSION_UNSUPPORTED', 'clearing node changed')
+    source = source.replace(anchor,
+        '        from librelane_fill_stream import preserve_native_fill_cells\n'
+        '        fill_cells = preserve_native_fill_cells(main_layout, design_name, input, layout_options)\n' + anchor)
+    return source.replace(condition, condition[:-1] + ' and i.name not in fill_cells:')
+
+
+def geometry_proof(filled_def, bare_gds, filled_gds, mapping):
+    import klayout.db as db
+    parsed = fill_records(filled_def)
+    layouts = []
+    for path in (bare_gds, filled_gds):
+        layout = db.Layout(); layout.read(str(path)); layouts.append(layout)
+    bare, filled = layouts
+    if bare.dbu != filled.dbu or not {c.name for c in bare.each_cell()} <= {c.name for c in filled.each_cell()}:
+        raise Refusal('FILL_STREAM_HIERARCHY_CHANGED', 'dbu/cell population')
+    if bare.cell(parsed['top']) is None or filled.cell(parsed['top']) is None:
+        raise Refusal('FILL_STREAM_TOP_ABSENT', parsed['top'])
+    added, expected = _native_fill_child(bare, filled, parsed, mapping)
+    pairs = {(i.layer, i.datatype) for layout in layouts for i in layout.layer_infos()}
     checked_cells = 0
     for cell in bare.each_cell():
         other = filled.cell(cell.name)
-        if _instances(cell) != _instances(other):
+        actual_instances = [i for i in _instances(other) if i[0] not in added]
+        if _instances(cell) != actual_instances:
             raise Refusal('FILL_STREAM_HIERARCHY_CHANGED', cell.name)
         for pair in pairs:
-            a, b = shapes(bare, cell, pair), shapes(filled, other, pair)
-            if cell.name == top_name and pair in expected:
-                ar, br = region(bare, cell, pair), region(filled, other, pair)
-                if not (ar & expected[pair]).is_empty():
-                    raise Refusal('FILL_STREAM_FILL_OVERLAPS_BASELINE', str(pair))
-                if not (br ^ (ar | expected[pair])).is_empty():
-                    raise Refusal('FILL_STREAM_FILL_GEOMETRY_MISMATCH', str(pair))
-                # Region equality cannot attest text labels.
-                at = sorted(s.to_s() for s in a.each() if s.is_text()) if a is not None else []
-                bt = sorted(s.to_s() for s in b.each() if s.is_text()) if b is not None else []
-                if at != bt:
-                    raise Refusal('FILL_STREAM_NONFILL_GEOMETRY_CHANGED', cell.name + str(pair))
-            else:
-                av = sorted(s.to_s() for s in a.each()) if a is not None else []
-                bv = sorted(s.to_s() for s in b.each()) if b is not None else []
-                if av != bv:
-                    raise Refusal('FILL_STREAM_NONFILL_GEOMETRY_CHANGED', cell.name + str(pair))
+            def shapes(layout, item):
+                index = layout.find_layer(*pair)
+                return sorted(s.to_s() for s in item.shapes(index).each()) if index is not None else []
+            if shapes(bare, cell) != shapes(filled, other):
+                raise Refusal('FILL_STREAM_NONFILL_GEOMETRY_CHANGED', cell.name + str(pair))
         checked_cells += 1
     return {'fill_count': len(parsed['shapes']), 'layers': mapping,
             'fill_area_dbu2': {f'{pair[0]}/{pair[1]}': region.area() for pair, region in expected.items()},
-            'checked_cells': checked_cells, 'hierarchy_preserved': True,
+            'native_fill_cells': sorted(added), 'checked_cells': checked_cells, 'hierarchy_preserved': True,
             'nonfill_geometry_preserved': True, 'fill_geometry_matches_def': True,
-            'scope': 'direct per-cell geometry and hierarchy; no full-chip flatten',
+            'scope': 'direct per-cell geometry and verified native fill child; no full-chip flatten',
             'final_finishing_acceptance': 'NOT_MEASURED'}
 
 
 def _stream_command(paths, def_file, output, derived_map):
-    cmd = [sys.executable, str(native_script()), str(def_file), '--output', str(output),
+    cmd = [sys.executable, str(HERE / 'librelane_fill_stream_native.py'), str(def_file), '--output', str(output),
            '--top', fill_records(def_file)['top'], '--lyt', str(paths['lyt']),
            '--lyp', str(paths['lyp']), '--lym', str(derived_map)]
     for path in paths['lefs']:
@@ -275,7 +336,8 @@ def stream_component(project, filled_def_ref, rules_ref, native_inputs, attempt,
                'filled_def': filled_def_ref, 'fill_rules': rules_ref, 'native_inputs': native_inputs,
                'inputs': inputs, 'outputs': outputs, 'mapping': map_proof, 'commands': commands,
                'geometry_proof': proof, 'final_geometry_adoption': 'NOT_MEASURED',
-               'flow109_acceptance': 'NOT_MEASURED'}
+               'flow109_acceptance': 'NOT_MEASURED',
+               'native_runtime': 'exact-version source patch preserving verified reader fill child; image script unchanged'}
     write_json(attempt / 'bridge.json', receipt)
     return _record(project, attempt / 'bridge.json')
 
