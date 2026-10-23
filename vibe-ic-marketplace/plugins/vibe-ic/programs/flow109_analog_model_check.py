@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os as _os
 from pathlib import Path
 import re
+import sys as _sys
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 
 import _prose_polarity as _polarity
 
