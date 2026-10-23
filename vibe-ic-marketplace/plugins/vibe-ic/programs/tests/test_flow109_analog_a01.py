@@ -146,6 +146,26 @@ def test_missing_spec_remains_unmeasured_even_when_legacy_gate_returns_vacuous_o
     assert not (tmp_path / 'phase3/analog/regulator_alpha/spec.json').exists()
 
 
+def test_actual_launch_seam_rechecks_qualification_after_initial_admission(tmp_path, monkeypatch):
+    manifest, registry = _case(tmp_path)
+    context = flow109.execution_context(flow109.resolve_plan(manifest['features']), 'A01', 'A01',
+        runtime_tool_uses=manifest['runtime_tool_uses'], qualification_registry='qualifications.json')
+    original = analog._blocks
+
+    def invalidate_after_initial_admission(project):
+        names = original(project)
+        registry['uses'][0]['status'] = 'UNSUPPORTED'
+        (project / 'qualifications.json').write_text(json.dumps(registry))
+        return names
+
+    monkeypatch.setattr(analog, '_blocks', invalidate_after_initial_admission)
+    with pytest.raises(admission.AdmissionRefusal, match='QUALIFICATION_UNSUPPORTED'):
+        analog.execute(tmp_path, context)
+    assert not list(tmp_path.rglob('producer.json'))
+    assert not list(tmp_path.rglob('producer.log'))
+    assert not (tmp_path / 'phase3/analog/regulator_alpha/spec.json').exists()
+
+
 def test_unbound_preexisting_spec_is_preserved_and_not_adopted_as_fresh_production(tmp_path):
     _case(tmp_path)
     spec = tmp_path / 'phase3/analog/regulator_alpha/spec.json'
