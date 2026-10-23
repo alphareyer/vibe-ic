@@ -83,3 +83,31 @@ component returns CLI success with `component_status: PASS`, while
 `flow109_acceptance` remains `NOT_MEASURED`: the two A01 metric obligations and
 G1-G9 audit have not been implemented by this dispatch adapter. Qualification
 contract fixtures in developer tests are not production qualification records.
+
+## D44 final adopted-netlist equivalence component
+
+`--entry-step D44 --exit-step D44` uses the installed LibreLane `Yosys.EQY`
+step and the existing `librelane_eqy` recipe/partition consumer. A model/port
+elaboration check rejects functionless/unknown instantiated cells. No second
+full LEC or gate-level simulation substitutes for the actual EQY proof.
+
+`input/flow109/D44.json` binds reference RTL, the final adopted netlist,
+functional Liberty, explicit LibreLane PDK/library/root, and STA/LVS-reference/
+release netlist sources. This tranche supports identical logical bytes and no
+power/physical-cell/port transformations. An unqualified representation change
+is `NOT_MEASURED`, never a reason to drop cells or ports. The native generic
+PDK preprocessing branch uses Icarus; LibreLane's other formal-PDK helper
+branch requires its own qualified tool use and is not silently substituted.
+
+All per-use identities bind `flow109_final_lec.operation_sources()` in
+`semantics.operation_sources`. The adapter checks admission again at actual
+model/proof launch and retains exact native configurations, inputs, source
+hashes and partition evidence. Every declared EQY partition must have a result;
+unresolved/unknown or gold-X partitions cannot produce component PASS.
+
+A proven component publishes
+`adopted/final_lec/sta_lvs_release_netlist_mapping.json` with the common logical
+netlist source and proof identity. This prepares the downstream source chain;
+it does not claim that STA, LVS, or release consumers have run/adopted it.
+`flow109_acceptance` and `baseline_adoption` remain `NOT_MEASURED` until their
+individual metric/consumer bindings are implemented.
