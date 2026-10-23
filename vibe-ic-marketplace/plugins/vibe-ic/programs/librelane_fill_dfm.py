@@ -1253,6 +1253,17 @@ def _current_stage(project: Path, state: Path, step: str) -> tuple[dict, dict]:
     return before, _load(state)
 
 
+def _retained_stream_step(record: dict) -> str:
+    """An old self-consistent receipt cannot certify a lossy FILLS stream."""
+    from librelane_fill_stream import fill_records
+    step = record.get('stream_step', 'KLayout.StreamOut')
+    if step not in ('KLayout.StreamOut', FILL_STREAM_STEP):
+        raise Refusal('LL_STREAM_STEP_UNSUPPORTED', str(step))
+    if fill_records(Path(record['filled_def']))['shapes'] and step != FILL_STREAM_STEP:
+        raise Refusal('LL_FILL_STREAM_LEGACY_LOSSY_RECEIPT', str(record['filled_def']))
+    return step
+
+
 def validate_default_stream(project: Path) -> dict:
     """Bind the filled DEF, actual stream/filler, density and both publications.
 
@@ -1264,9 +1275,7 @@ def validate_default_stream(project: Path) -> dict:
     record = doc['default_stream']
     if _load(project / DEFAULT_STREAM_REL) != record:
         raise Refusal('LL_FINISHING_PROMOTION_CHANGED', DEFAULT_STREAM_REL)
-    stream_step = record.get('stream_step', 'KLayout.StreamOut')
-    if stream_step not in ('KLayout.StreamOut', FILL_STREAM_STEP):
-        raise Refusal('LL_STREAM_STEP_UNSUPPORTED', str(stream_step))
+    stream_step = _retained_stream_step(record)
     stream_fp = validate_step_receipt(
         Path(record['stream_state']).parent, stream_step)['input']
     if (record.get('image') != stream_fp.get('image')

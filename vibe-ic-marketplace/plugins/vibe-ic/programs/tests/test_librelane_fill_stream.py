@@ -273,3 +273,16 @@ def test_default_fill_mapping_reuse_keeps_original_rule_and_pdk_authority(tmp_pa
     target.write_text(target.read_text() + '\n')
     with pytest.raises(Refusal, match='LL_FILL_STREAM_AUTHORITY_CHANGED|LL_FILL_STREAM_WRONG_D62_SUBJECT'):
         finishing._validate_fill_stream_authority(tmp_path, record)
+
+
+def test_historical_stream_receipt_cannot_adopt_actual_explicit_fills(tmp_path):
+    import librelane_fill_dfm as finishing
+    d62, _ = _native_case(tmp_path)
+    source = json.loads((tmp_path / d62['path']).read_text())
+    filled = stream._bound(tmp_path, source['outputs']['filled.def'])
+    with pytest.raises(Refusal, match='LL_FILL_STREAM_LEGACY_LOSSY_RECEIPT'):
+        finishing._retained_stream_step({'filled_def': str(filled)})
+    assert finishing._retained_stream_step({'filled_def': str(filled),
+        'stream_step': finishing.FILL_STREAM_STEP}) == finishing.FILL_STREAM_STEP
+    before = stream._bound(tmp_path, source['outputs']['before.def'])
+    assert finishing._retained_stream_step({'filled_def': str(before)}) == 'KLayout.StreamOut'
