@@ -134,3 +134,15 @@ pre-fill GDS or SPEF cannot satisfy that requirement.
 This adapter does not adopt an old GDS-finishing result, update STA/LVS release
 acceptance, or grant a full D62 or 109-flow PASS. Those metric and downstream
 bindings remain separate implementation work.
+
+## Measured final-extraction blocker
+
+D69 remains unimplemented and cannot reuse a pre-fill SPEF as final evidence.
+In EDA 0.4.29, OpenROAD `d4d1c6987aa8a1c4bdf99cf8166130549c981b03`
+produced identical SPEF bytes (excluding DATE) before and after adding 41,549
+explicit fills to the public Nangate45 RCX regression design. This is a
+capability counterexample for that use, not GF180 qualification or a statement
+about every extraction model. See `vibeic/vibeic-eda#333` for the pinned
+reproducer and the required correlation/common-geometry evidence. A suitable
+alternative extractor or authoritative correlated fill model can be evaluated;
+a caller-authored qualification label cannot replace those measurements.

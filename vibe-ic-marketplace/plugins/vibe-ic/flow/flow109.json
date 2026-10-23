@@ -14099,7 +14099,15 @@
         "G8",
         "G9"
       ],
-      "gate_matrix_status": "NOT_MEASURED_FOR_109"
+      "gate_matrix_status": "NOT_MEASURED_FOR_109",
+      "implementation_blocker": {
+        "status": "NATIVE_FILL_AWARE_QUALIFICATION_NOT_VERIFIED",
+        "issue": "https://github.com/vibeic/vibeic-eda/issues/333",
+        "openroad_commit": "d4d1c6987aa8a1c4bdf99cf8166130549c981b03",
+        "experiment": "Public Nangate45 RCX regression: 0 versus 41549 explicit fills produced identical SPEF except DATE. This is not GF180 qualification.",
+        "normalized_spef_sha256": "cea133af3c619eafde74d7fb23d085531db3d11b667fd96f9e2c793e8dc05b65",
+        "required_resolution": "Qualified explicit-fill extraction or an authoritative correlated model for the exact final PDK/profile; common final ODB/GDS identity remains required."
+      }
     },
     {
       "id": "D70",
