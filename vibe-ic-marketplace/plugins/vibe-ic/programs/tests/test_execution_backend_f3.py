@@ -567,6 +567,8 @@ def test_cdc_native_citation_reader_accepts_carried_proof_and_rejects_changed_lo
         "reports/phase2/cdc/netlist.json",
         "reports/phase2/cdc/netlist_front_end.json",
         "reports/phase2/cdc/netlist.yosys.log",
+        "reports/phase2/cdc/netlist.raw.json",
+        "reports/phase2/cdc/netlist.normalize.yosys.log",
     ):
         target = isolated / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -578,6 +580,10 @@ def test_cdc_native_citation_reader_accepts_carried_proof_and_rejects_changed_lo
     assert receipt["producer"]["step"] == "Yosys.JsonHeader"
     assert receipt["sha256"]["netlist.yosys.log"] == ll.digest(
         isolated / "reports/phase2/cdc/netlist.yosys.log")
+    assert receipt["sha256"]["netlist.raw.json"] == ll.digest(
+        isolated / "reports/phase2/cdc/netlist.raw.json")
+    assert receipt["sha256"]["netlist.normalize.yosys.log"] == ll.digest(
+        isolated / "reports/phase2/cdc/netlist.normalize.yosys.log")
 
     log = isolated / "reports/phase2/cdc/netlist.yosys.log"
     log.write_bytes(log.read_bytes() + b"\nchanged-log-control\n")

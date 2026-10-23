@@ -21,6 +21,32 @@ import flow109_functional_activity as activity
 from programs.tests._hostpaths import require_repo
 
 
+@pytest.mark.parametrize('values, accepted', [
+    ('0!\n#2\n1!\n', True),
+    ('1!\n#2\n0!\n', True),
+    ('not 0!\n#2\nnot 1!\n', False),
+    ('0! is not low\n#2\n1! is not high\n', False),
+    ('signal is 0!\n#2\nsignal is 1!\n', False),
+    ('x!\n#2\n1!\n', False),
+    ('0!\n#2\nz!\n', False),
+])
+def test_vcd_census_consumes_formal_records_not_prose(tmp_path, values, accepted):
+    vcd = tmp_path / 'grammar.vcd'
+    vcd.write_text('$timescale 1ps $end\n$scope module dut $end\n'
+                   '$var wire 1 ! signal $end\n$upscope $end\n'
+                   '$enddefinitions $end\n#0\n' + values)
+    spec = {'required_ports': ['signal'],
+            'window': {'start_tick': 0, 'end_tick': 2, 'timescale': '1ps'}}
+    if accepted:
+        result = activity.waveform_census(vcd, 'dut', spec)
+        assert result['ports']['signal']['observations'] == 2
+        assert result['ports']['signal']['transitions'] == 1
+    else:
+        with pytest.raises(admission.AdmissionRefusal,
+                           match='D55_VCD_UNKNOWN_OR_UNOBSERVED_SIGNAL'):
+            activity.waveform_census(vcd, 'dut', spec)
+
+
 def _put(project, name, value):
     path = project / name
     path.parent.mkdir(parents=True, exist_ok=True)
