@@ -2244,7 +2244,7 @@
             "checker.base_A1.analog_specs_with_units",
             "producer.base_A1.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "IMPLEMENTED_A01_RUNTIME_BINDING"
         },
         {
           "id": "base_A1.required_measurements",
@@ -2264,10 +2264,10 @@
             "checker.base_A1.required_measurements",
             "producer.base_A1.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "IMPLEMENTED_A01_RUNTIME_BINDING"
         }
       ],
-      "metric_acceptance_status": "UNIMPLEMENTED",
+      "metric_acceptance_status": "IMPLEMENTED_A01_RUNTIME",
       "gate_layer_ids": [
         "G1",
         "G2",

@@ -81,9 +81,12 @@ binds consumed L1/L5/L9/block-list bytes, current outputs and actual gate JSONs.
 
 Each attempt is preserved under `reports/flow109/attempts/A01-*/`; the latest
 component view is `reports/flow109/components/A01.json`. A completed native
-component returns CLI success with `component_status: PASS`, while
-`flow109_acceptance` remains `NOT_MEASURED`: the two A01 metric obligations and
-G1-G9 audit have not been implemented by this dispatch adapter. Qualification
+component returns CLI success with `component_status: PASS`. The two A01
+`covers_all` obligations are then evaluated from the current emitted specs and
+gates against their exact requirements-owner-approved registry refs. Missing,
+stale, partial, defaulted or AI-owned authority remains `NOT_MEASURED`; a
+measured miss is `FAIL`. `flow109_acceptance` remains `NOT_MEASURED` because
+G1-G9 and whole-flow delivery are outside this row binding. Qualification
 contract fixtures in developer tests are not production qualification records.
 
 ## D44 final adopted-netlist equivalence component

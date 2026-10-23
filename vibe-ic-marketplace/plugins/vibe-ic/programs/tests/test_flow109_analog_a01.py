@@ -96,7 +96,8 @@ def test_actual_a01_front_door_runs_emitter_and_gate_without_claiming_metric_pas
     report = json.loads((tmp_path / 'reports/flow109/components/A01.json').read_text())
     assert report['component_status'] == 'PASS'
     assert report['flow109_acceptance'] == 'NOT_MEASURED'
-    assert report['unimplemented_obligations'] == ['base_A1.analog_specs_with_units', 'base_A1.required_measurements']
+    assert report['metric_acceptance_status'] == 'NOT_MEASURED'
+    assert report['unimplemented_obligations'] == []
     assert [Path(e['argv'][1]).name for e in report['executions']] == [
         'analog_a1_spec_emit.py', 'analog_a1_spec_extract_check.py']
     assert all(e['returncode'] == 0 for e in report['executions'])
