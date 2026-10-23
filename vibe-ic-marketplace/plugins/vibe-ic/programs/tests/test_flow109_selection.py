@@ -85,9 +85,13 @@ def test_odb_fill_is_not_aliased_to_legacy_gds_fill_pass():
     fill = flow109.resolve_step(plan, "D62")
     assert fill["profile"]["entrypoint"]["command"] == "density_fill"
     assert fill["profile"]["geometry_format"] == "ODB"
-    assert fill["profile"]["native_steps"] == []
+    assert fill["profile"]["native_steps"] == ["OpenROAD.DensityFill"]
+    window = flow109.resolve_execution_window(plan, "D62", "D62")
+    assert window["native_step_id"] == "flow109.D62"
+    assert window["resolved_row"]["profile"]["dispatch"]["adapter"] == "flow109_density_fill"
+    assert window["resolved_row"]["profile"]["dispatch"]["flow109_metrics_status"] == "UNIMPLEMENTED"
     with pytest.raises(flow109.Flow109Error, match="PRODUCER_UNIMPLEMENTED"):
-        flow109.resolve_execution_window(plan, "D62", "D62")
+        flow109.resolve_execution_window(plan, "D69", "D69")
     with pytest.raises(flow109.Flow109Error, match="WINDOW_UNIMPLEMENTED"):
         flow109.resolve_execution_window(plan, "D38", "D41")
 
@@ -126,10 +130,19 @@ def test_canonical_cli_plan_does_not_credit_or_rewrite_old_pass(tmp_path):
     assert not (tmp_path / "reports" / "flow109" / "admission.json").exists()
     # The same actual front door refuses an unmapped producer before tools.
     result = subprocess.run([x for x in command if x != "--flow109-plan-only"]
-                            + ["--entry-step", "D62", "--exit-step", "D62"],
+                            + ["--entry-step", "D69", "--exit-step", "D69"],
                             text=True, capture_output=True)
     assert result.returncode == 2
     assert "FLOW109_PRODUCER_UNIMPLEMENTED" in result.stderr
+    assert old.read_bytes() == before
+    # The implemented fill component still cannot launch without qualification.
+    result = subprocess.run([x for x in command if x != "--flow109-plan-only"]
+                            + ["--entry-step", "D62", "--exit-step", "D62"],
+                            text=True, capture_output=True)
+    assert result.returncode == 2
+    assert "QUALIFICATION_RUNTIME_ABSENT" in result.stderr
+    refusal = json.loads((tmp_path / "reports/flow109/admission.json").read_text())
+    assert refusal["native_started"] is False
     assert old.read_bytes() == before
 
 
