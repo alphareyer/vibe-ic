@@ -11,9 +11,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 from typing import Mapping
 
 HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 REGISTRY = HERE.parent / "flow" / "flow109.json"
 CONTEXT_ENV = "VIBEIC_FLOW109_CONTEXT"
 
