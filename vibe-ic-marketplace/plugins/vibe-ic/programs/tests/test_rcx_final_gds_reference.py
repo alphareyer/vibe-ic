@@ -89,3 +89,19 @@ def test_missing_configured_solver_refuses_before_native(tmp_path,monkeypatch):
     with pytest.raises(Refusal,match='RCX_FINAL_TOOL_ABSENT'):
         ref.solve_final_gds(gds,'UNIT','gf180mcuD',tmp_path/'out')
     assert launches==[]
+
+
+def test_positive_definite_nonphysical_maxwell_matrix_refused(tmp_path):
+    path = tmp_path / 'negative-shunt.csv'
+    path.write_text('g1_A;g2_F;g3_G\n4e-12;-1.9e-12;-0.1e-12\n-1.9e-12;1e-12;-0.1e-12\n-0.1e-12;-0.1e-12;1e-12\n')
+    with pytest.raises(Refusal, match='negative Maxwell row sum'):
+        ref.floating_victim_c_pf(path, victim='A', floating=['F'], grounded=['G'])
+
+
+@pytest.mark.parametrize('voltage', [1.9, -0.1, 0.4])
+def test_inconsistent_floating_solution_refused(tmp_path, monkeypatch, voltage):
+    import numpy as np
+    path = _matrix(tmp_path / 'matrix.csv')
+    monkeypatch.setattr(np.linalg, 'solve', lambda *args: np.array([voltage]))
+    with pytest.raises(Refusal, match='RCX_FLOAT_SOLUTION_INVALID'):
+        ref.floating_victim_c_pf(path, victim='VICTIM', grounded=['GROUND'], floating=['FILL'])

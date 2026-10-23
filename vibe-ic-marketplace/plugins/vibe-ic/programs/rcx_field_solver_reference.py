@@ -388,6 +388,10 @@ def floating_victim_c_pf(matrix_csv: Path, *, victim: str,
     offdiagonal = matrix - np.diag(np.diag(matrix))
     if np.any(offdiagonal > 0) or np.any(np.linalg.eigvalsh(matrix) <= 0):
         raise Refusal('RCX_FLOAT_MATRIX_INVALID', 'passive positive definite Maxwell matrix required')
+    # Each row sum is capacitance to the omitted reference at infinity.
+    # Positive definiteness alone permits nonphysical negative shunt capacitance.
+    if np.any(matrix.sum(axis=1) < 0):
+        raise Refusal('RCX_FLOAT_MATRIX_INVALID', 'negative Maxwell row sum: nonphysical reference capacitance')
     k = names.index(victim)
     f = [names.index(name) for name in floating]
     potentials = np.zeros(len(names)); potentials[k] = 1.0
@@ -396,7 +400,14 @@ def floating_victim_c_pf(matrix_csv: Path, *, victim: str,
             potentials[f] = np.linalg.solve(matrix[np.ix_(f, f)], -matrix[f, k])
         except np.linalg.LinAlgError as exc:
             raise Refusal('RCX_FLOAT_MATRIX_SINGULAR', 'floating submatrix not solvable') from exc
+    if not np.isfinite(potentials).all() or np.any(potentials[f] < 0) or np.any(potentials[f] > 1):
+        raise Refusal('RCX_FLOAT_SOLUTION_INVALID', 'floating voltage violates passive maximum principle')
     charge = matrix @ potentials
+    # Residual allowance is floating-point backward error, not a physical waiver.
+    residual_bound = (np.finfo(float).eps * len(names)
+                      * np.abs(matrix) @ np.abs(potentials))
+    if np.any(np.abs(charge[f]) > residual_bound[f]):
+        raise Refusal('RCX_FLOAT_SOLUTION_INVALID', 'floating charge equation is not satisfied')
     capacitance = float(charge[k]) * 1e12
     if not capacitance > 0:
         raise Refusal('RCX_FLOAT_MATRIX_NONPOSITIVE', 'nonpositive effective victim capacitance')
