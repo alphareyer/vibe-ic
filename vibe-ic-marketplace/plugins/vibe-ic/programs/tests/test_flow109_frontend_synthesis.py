@@ -20,6 +20,15 @@ def put(project, name, value):
     return {'path': str(path.relative_to(project)), 'sha256': frontend._sha(path)}
 
 
+@pytest.fixture(autouse=True)
+def actual_attested_image_route(monkeypatch):
+    import librelane_contract
+    # Tests execute inside the pinned, host-attested image. Do not attach
+    # an unrelated ambient container merely because Docker is reachable.
+    librelane_contract.local_image_attestation()
+    monkeypatch.setattr(librelane_contract._ce, "no_container_route", lambda: True)
+
+
 def case(project):
     import fnmatch
     from librelane.config import Config
