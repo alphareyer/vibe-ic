@@ -13380,6 +13380,46 @@
       ],
       "profiles": [
         {
+          "id": "digital_odb",
+          "select_when": "digital_physical",
+          "provider": "librelane",
+          "tools": "Qualified Python+pya native fill stream + KLayout FinishingXOR",
+          "native_steps": [
+            "Vibeic.FillAwareStreamOut",
+            "Vibeic.FinishingXOR"
+          ],
+          "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
+          "dispatch": {
+            "kind": "native_adapter",
+            "adapter": "flow109_final_geometry",
+            "native_step_id": "flow109.D64",
+            "producer": "flow109_final_geometry.py:execute",
+            "consumer": "librelane_fill_stream.py:validate_bridge",
+            "engine_families": [
+              "python3",
+              "klayout"
+            ],
+            "engine_executables": {
+              "python3": "python3",
+              "klayout": "klayout"
+            },
+            "engine_steps": {
+              "python3": [
+                "Vibeic.FillAwareStreamOut"
+              ],
+              "klayout": [
+                "Vibeic.FinishingXOR"
+              ]
+            },
+            "acceptance_scope": "new_D62_geometry_component_only",
+            "flow109_metrics_status": "UNIMPLEMENTED",
+            "native_required_outputs": [
+              "new final GDS and D62 ODB common geometry receipt",
+              "native finishing XOR"
+            ]
+          }
+        },
+        {
           "id": "default",
           "select_when": "otherwise",
           "provider": "librelane",
