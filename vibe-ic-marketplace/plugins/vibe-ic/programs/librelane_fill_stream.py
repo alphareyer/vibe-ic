@@ -373,6 +373,10 @@ def validate_bridge(project, receipt_ref):
         d62 = density.validate_filled_odb(project, receipt['d62_receipt'])
         if d62['odb'] != receipt['odb']:
             raise Refusal('FILL_STREAM_ODB_CHAIN_CHANGED', str(receipt_ref))
+        source = json.loads(_bound(project, receipt['d62_receipt']).read_text())
+        if (receipt['filled_def'] != source['outputs']['filled.def']
+                or receipt['fill_rules'] != source['inputs']['rules']):
+            raise Refusal('FILL_STREAM_D62_CONSUMED_SOURCE_MISMATCH', str(receipt_ref))
         result.update(odb=d62['odb'], d62_receipt=receipt['d62_receipt'])
     return result
 

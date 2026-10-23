@@ -26,13 +26,14 @@ def _put(project, name, value):
     return stream._record(project, path)
 
 
-def _native_case(project):
+def _native_case(project, *, fill_width=1.0):
     import klayout.db as db
     fixtures = require_repo('vibe-ic-marketplace', 'plugins', 'vibe-ic', 'programs', 'tests', 'fixtures', 'flow109_density_fill')
     for name in ('tech.lef', 'routed.def'):
         _put(project, 'inputs/' + name, (fixtures / name).read_text())
     rules = json.loads((fixtures / 'rules.json').read_text())
     rules['layers']['unit_metal']['non-opc']['datatype'] = 4
+    rules['layers']['unit_metal']['non-opc']['width'] = [fill_width]
     rule_ref = _put(project, 'inputs/rules.json', rules)
     init = project / 'initialize.tcl'
     init.write_text('read_lef inputs/tech.lef\nread_def inputs/routed.def\nwrite_db inputs/input.odb\n')
@@ -286,3 +287,38 @@ def test_historical_stream_receipt_cannot_adopt_actual_explicit_fills(tmp_path):
         'stream_step': finishing.FILL_STREAM_STEP}) == finishing.FILL_STREAM_STEP
     before = stream._bound(tmp_path, source['outputs']['before.def'])
     assert finishing._retained_stream_step({'filled_def': str(before)}) == 'KLayout.StreamOut'
+
+
+def test_two_valid_native_d62_bridges_cannot_splice_gds_and_unrelated_odb(tmp_path, monkeypatch):
+    # Absolute typed references are supported by the real readers. Only their
+    # serialization changes here so both independently produced project roots
+    # can be consumed together; no measured tool output/proof is mocked.
+    absolute = lambda project, path: {'path': str(Path(path).resolve()), 'sha256': stream._sha(path)}
+    monkeypatch.setattr(stream, '_record', absolute)
+    monkeypatch.setattr(density, '_record', absolute)
+    cases = []
+    for name, width in [('a', 1.0), ('b', 2.0)]:
+        project = tmp_path / name; project.mkdir()
+        d62, inputs = _native_case(project, fill_width=width)
+        bridge = stream.stream_d62(project, d62, inputs, project / 'native-stream', before_launch=lambda: None)
+        valid = stream.validate_bridge(project, bridge)
+        assert density.validate_filled_odb(project, d62)['odb'] == valid['odb']
+        cases.append((project, d62, bridge, valid))
+    a, b = cases
+    assert a[3]['geometry_proof']['fill_count'] != b[3]['geometry_proof']['fill_count']
+    assert a[3]['gds']['sha256'] != b[3]['gds']['sha256']
+    # Keep all A source geometry, native logs and proof intact, while naming
+    # B's separately valid ODB/D62. Two independent PASS chains are not one.
+    forged = json.loads(stream._bound(a[0], a[2]).read_text())
+    forged.update(d62_receipt=b[1], odb=b[3]['odb'])
+    ref = _put(tmp_path, 'spliced-d62-odb.json', forged)
+    with pytest.raises(Refusal, match='FILL_STREAM_D62_CONSUMED_SOURCE_MISMATCH'):
+        stream.validate_bridge(tmp_path, ref)
+    # Rules are a consumed producer input too, not an interchangeable valid file.
+    forged = json.loads(stream._bound(a[0], a[2]).read_text())
+    forged['fill_rules'] = json.loads(stream._bound(b[0], b[1]).read_text())['inputs']['rules']
+    ref = _put(tmp_path, 'spliced-rules.json', forged)
+    with pytest.raises(Refusal, match='FILL_STREAM_D62_CONSUMED_SOURCE_MISMATCH'):
+        stream.validate_bridge(tmp_path, ref)
+    assert stream.validate_bridge(a[0], a[2])['odb'] == a[3]['odb']
+    assert stream.validate_bridge(b[0], b[2])['odb'] == b[3]['odb']
