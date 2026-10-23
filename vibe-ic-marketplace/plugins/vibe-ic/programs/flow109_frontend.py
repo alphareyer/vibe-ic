@@ -110,6 +110,8 @@ def prepare(project, context):
             or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_$]*', str(manifest.get('top', '')))
             or not isinstance(manifest.get('pdk'), str) or not manifest['pdk']):
         raise AdmissionRefusal('D22_INPUT_INVALID', 'explicit top and PDK required')
+    if not (project / 'input/submission_template/tapeout_declaration.json').is_file():
+        raise AdmissionRefusal('D22_REQUIRED_INPUT_ABSENT', 'canonical submission declaration required')
     import librelane_contract as contract
     if contract.selected_mode(project, '9') != 'librelane':
         raise AdmissionRefusal('D22_ROUTE_UNSUPPORTED', 'only the existing native LibreLane Default owner is selected')
@@ -167,7 +169,7 @@ def execute(project, context):
         # merely entering a function which can refuse before tool launch.
         folder = project / 'phase3/librelane/02-yosys-synthesis'
         receipt = folder / 'vibeic_receipt.json'
-        if receipt.is_file():
+        if 'Yosys.Synthesis' in active['operations'] and receipt.is_file():
             record['native_receipt'] = {'path': str(receipt.relative_to(project)), 'sha256': _sha(receipt)}
         if result.status == 'FAIL':
             record.update(component_status='FAIL', reason='D22_EXISTING_PRODUCER_FAILED')

@@ -41,6 +41,10 @@ def case(project):
     assert len(libs)==1
     lib=Path(libs[0]);deck={'path':str(lib),'sha256':frontend._sha(lib)}
     put(project,'input/project.json',{'pdk':'gf180mcuD'})
+    put(project,'input/submission_template/tapeout_declaration.json',
+        {'answers':{'deliverable':'DIE','top_cell':'unit_alpha','fp_sizing':'absolute',
+                    'die_area_um':[0,0,100,100],'core_area_um':[10,10,90,90]},
+         'answer_provenance':{'deliverable':{'answered_by':'owner','citation':'Developer neutral IC control'}}})
     put(project,'phase1/generated_docs/L8_TIMING_WAVEFORM.json',{'clock_domains':[{'role':'primary','source_pin':'clk','period_ns':20}]})
     put(project,'phase1/generated_docs/L9_INTEGRATION_SPEC.json',{'top_module':'unit_alpha','synth_top':'unit_alpha'})
     put(project,'phase1/generated_docs/L19_CONSTRAINTS_PDK.json',{'pdk':'gf180mcuD','constraint_declarations':[],'fields':{'die_area_budget_um':10000}})
@@ -71,7 +75,7 @@ def case(project):
 def test_actual_default_synthesis_uses_native_librelane_and_complete_existing_consumer(tmp_path,monkeypatch):
     context,path=case(tmp_path);monkeypatch.setenv('VIBEIC_FLOW109_CONTEXT',str(path))
     result=frontend.execute(tmp_path,context)
-    print('D22_NATIVE_RESULT', json.dumps(result, default=str))
+    print('D22_NATIVE_RESULT', json.dumps({k:result.get(k) for k in ('component_status','reason','producer','native_operations','native_receipt','detail')}, default=str))
     assert result['native_started'], result
     assert 'Yosys.Synthesis' in result['native_operations']
     receipt=tmp_path/result['native_receipt']['path']
@@ -82,10 +86,11 @@ def test_actual_default_synthesis_uses_native_librelane_and_complete_existing_co
     assert result['component_status']=='PASS',result
 
 
-@pytest.mark.parametrize('damage',['unsupported','source','deck'])
+@pytest.mark.parametrize('damage',['unsupported','source','deck','declaration'])
 def test_missing_or_changed_qualification_stops_before_existing_owner(tmp_path,monkeypatch,damage):
     context,path=case(tmp_path);monkeypatch.setenv('VIBEIC_FLOW109_CONTEXT',str(path))
-    if damage=='source': monkeypatch.setattr(frontend,'operation_sources',lambda:{'changed':'source'})
+    if damage=='declaration': (tmp_path/'input/submission_template/tapeout_declaration.json').unlink()
+    elif damage=='source': monkeypatch.setattr(frontend,'operation_sources',lambda:{'changed':'source'})
     elif damage=='deck': context['runtime_tool_uses'][0]['deck']['sha256']='f'*64
     else:
         file=tmp_path/'qualifications.json';x=json.loads(file.read_text());x['uses'][0]['status']='UNSUPPORTED';file.write_text(json.dumps(x))
