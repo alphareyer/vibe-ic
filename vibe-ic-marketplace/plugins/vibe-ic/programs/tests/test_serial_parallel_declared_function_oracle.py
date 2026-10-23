@@ -205,6 +205,13 @@ def test_non_arith_class_defers_fail_closed(tmp_path):
 # ── L10 per-case wiring (testbench_gen) ──────────────────────────────────────
 def test_testbench_gen_emits_per_case_golden_oracles(tmp_path):
     proj = _mk_project(tmp_path, declare=True, with_l10=True)
+    # A reset scenario owes held, released, and mid-computation intent.
+    # Preserve the three-oracle assertion with an explicit complete request.
+    l10 = proj / "phase1" / "generated_docs" / "L10_TEST_CASES.json"
+    cases = json.loads(l10.read_text())
+    cases["test_cases"][-1]["expected"] = (
+        "During reset, reset release, and reset assertion during calculation")
+    l10.write_text(json.dumps(cases))
     report: dict = {}
     n = tbg.emit_unit_tbs(proj, "serpar_mul", kind="functional_vector",
                           report=report)
@@ -701,3 +708,32 @@ def test_public_scenario_postposed_denial_binds_only_its_subject(tmp_path, text,
         assert report.get('arithmetic_scenario_cases', []) == [], report
     import l10_coverage_goal_classify as goals
     assert goals.measure_scenario_goal(case, 100.0, [case], {'available': False, 'rows': {}})['verdict'] == 'NOT_MEASURED'
+
+
+@pytest.mark.parametrize('scope,accepted', [
+    ('During reset, reset release, and reset assertion during calculation', True),
+    ('During the reset, reset release, and reset assertion during calculation', True),
+    ('No check during reset is required; reset release and reset assertion during calculation', False),
+    ('Behavior during reset remains unspecified; reset release and reset assertion during calculation', False),
+    ('During reset is not specified; reset release and reset assertion during calculation', False),
+    ('Reset release and reset assertion during calculation', False),
+    ('During reset release and reset assertion during calculation', False),
+    ('During reset deassertion and reset assertion during calculation', False),
+    ('During reset and reset release', False),
+])
+def test_during_reset_scope_drives_real_scenario_author(tmp_path, scope, accepted):
+    root, case = _public_scenario_input(tmp_path, scope)
+    report = {}
+    tbg.emit_unit_tbs(root, 'neutral_serial', report=report)
+    plan = aotg.arithmetic_scenario_plan(root, 'digital_arithmetic_primitive', case)
+    assert (plan is not None) is accepted, (plan, report)
+    if accepted:
+        assert plan['scenario'] == 'reset_situations'
+        assert plan['transactions'] == 9 * len(plan['pairs'])
+        assert report['arithmetic_scenario_cases'] == ['requested_case']
+    else:
+        assert not report.get('arithmetic_scenario_cases'), report
+    # Authoring does not constitute an observed simulation PASS.
+    import l10_coverage_goal_classify as goals
+    verdict = goals.measure_scenario_goal(case, 100.0, [case], {'available': False, 'rows': {}})
+    assert verdict['verdict'] == 'NOT_MEASURED'

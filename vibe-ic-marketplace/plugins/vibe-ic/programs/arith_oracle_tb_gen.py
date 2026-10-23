@@ -1388,6 +1388,11 @@ def _arithmetic_scenario_intent(case: dict, operand_names: Tuple[str, ...]) -> d
         boundaries |= stated(rf'\b(?:{operand})\s*=\s*(?:{corner})\b', named_text)
     consecutive = stated(r'consecutive\s+(?:(?:(?:>=|≥|at\s+least)\s*)?[0-9][0-9,_]*\s+)?transactions?|back.to.back|(?:連續|连续)\s*(?:(?:至少\s*)?[0-9][0-9,_]*\s*)?(?:多筆|多笔|筆|笔|乘法|計算|计算|交易|運算|运算)')
     held = stated(r'held|hold|(?:reset|rst|重置|復位|复位)\s*(?:期間|期间)')
+    # English reset-period wording denotes the held-reset situation too.
+    # Keep explicitly undefined/denied scopes as an expert handoff.
+    held |= stated(r'\bduring\s+(?:the\s+)?(?:reset|rst)\b'
+                   r'(?!\s+(?:release\b|deassert(?:ion|ed)?\b|(?:(?:is|remains)\s+)?(?:unspecified|undefined|'
+                   r'not\s+(?:required|specified|defined))))')
     released = stated(r'released|release|(?:reset|rst|重置|復位|复位)\s*(?:解除(?:瞬間|瞬间)?|釋放|释放)')
     mid = stated(_RESET_MID_RE.pattern) or stated(r'asserted\s+during\s+computation')
     reset = bool(stated(r'reset|rst|重置|復位|复位') and (mid or (held and released)))
