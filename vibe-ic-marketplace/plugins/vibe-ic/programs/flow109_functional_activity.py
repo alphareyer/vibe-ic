@@ -96,6 +96,8 @@ def prepare(project, context):
             or set(required) != set(modes) or not all(IDENT.fullmatch(m) for m in modes)):
         _fail('D55_REQUIRED_MODE_COVERAGE', 'exact approved mode set must be executed')
     for name, spec in required.items():
+        if not isinstance(spec, dict) or not isinstance(modes[name], dict):
+            _fail('D55_MODE_INVALID', name)
         ports = spec.get('required_ports')
         window = spec.get('window')
         if (not isinstance(ports, list) or not ports or len(set(ports)) != len(ports)
@@ -113,6 +115,8 @@ def prepare(project, context):
     rails, port_loads = loads.get('rails'), loads.get('ports')
     if not isinstance(rails, dict) or len(rails) != 1 or not isinstance(port_loads, dict) or not port_loads:
         _fail('D55_LOAD_RAIL_SCOPE_UNIMPLEMENTED', 'single-rail explicit output loads required')
+    if not all(isinstance(value, dict) for value in rails.values()) or not all(isinstance(value, dict) for value in port_loads.values()):
+        _fail('D55_LOAD_INVALID', 'rail/load records must be objects')
     voltage = next(iter(rails.values())).get('voltage_v')
     nominal = re.search(r'\bnom_voltage\s*:\s*([0-9.eE+-]+)', paths['liberty'].read_text())
     if not nominal or not isinstance(voltage, (int, float)) or float(nominal[1]) != voltage:
@@ -252,7 +256,8 @@ def execute(project, context):
             log.write_text(result.stdout + result.stderr)
             record['commands'].append({'argv': argv, 'rc': result.returncode, 'log': _record(project, log)})
             if result.returncode:
-                _fail('D55_NATIVE_TOOL_FAILED', str(argv[0]))
+                raise AdmissionRefusal('D55_NATIVE_TOOL_FAILED', str(argv[0]),
+                    status='FAIL' if Path(argv[0]).name == 'vvp' else 'NOT_MEASURED')
             return result.returncode, result.stdout, result.stderr
         for mode, spec in prepared['requirements']['modes'].items():
             folder = attempt / mode
@@ -262,11 +267,17 @@ def execute(project, context):
             if activity.get('status') != 'PASS' or activity.get('vvp_rc') != 0:
                 _fail('D55_GLS_ACTIVITY_INCOMPLETE', str(activity))
             vcd = Path(activity['vcd'])
+            if _sha(vcd) != activity.get('vcd_sha256'):
+                _fail('D55_ACTIVITY_GENERATION_STALE', str(vcd))
+            for generated in (vcd, folder / dump.MANIFEST):
+                prepared['inputs'][str(generated)] = _sha(generated)
             census = waveform_census(vcd, activity['scope'], spec)
             script, report = folder / 'power.tcl', folder / 'power.rpt'
             script.write_text(_power_script(prepared, vcd, activity['scope'], report, attempt.name))
+            prepared['inputs'][str(script)] = _sha(script)
             _, out, err = native(['opensta', '-no_splash', '-exit', str(script)], str(folder))
             report.write_text(out + err)
+            prepared['inputs'][str(report)] = _sha(report)
             consumed = consume_power(report, spec, prepared['loads'], attempt.name)
             record['modes'][mode] = {'activity': _record(project, folder / dump.MANIFEST),
                 'vcd': _record(project, vcd), 'census': census, 'power_script': _record(project, script),

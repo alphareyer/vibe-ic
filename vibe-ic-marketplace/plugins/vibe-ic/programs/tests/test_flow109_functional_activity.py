@@ -157,7 +157,7 @@ def test_simulator_failure_with_partial_vcd_cannot_freeze_activity(tmp_path):
     manifest['modes']['mission']['testbench'] = _put(tmp_path, 'inputs/workload.v', text)
     _put(tmp_path, activity.INPUT, manifest)
     record = activity.execute(tmp_path, context)
-    assert record['component_status'] == 'NOT_MEASURED'
+    assert record['component_status'] == 'FAIL'
     assert record['reason'] == 'D55_NATIVE_TOOL_FAILED'
     assert record['native_started'] and not (tmp_path / activity.FREEZE).exists()
 
@@ -218,3 +218,49 @@ def test_pinned_librelane_has_no_native_vcd_configuration_and_component_is_not_f
     assert row['when'] == 'physical'
     assert row['metric_acceptance_status'] == 'UNIMPLEMENTED'
     assert {o['status'] for o in row['obligations']} == {'UNIMPLEMENTED_METRIC_BINDING'}
+
+
+def test_native_power_wrong_scope_rejects_nonzero_vectorless_fallback(tmp_path, monkeypatch):
+    context = _case(tmp_path)
+    original = activity._power_script
+    def wrong(prepared, vcd, scope, *rest):
+        return original(prepared, vcd, 'workload/wrong_dut', *rest)
+    monkeypatch.setattr(activity, '_power_script', wrong)
+    record = activity.execute(tmp_path, context)
+    assert record['component_status'] == 'NOT_MEASURED'
+    assert record['reason'] == 'D55_POWER_ANNOTATION_NOT_MEASURED'
+    assert len(record['commands']) == 3
+    logs = [tmp_path / command['log']['path'] for command in record['commands']]
+    assert 'Annotated 0 pin activities' in logs[-1].read_text()
+    assert not (tmp_path / activity.FREEZE).exists()
+
+
+def test_generated_waveform_drift_stops_before_actual_power_launch(tmp_path, monkeypatch):
+    context = _case(tmp_path)
+    original = activity._power_script
+    def drift(prepared, vcd, *rest):
+        text = original(prepared, vcd, *rest)
+        vcd.write_text(vcd.read_text() + '\n#999999\n')
+        return text
+    monkeypatch.setattr(activity, '_power_script', drift)
+    record = activity.execute(tmp_path, context)
+    assert record['component_status'] == 'NOT_MEASURED'
+    assert record['reason'] == 'D55_STALE_OR_MISSING_INPUT'
+    assert len(record['commands']) == 2
+    assert not (tmp_path / activity.FREEZE).exists()
+
+
+def test_missing_output_load_is_rejected_by_actual_native_port_census(tmp_path):
+    context = _case(tmp_path)
+    manifest = json.loads((tmp_path / activity.INPUT).read_text())
+    req = json.loads((tmp_path / 'inputs/requirements.json').read_text())
+    del req['external_loads']['ports']['z']
+    manifest['requirements'] = _put(tmp_path, 'inputs/requirements.json', req)
+    manifest['loads'] = _put(tmp_path, 'inputs/loads.json',
+        {**req['external_loads'], 'requirements_sha256': manifest['requirements']['sha256']})
+    _put(tmp_path, activity.INPUT, manifest)
+    record = activity.execute(tmp_path, context)
+    assert record['component_status'] == 'NOT_MEASURED'
+    assert record['reason'] == 'D55_OUTPUT_LOAD_COVERAGE'
+    assert len(record['commands']) == 3
+    assert not (tmp_path / activity.FREEZE).exists()
