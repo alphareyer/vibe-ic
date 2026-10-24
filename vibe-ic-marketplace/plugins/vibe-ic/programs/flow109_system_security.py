@@ -215,7 +215,12 @@ def _formal_result(project: Path, binding: object, obligation: str,
         path = project / rel
         if path.is_symlink() or not path.is_file():
             raise Refusal("D17_FORMAL_EVIDENCE_STALE", f"{obligation}.{key}")
-        inputs[str(path.resolve())] = _sha(path)
+        digest = result.get(f"{key}_sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise Refusal("D17_FORMAL_EVIDENCE_UNBOUND", f"{obligation}.{key}")
+        if _sha(path) != digest:
+            raise Refusal("D17_FORMAL_EVIDENCE_STALE", f"{obligation}.{key}")
+        inputs[str(path.resolve())] = digest
     proof_files = (result.get("proof_inputs") or {}).get("files")
     if not isinstance(proof_files, dict) or not proof_files:
         raise Refusal("D17_FORMAL_INPUTS_UNBOUND", obligation)

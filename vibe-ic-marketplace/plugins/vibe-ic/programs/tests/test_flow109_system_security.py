@@ -73,6 +73,7 @@ def _formal(project: Path, obligation: str) -> dict:
         "properties": [{"task": task, "mode": "prove", "status": "PASS",
                          "bound": "unbounded"}],
         "sby": sby["path"], "evidence": log["path"],
+        "sby_sha256": sby["sha256"], "evidence_sha256": log["sha256"],
         "proof_inputs": {"files": {Path(proof["path"]).name: proof["sha256"]}}})
     return {"result": result, "task": task}
 
@@ -148,6 +149,37 @@ def test_d17_stale_proof_input_refuses_and_restored_bytes_pass(tmp_path):
     proof.write_bytes(original)
     restored = S.execute(tmp_path, _context("D17"))
     assert restored["component_status"] == "PASS", restored
+
+
+def test_d17_stale_sby_and_transcript_refuse_and_restored_bytes_pass(tmp_path):
+    _d17_case(tmp_path)
+    for leaf in ("opentitan_aes_shadowed_controls.sby",
+                 "opentitan_aes_shadowed_controls.log"):
+        path = tmp_path / "formal" / leaf
+        original = path.read_bytes()
+        path.write_bytes(original + b"\npost-proof mutation\n")
+        refused = S.execute(tmp_path, _context("D17"))
+        assert refused["component_status"] == "NOT_MEASURED"
+        assert refused["reason"] == "D17_FORMAL_EVIDENCE_STALE"
+        path.write_bytes(original)
+        restored = S.execute(tmp_path, _context("D17"))
+        assert restored["component_status"] == "PASS", restored
+
+
+def test_d17_missing_proof_time_sby_or_transcript_digest_refuses(tmp_path):
+    _d17_case(tmp_path)
+    manifest_path = tmp_path / S.MANIFESTS["D17"]
+    manifest = json.loads(manifest_path.read_text())
+    result_ref = manifest["formal_results"][S.SECURITY_IDS[0]]["result"]
+    result_path = tmp_path / result_ref["path"]
+    result = json.loads(result_path.read_text())
+    result.pop("sby_sha256")
+    result_path.write_text(json.dumps(result))
+    result_ref["sha256"] = hashlib.sha256(result_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    refused = S.execute(tmp_path, _context("D17"))
+    assert refused["component_status"] == "NOT_MEASURED"
+    assert refused["reason"] == "D17_FORMAL_EVIDENCE_UNBOUND"
 
 
 def _d73_case(project: Path):

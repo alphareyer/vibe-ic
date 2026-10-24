@@ -2938,6 +2938,12 @@ def run(project: Path, harness: Optional[Path] = None,
     sby_rel = str(sby_path.relative_to(project))
     results = build_results(top_name, cfg, lp, ev_rel, sby_rel)
     results["proof_inputs"] = proof_inputs(sby_path, formal_dir)
+    # Bind the proof's task file and transcript at proof time, just as the
+    # individual model inputs above are bound.  A later reader must not pair
+    # a retained PASS with a rewritten engine/script/assumption set or with a
+    # different transcript merely because both paths still exist.
+    results["sby_sha256"] = _sha256_file(sby_path)
+    results["evidence_sha256"] = _sha256_file(log_path)
     if inv_h is None:
         results["program_owner_sha256"] = program_owner_identity()
         if continuation_refresh_reason:
