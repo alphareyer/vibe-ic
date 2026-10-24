@@ -662,6 +662,13 @@ fi
 "${DOCKER_BIN:-docker}" run "${DOCKER_ARGS[@]}" "$IMAGE" \
   --skip bash -c '
     set -e
+    # >>> GIT_OBJECT_PREFLIGHT BLOCK
+    # Run inside the actual suite container: host Git may see unmapped alternates.
+    if ! git fsck --connectivity-only --no-reflogs --no-dangling HEAD >/dev/null; then
+      echo "run_suite_in_eda_image.sh: REFUSED — Git objects are unreadable inside the test container; pytest was not started. Prepare a standalone clone with --dissociate; --no-hardlinks alone is insufficient." >&2
+      exit 2
+    fi
+    # <<< GIT_OBJECT_PREFLIGHT BLOCK
     # THE passwd COMES FROM /etc/passwd, NOT FROM /tmp/passwd. Both carry the
     # same designer line when nothing has raced; only one of them CANNOT be
     # raced. /etc/passwd is the file THIS harness bind-mounts read-only a few

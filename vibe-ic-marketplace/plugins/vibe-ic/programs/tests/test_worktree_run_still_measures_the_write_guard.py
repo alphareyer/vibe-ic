@@ -64,6 +64,48 @@ def _git(cwd: Path, *args: str) -> None:
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _object_preflight(repo: Path) -> subprocess.CompletedProcess:
+    text = SCRIPT.read_text(encoding="utf-8")
+    start = text.index("# >>> GIT_OBJECT_PREFLIGHT BLOCK")
+    end = text.index("# <<< GIT_OBJECT_PREFLIGHT BLOCK", start)
+    assert end < text.index('exec python3 -m pytest "$@"')
+    block = text[start:end]
+    return subprocess.run(
+        ["bash", "-c", block + '\nprintf "PYTEST_ENTRY_REACHED\\n"'],
+        cwd=repo, capture_output=True, text=True)
+
+
+def test_object_preflight_refuses_broken_alternate_before_pytest(main_checkout, tmp_path):
+    clone = tmp_path / "borrower"
+    _git(tmp_path, "clone", "-q", "--shared", str(main_checkout), str(clone))
+    assert _object_preflight(clone).returncode == 0
+    alternate = clone / ".git/objects/info/alternates"
+    backing = alternate.read_bytes()
+    identity = subprocess.check_output(
+        ["git", "rev-parse", "HEAD", "HEAD^{tree}"], cwd=clone)
+    alternate.write_text(str(tmp_path / "unmounted-objects") + "\n")
+    bad = _object_preflight(clone)
+    assert bad.returncode == 2, bad
+    assert "Git objects are unreadable" in bad.stderr
+    assert "PYTEST_ENTRY_REACHED" not in bad.stdout
+    alternate.write_bytes(backing)
+    _git(clone, "repack", "-a", "-d")
+    alternate.unlink()
+    assert subprocess.check_output(
+        ["git", "rev-parse", "HEAD", "HEAD^{tree}"], cwd=clone) == identity
+    good = _object_preflight(clone)
+    assert good.returncode == 0, good.stderr
+    assert "PYTEST_ENTRY_REACHED" in good.stdout
+
+
+def test_object_preflight_accepts_linked_worktree(main_checkout, tmp_path):
+    linked = tmp_path / "linked"
+    _git(main_checkout, "worktree", "add", "-q", "--detach", str(linked))
+    result = _object_preflight(linked)
+    assert result.returncode == 0, result.stderr
+    assert "PYTEST_ENTRY_REACHED" in result.stdout
+
+
 def _resolve(repo_root: Path) -> str:
     """Run the script's own block with REPO_ROOT bound, print the mount args."""
     script = (f'set -u\nREPO_ROOT={repo_root!s}\n' + _mount_block()
