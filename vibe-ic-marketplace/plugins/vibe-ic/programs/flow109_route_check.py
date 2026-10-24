@@ -60,6 +60,10 @@ _INSTANCE = re.compile(
     r"\(\s*(?P<body>(?:\.[A-Za-z_][\w$]*\s*\([^()]*\)\s*,?\s*)+)\)\s*;",
     re.M)
 _CONNECTION = re.compile(r"\.([A-Za-z_][\w$]*)\s*\(\s*([^()]*?)\s*\)")
+_PORT_DECL = re.compile(
+    r"\b(?P<direction>input|output|inout)\b(?P<body>.*?)"
+    r"(?=\b(?:input|output|inout)\b|[;)])", re.S)
+_ASSIGN_LHS = re.compile(r"\bassign\b(?P<lhs>.*?)=", re.S)
 
 
 def _sha(path: Path) -> str:
@@ -218,18 +222,44 @@ def _disconnected_endpoints(table: Path) -> list[tuple[str, str]]:
     return endpoints
 
 
+def _noninstance_driver_nets(text: str) -> set[str]:
+    """Nets that may be driven outside a modelled named cell output.
+
+    D42 deliberately does not solve Verilog.  A top input/inout or a net on
+    the left of a continuous assignment is enough to make constant-driver
+    proof ambiguous, even when a tie-cell output is also attached.
+    """
+    import _hdl_code_text as hct
+    code = hct.strip_hdl_comments_and_strings(text or "")
+    nets = set()
+    for match in _PORT_DECL.finditer(code):
+        if match.group("direction") in ("input", "inout"):
+            nets.update(re.findall(r"[A-Za-z_][\w$]*", match.group("body")))
+    for match in _ASSIGN_LHS.finditer(code):
+        nets.update(re.findall(r"[A-Za-z_][\w$]*", match.group("lhs")))
+    return nets
+
+
 def _constant_driver(net: str, instances: dict, liberty: dict) -> dict | None:
+    """Return one sound constant driver, never one constant among drivers."""
     drivers = []
     for instance, (master, pins) in instances.items():
         model = liberty.get(master, {})
         for pin, connected in pins.items():
+            if connected != net:
+                continue
             rec = model.get(pin, {})
             function = str(rec.get("function") or "").strip()
-            if connected == net and rec.get("direction") == "output" \
-                    and function in ("0", "1"):
-                drivers.append({"instance": instance, "master": master,
-                                "pin": pin, "level": int(function)})
-    return drivers[0] if len(drivers) == 1 else None
+            direction = str(rec.get("direction") or "").lower()
+            if direction == "input":
+                continue
+            driver = {"instance": instance, "master": master, "pin": pin}
+            if direction == "output" and function in ("0", "1"):
+                driver["level"] = int(function)
+            # output/inout and unknown roles are all possible drivers.  An
+            # unmodelled pin must make proof fail rather than disappear.
+            drivers.append(driver)
+    return drivers[0] if len(drivers) == 1 and "level" in drivers[0] else None
 
 
 def _producer_snapshot(project: Path, record_path: Path) -> dict:
@@ -311,6 +341,15 @@ def _qualify_inactive_outputs(project: Path, table: Path, prepared: dict,
             cell_lib_paths, pad_ring.parse_liberty_pad_cells, "cell Liberty")
         lef, lef_hashes = _merge_pin_views(
             lef_paths, pad_ring.parse_lef_pin_roles, "pad LEF")
+        driver_lib = dict(cell_lib)
+        for master, pins in pad_lib.items():
+            if master in driver_lib and driver_lib[master] != pins:
+                raise AdmissionRefusal(
+                    "D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                    f"pad/cell Liberty views disagree for {master}")
+            driver_lib[master] = pins
+        noninstance_drivers = _noninstance_driver_nets(
+            prepared["views"]["nl"].read_text(errors="replace"))
         qualified = []
         for instance, pin in endpoints:
             if instance not in instances or instance not in pad_instances:
@@ -336,9 +375,9 @@ def _qualify_inactive_outputs(project: Path, table: Path, prepared: dict,
             disabling = []
             for negated, control in literals:
                 net = pins.get(control)
-                if not net:
+                if not net or net in noninstance_drivers:
                     continue
-                driver = _constant_driver(net, instances, cell_lib)
+                driver = _constant_driver(net, instances, driver_lib)
                 if driver is None:
                     continue
                 literal_value = ((not bool(driver["level"])) if negated

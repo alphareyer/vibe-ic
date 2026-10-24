@@ -295,6 +295,35 @@ def test_current_disabled_pad_output_is_qualified_by_all_authorities(
     assert proof["qualified"][0]["endpoint"] == "pad0/Y"
 
 
+def test_constant_driver_counts_dynamic_and_unknown_second_drivers():
+    models = {
+        "fixture_tiel": {"ZN": {"direction": "output", "function": "0"}},
+        "fixture_buf": {
+            "A": {"direction": "input"},
+            "Z": {"direction": "output", "function": "A"}},
+        "fixture_io": {"IE": {"direction": "input"}},
+    }
+    tie = {"tie0": ("fixture_tiel", {"ZN": "ctrl"}),
+           "pad0": ("fixture_io", {"IE": "ctrl"})}
+    assert route._constant_driver("ctrl", tie, models) == {
+        "instance": "tie0", "master": "fixture_tiel", "pin": "ZN", "level": 0}
+
+    dynamic = dict(tie, buf0=("fixture_buf", {"A": "data", "Z": "ctrl"}))
+    assert len(route._constant_driver("ctrl", dynamic, models) or {}) == 0
+
+    unknown = dict(tie, mystery0=("unmodelled_cell", {"X": "ctrl"}))
+    assert len(route._constant_driver("ctrl", unknown, models) or {}) == 0
+
+
+@pytest.mark.parametrize("netlist", [
+    "module top(input wire ctrl); endmodule\n",
+    "module top(ctrl); input ctrl; endmodule\n",
+    "module top; wire ctrl; assign ctrl = data; endmodule\n",
+])
+def test_noninstance_control_driver_is_ambiguous(netlist):
+    assert "ctrl" in route._noninstance_driver_nets(netlist)
+
+
 @pytest.mark.parametrize("mutation", ["tie_high", "liberty_function", "lef_role",
                                       "producer_identity", "mixed_population"])
 def test_disabled_output_qualification_refuses_each_missing_or_changed_authority(
