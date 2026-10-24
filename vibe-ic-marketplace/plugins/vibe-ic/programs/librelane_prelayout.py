@@ -429,6 +429,15 @@ def judge_slack(folder: Path, output: Path) -> dict:
             if value is None and verdict == "PASS":
                 verdict = "NOT_MEASURED"
                 findings.append(f"{corner.name}: {check} worst slack {raw!r} — NOT_MEASURED, not 0")
+            elif value is not None and value < 0:
+                # STAPrePNR completing successfully means OpenSTA produced a
+                # measurement; it does not mean that measurement met timing.
+                # Keep the result explicitly pre-layout while preserving the
+                # existing Step 10 consumer's zero-slack closure contract.
+                verdict = "FAIL"
+                findings.append(
+                    f"LL_STA_{check.upper()}_VIOLATION: {corner.name} "
+                    f"{check} worst slack {value:g} is negative")
         if boxes:
             verdict = "FAIL"
             findings.append(f"LL_STA_BLACK_BOX: {corner.name} linked {len(boxes)} "

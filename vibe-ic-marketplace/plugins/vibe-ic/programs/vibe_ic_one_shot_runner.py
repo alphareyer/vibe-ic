@@ -1032,6 +1032,34 @@ def _complete_step10_prelayout(project: Path, top: str, pdk_name: str,
                       or result.detail}
 
 
+def _complete_step12_post_dft(project: Path, container: str) -> dict:
+    """Run the existing Step-12 producer and return its complete consumer."""
+    import design_one_shot_runner as design
+    import step_output_collector as versions
+
+    began = time.time()
+    try:
+        result = design._step_post_dft_optimization(project, container)
+    except (OSError, ValueError, RuntimeError) as exc:
+        return {'verdict': 'NOT_MEASURED', 'detail': str(exc)}
+    current = next((row for row in versions.current_acceptance(project, began)
+                    if str(row['id']) == '12'), None)
+    if current is None:
+        return {'verdict': 'FAIL' if result.status == 'FAIL' else 'NOT_MEASURED',
+                'detail': result.detail or 'Step12 published no complete consumer'}
+    consumer = (current.get('result') or {}).get('canonical_consumer')
+    if not isinstance(consumer, dict):
+        return {'verdict': 'FAIL' if current['status'] == 'FAIL' else 'NOT_MEASURED',
+                'folder': current['folder'],
+                'detail': 'Step12 has no complete canonical consumer'}
+    status = ('PASS' if current.get('canonical_pass') and current['status'] == 'PASS'
+              and consumer.get('status') == 'PASS' else
+              'FAIL' if current['status'] == 'FAIL' else 'NOT_MEASURED')
+    return {'verdict': status, 'folder': current['folder'],
+            'detail': '; '.join(consumer.get('step', {}).get('reasons', ()))
+                      or result.detail}
+
+
 def _complete_step8_postcheck(project: Path, top: str) -> dict:
     """Accept the existing prelayout evidence without invoking its producers."""
     import _flow_yaml
@@ -2748,6 +2776,8 @@ def _main() -> int:
                         and execution_policy_value['mode'] == 'default')
     _sdc_postcheck_entry = (str(getattr(args, 'entry_step', None)) == '8'
                             and execution_policy_value['mode'] == 'default')
+    _post_dft_entry = (str(getattr(args, 'entry_step', None)) == '12'
+                       and execution_policy_value['mode'] == 'default')
     if getattr(args, "entry_step", None):
         try:
             import step_preflight as _spf_o          # noqa: PLC0415
@@ -2756,9 +2786,9 @@ def _main() -> int:
                   file=sys.stderr)
             return 2
         _entry_runner = _spf_o.runner_for_step(str(args.entry_step))
-        if _prelayout_entry or _sdc_postcheck_entry:
-            # The retained prelayout owner is independent of Step9. Its
-            # existing complete consumer runs before Phase2 resumes at11.
+        if _prelayout_entry or _sdc_postcheck_entry or _post_dft_entry:
+            # These retained Default owners have complete consumers and do
+            # not need the larger dispatch span that normally contains them.
             _entry_runner = 'design_one_shot_runner'
         if _entry_runner is None and execution_policy_value['mode'] == 'default':
             # Default's native backend rows have their own input contracts
@@ -2790,6 +2820,10 @@ def _main() -> int:
         _record_continuation_evidence(project, str(args.entry_step), args.exit_step)
         if _sdc_postcheck_entry and str(args.exit_step) != '8':
             print('REFUSED: Default Step8 postcheck needs --exit-step 8', file=sys.stderr)
+            lock.release()
+            return 2
+        if _post_dft_entry and str(args.exit_step) != '12':
+            print('REFUSED: Default Step12 post-DFT owner needs --exit-step 12', file=sys.stderr)
             lock.release()
             return 2
 
@@ -3475,6 +3509,23 @@ def _main() -> int:
                     'whole_flow_verdict': 'NOT_MEASURED'}, project)
                 lock.release()
                 return rc
+        if _post_dft_entry:
+            step12_acceptance = _complete_step12_post_dft(project, args.container)
+            status = step12_acceptance['verdict']
+            rc = 0 if status == 'PASS' else 1 if status == 'FAIL' else 2
+            out = _pl.report_path(project, 'vibe_ic_one_shot.json')
+            out.parent.mkdir(parents=True, exist_ok=True)
+            _write_runner_summary(out, {
+                'program': 'vibe_ic_one_shot_runner', 'bounded': True,
+                **_delivery_route.report_label(project), 'verdict': status,
+                'halted_at': None if status == 'PASS' else 'phase2',
+                'declared_window': {'entry_step': '12', 'exit_step': '12'},
+                'phases': [{'name': n, 'verdict': v, 'rc': code}
+                           for n, v, code in plan],
+                'step12_post_dft': step12_acceptance,
+                'whole_flow_verdict': 'NOT_MEASURED'}, project)
+            lock.release()
+            return rc
         phase2_entry = ('11' if _prelayout_entry else
                         str(args.entry_step)
                         if _entry_runner == 'design_one_shot_runner' else None)

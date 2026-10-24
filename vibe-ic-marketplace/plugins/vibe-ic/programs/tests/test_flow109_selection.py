@@ -203,6 +203,36 @@ def test_frontend_rows_route_stable_ids_to_existing_default_owner_sites():
         assert dispatch["flow109_metrics_status"] == "UNIMPLEMENTED"
 
 
+def test_d24_routes_to_existing_default_dft_producer_and_consumer(tmp_path, monkeypatch):
+    features = profile("Mapped soft-IP with prestitched scan")
+    plan = flow109.resolve_plan(features)
+    row = flow109.resolve_step(plan, "D24")
+    dispatch = row["profile"]["dispatch"]
+    assert dispatch["kind"] == "canonical_owner_window"
+    assert (dispatch["native_step_id"], dispatch["owner_runner"],
+            dispatch["owner_entry_step"], dispatch["owner_exit_step"]) == (
+                "12", "design_one_shot_runner", "12", "12")
+    assert dispatch["producer"] == (
+        "design_one_shot_runner.py:_step_post_dft_optimization")
+    assert dispatch["consumer"] == (
+        "design_one_shot_runner retained Step 12 canonical acceptance")
+    assert row["profile"]["execution_status"] == (
+        "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED")
+    import _delivery_route
+    assert _delivery_route.admit(tmp_path, "ip") is None
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"features": features}))
+    monkeypatch.setenv(flow109.CONTEXT_ENV, "")
+    args = SimpleNamespace(flow="109", flow109_manifest=manifest,
+                           flow109_plan_only=False, execution_mode="default",
+                           entry_step="D24", exit_step="D24", container="")
+    assert flow109.prepare_front_door(args, tmp_path) is None
+    assert (args.entry_step, args.exit_step) == ("12", "12")
+    owner = json.loads((tmp_path / "reports/flow109/owner_route.json").read_text())
+    assert owner["owner_runner"] == "design_one_shot_runner"
+    assert owner["native_step_id"] == "12"
+
+
 def test_owner_route_uses_native_span_without_generic_qualification_registry(
         tmp_path, monkeypatch):
     # prepare_front_door intentionally installs the active request; restore
