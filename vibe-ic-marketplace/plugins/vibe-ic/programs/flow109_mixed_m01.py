@@ -81,11 +81,9 @@ def _expanded_names(text):
     names = set(re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*\b', text))
     for match in re.finditer(r'\b([A-Za-z_]+)(\d+)\.\.([A-Za-z_]*)(\d+)\b', text):
         left, start, right, stop = match.groups()
-        if right and right != left:
-            continue
+        if right and right != left: continue
         lo, hi = int(start), int(stop)
-        if 0 <= hi - lo <= 256:
-            names.update(left + str(i) for i in range(lo, hi + 1))
+        if 0 <= hi - lo <= 256: names.update(left + str(i) for i in range(lo, hi + 1))
     return names
 
 
@@ -108,8 +106,7 @@ def _basis(project, sources, value, subject):
 
 def _mentions(text, token):
     token = str(token)
-    if token in _expanded_names(text):
-        return True
+    if token in _expanded_names(text): return True
     return bool(re.search(r'(?i)(?<![A-Za-z0-9_])' + re.escape(token)
                           + r'(?:s|es)?(?![A-Za-z0-9_])', text))
 
@@ -121,14 +118,17 @@ def _field(project, sources, value, subject, *, vocabulary=None):
     if value['status'] == 'NOT_MEASURED':
         if set(value) != {'status', 'reason', 'basis'} or not str(value.get('reason', '')).strip():
             raise AdmissionRefusal('M01_UNRESOLVED_FIELD_INVALID', subject)
-        return None, {'status': 'NOT_MEASURED', 'reason': value['reason'],
-                      'basis': value['basis']}
+        return None, {'status': 'NOT_MEASURED', 'reason': value['reason'], 'basis': value['basis']}
     if set(value) != {'status', 'value', 'basis'} or not isinstance(value.get('value'), str):
         raise AdmissionRefusal('M01_BOUND_FIELD_INVALID', subject)
     selected = value['value'].strip()
     if not selected or vocabulary is not None and selected not in vocabulary:
         raise AdmissionRefusal('M01_BOUND_FIELD_INVALID', subject)
-    if not _mentions(text, selected):
+    pin = re.escape(subject.rsplit(':', 1)[0])
+    supply = r'\bsuppl(?:y|ies)(?:\s+pins?)?\s+(?:`?\w+`?(?:\s*\([^)]*\))?\s*[,/]\s*)*`?' + pin + r'\b'
+    supply += r'|\b' + pin + r'`?\s+(?:is\s+)?(?:a\s+)?suppl(?:y|ies)\b'
+    if not (_mentions(text, selected) or selected == 'power' and subject.endswith(':signal_type')
+            and re.search(supply, text, re.I)):
         raise AdmissionRefusal('M01_FIELD_NOT_SOURCE_BOUND', subject + ':' + selected)
     return selected, {'status': 'BOUND', 'value': selected, 'basis': value['basis']}
 
