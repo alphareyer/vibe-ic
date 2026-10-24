@@ -2199,11 +2199,18 @@ def _recover_retained_finished_promotion(
         verdict="PASS", adopted=candidate, adopted_state=str(state_path),
         final=measurement, corners=list(ctx["corners"]),
         candidates=[{"candidate": candidate, "repair_state": str(state_path),
-                     "repair_metrics": dict(route_metrics)}],
+                     "repair_metrics": dict(route_metrics),
+                     "measurement": dict(measurement),
+                     "closure_decision": "PROMOTED"}],
         final_antenna=measurement["antenna_nets"],
         final_supply_ownership=ownership, drv_signoff_verdict="PASS",
-        drv_signoff={"verdict": "PASS", "violations": 0,
-                     "basis": "retained STAPostPNR complete pin/check census"},
+        drv_signoff={
+            "schema_version": 1, "name": "DRV(tran/cap/fanout)",
+            "verdict": "PASS",
+            "counts": {"max_slew": 0, "max_capacitance": 0,
+                       "max_fanout": 0},
+            "failures": [], "not_measured": [], "waived": [],
+            "basis": "retained STAPostPNR complete pin/check census"},
         candidate_finishing={
             "verdict": "PASS", "candidate": candidate,
             "finished_gds": ready["finished_gds"],
@@ -2216,6 +2223,7 @@ def _recover_retained_finished_promotion(
             "decision_record": str(decision_path),
             "decision_record_sha256": _ll.digest(decision_path),
             "displaced_normal_report_sha256": _ll.digest(project / REPORT_REL)})
+    _stamp_verdict(recovered)
     current = {
         "candidate": candidate, "repair_state": str(state_path),
         "repair_folder": str(state_path.parent), "measurement": measurement,
@@ -2225,6 +2233,54 @@ def _recover_retained_finished_promotion(
     return {"report": recovered, "current": current, "ctx": ctx,
             "record": record, "ready": ready, "decision": decision,
             "recovered": True}
+
+
+def publish_retained_finished_readback(project: Path,
+                                       report: Dict[str, Any]) -> Dict[str, Any]:
+    """Publish a proven recovery while retaining the displaced FAIL bytes.
+
+    The reader has already validated the native chain, finishing PV, live
+    subject, controller decision and current promoter fields.  Only that
+    report may replace the failed normal-entry metadata.  The displaced
+    report and producer decision are copied byte-for-byte into a digest-named
+    history directory before the current producer contract is republished.
+    """
+    import librelane_contract as _ll
+    import shutil
+
+    project = Path(project).resolve()
+    marker = report.get("retained_promotion_readback") or {}
+    current = project / REPORT_REL
+    displaced = marker.get("displaced_normal_report_sha256")
+    if (not isinstance(displaced, str) or _ll.digest(current) != displaced
+            or report.get("verdict") != "PASS" or not report.get("adopted")):
+        raise _ll.Refusal("LL_PRR_FINISHED_RECOVERY_STALE",
+                          "displaced report or recovered promotion changed")
+    history = (project / "reports/phase3/postroute_repair_recovery_history" /
+               displaced)
+    history.mkdir(parents=True, exist_ok=True)
+    sources = {
+        "librelane_postroute_repair.failed.json": current,
+        "postroute_timing_repair_decision.failed.json":
+            project / DECLARED_REPAIR_REL / "postroute_timing_repair_decision.json",
+        "repair_log.failed.json": project / DECLARED_REPAIR_REL / "repair_log.json",
+    }
+    archived = {}
+    for name, source in sources.items():
+        if not source.is_file():
+            continue
+        target = history / name
+        if target.exists():
+            if _ll.digest(target) != _ll.digest(source):
+                raise _ll.Refusal("LL_PRR_FINISHED_RECOVERY_HISTORY_CHANGED", name)
+        else:
+            shutil.copy2(source, target)
+        archived[name] = _ll.digest(target)
+    report["retained_promotion_readback"]["displaced_history"] = {
+        "folder": str(history), "sha256": archived}
+    write_json(current, report)
+    _publish_declared_repair(project, report, current)
+    return report["retained_promotion_readback"]["displaced_history"]
 
 
 def retained_finished_candidate_readback(project: Path) -> Optional[Dict[str, Any]]:

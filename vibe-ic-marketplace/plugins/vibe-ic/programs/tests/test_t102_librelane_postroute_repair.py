@@ -2643,6 +2643,10 @@ def _finished_readback_fixture(tmp_path):
         'configs': {prr.REPAIR_STEP: str(tmp_path / 'neutral-config.json')}})
     put(tmp_path / 'neutral-config.json', {})
     odb = write(tmp_path / 'neutral.odb', 'neutral database\n')
+    candidate_def = write(tmp_path / 'neutral.candidate.def',
+                          'VERSION 5.8 ;\nDESIGN neutral ;\nEND DESIGN\n')
+    candidate_nl = write(tmp_path / 'neutral.candidate.v',
+                         'module neutral; endmodule\n')
 
     def receipt(folder, step, state_extra=None):
         state = put(folder / 'state_out.json', {'metrics': {}, **(state_extra or {})})
@@ -2658,7 +2662,7 @@ def _finished_readback_fixture(tmp_path):
     repair = project / 'phase3/librelane/32-cand09/01-vibeic-postrouterepair'
     repair_state, repair_receipt = receipt(
         repair, prr.REPAIR_STEP,
-        {'sdc': str(sdc), 'def': str(live_def), 'nl': str(live_nl),
+        {'sdc': str(sdc), 'def': str(candidate_def), 'nl': str(candidate_nl),
          'odb': str(odb), 'metrics': {
              'vibeic__prr__before__unrouted__count': 0,
              'vibeic__prr__after__unrouted__count': 0,
@@ -2681,6 +2685,7 @@ def _finished_readback_fixture(tmp_path):
 
     finished = write(tmp_path / 'neutral.topped.gds', 'neutral finished geometry\n')
     def_sha = contract.digest(live_def)
+    candidate_def_sha = contract.digest(candidate_def)
     gds_sha = contract.digest(finished)
     metrics = {}
     signoff = project / prr.ARM_REL / 'candidate_signoff' / 'lane-04'
@@ -2705,7 +2710,7 @@ def _finished_readback_fixture(tmp_path):
             section[metric] = {'step': step, 'folder': str(folder),
                                'status': 'MEASURED', 'value': 0,
                                'state_out_sha256': contract.digest(state)}
-        scope = {'gds_sha256': gds_sha, 'def_sha256': def_sha}
+        scope = {'gds_sha256': gds_sha, 'def_sha256': candidate_def_sha}
         if kind == 'lvs':
             scope.update({'magic_ext_use_gds': True,
                           'extracted_gds_sha256': gds_sha})
@@ -2769,15 +2774,29 @@ def test_finished_candidate_readback_requires_full_owned_promotion(tmp_path):
 
 
 def _displace_finished_readback(project):
+    sta_state = (project / 'phase3/librelane/32-cand09' /
+                 '04-openroad-stapostpnr/state_out.json')
     baseline = {'setup_ws_min': 0.3, 'hold_ws_min': 0.2, 'drv_count': 1,
-                'antenna_nets': 0, 'antenna_pins': 0}
+                'antenna_nets': 0, 'antenna_pins': 0,
+                'sta_state': str(sta_state),
+                'sta_state_sha256': contract.digest(sta_state)}
     put(project / prr.ARM_REL / prr.IMPL_DIR / prr.CURRENT,
         {'candidate': None, 'measurement': baseline})
     put(project / prr.ARM_REL / prr.LEDGER, {'candidates': []})
-    put(project / prr.REPORT_REL, {
+    failed = put(project / prr.REPORT_REL, {
+        'step': '32', 'site': 'after_direct_route',
         'verdict': 'FAIL', 'code': 'LL_PRR_DRV_VIOLATION',
         'reason': 'one retained baseline violation', 'adopted': None,
-        'baseline': baseline, 'final': baseline})
+        'baseline': baseline, 'final': baseline,
+        'floors': {'setup': [0.0, 'fixture setup floor'],
+                   'hold': [0.0, 'fixture hold floor']}})
+    declared = project / prr.DECLARED_REPAIR_REL
+    put(declared / 'postroute_timing_repair_decision.json', {
+        'repair_needed': True, 'action': 'failed_normal_entry',
+        'source_report': str(failed.relative_to(project)),
+        'source_report_sha256': contract.digest(failed)})
+    put(declared / 'repair_log.json', {
+        'verdict': 'FAIL', 'source_report_sha256': contract.digest(failed)})
 
 
 def _stub_recovery_judges(monkeypatch):
@@ -2857,6 +2876,66 @@ def test_normal_frontdoor_reenters_retained_promotion_without_actuator(
         project, 'neutral', SimpleNamespace(name='processA'), 'unused')
     assert answer.status == 'PASS'
     assert answer.detail == 'retained recovery'
+
+
+def test_recovered_promotion_crosses_full_existing_step32_consumer_chain(
+        tmp_path, monkeypatch):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    project, _report, _ready, _finished = _finished_readback_fixture(tmp_path)
+    _displace_finished_readback(project)
+    displaced = contract.digest(project / prr.REPORT_REL)
+    _stub_recovery_judges(monkeypatch)
+    monkeypatch.setattr(
+        prr, 'run',
+        lambda *_a, **_k: pytest.fail('native actuator entered during readback'))
+
+    report = prr.retained_finished_candidate_readback(project)
+    result = runner._postroute_repair_librelane_result(
+        project, project / 'phase3/stage3/pnr', report, 0.0,
+        handed=True, top='neutral')
+    assert result.status == 'PASS'
+    assert 'ADOPTED 32-cand09' in result.detail
+    assert runner._promotion_unmeasured(
+        runner._step32_own_measurement(report)) == ''
+    out = project / prr.DECLARED_REPAIR_REL
+    producer = runner._step32_producer_receipt(project, out)
+    assert producer is not None
+    decision = runner._repair_dec.decide(
+        None, True, project=project, producer_receipt=producer,
+        timing_basis='current Step-32 STAPostPNR per-corner census',
+        decision_scope='step32_native')
+    written, notes = [], []
+    source = project / prr.REPORT_REL
+    assert runner._publish_step32_decision(
+        project, decision, source, source, out, producer, written, notes) == 0
+    assert not notes
+    assert (out / 'postroute_timing_repair_decision.canonical.json').is_file()
+    history = (project / 'reports/phase3/postroute_repair_recovery_history' /
+               displaced)
+    archived = history / 'librelane_postroute_repair.failed.json'
+    assert contract.digest(archived) == displaced
+    assert (history / 'postroute_timing_repair_decision.failed.json').is_file()
+    handoff = project / 'reports/phase3/librelane_postroute_repair_handoff.json'
+    assert handoff.is_file()
+    current_def = project / 'phase3/stage3/pnr/routed.def'
+    assert current_def.read_text() == (tmp_path / 'neutral.candidate.def').read_text()
+    assert (project / runner.ROUTE_PROMOTION_REL).is_file()
+
+    bad_root = tmp_path / 'damaged'
+    bad_project, _r, _ready, _finished = _finished_readback_fixture(bad_root)
+    _displace_finished_readback(bad_project)
+    bad_report = prr.retained_finished_candidate_readback(bad_project)
+    bad_report['candidates'][0]['repair_metrics'][
+        'vibeic__prr__unrouted__added'] = 1
+    before = (bad_project / 'phase3/stage3/pnr/routed.def').read_bytes()
+    refused = runner._postroute_repair_librelane_result(
+        bad_project, bad_project / 'phase3/stage3/pnr', bad_report, 0.0,
+        handed=True, top='neutral')
+    assert refused.status == 'NOT_MEASURED'
+    assert 'leaves 1 signal net(s) unrouted' in refused.detail
+    assert (bad_project / 'phase3/stage3/pnr/routed.def').read_bytes() == before
+    assert not (bad_project / 'reports/phase3/'
+                'librelane_postroute_repair_handoff.json').exists()
 
 
 @pytest.mark.parametrize('damage,message', [

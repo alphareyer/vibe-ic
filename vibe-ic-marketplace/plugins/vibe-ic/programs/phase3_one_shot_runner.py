@@ -47691,6 +47691,8 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
     routed = pnr_out / "routed.def"
     netlist = pnr_out / f"{top}_pnr.v"
     if handed:
+        if report.get("retained_promotion_readback"):
+            _llprr.publish_retained_finished_readback(project, report)
         shutil.copy2(routed, pnr_out / "routed_base_prerepair.def")
         shutil.copy2(netlist, pnr_out / f"{top}_pnr_base_prerepair.v")
         topdef = pnr_out / f"{top}.def"
