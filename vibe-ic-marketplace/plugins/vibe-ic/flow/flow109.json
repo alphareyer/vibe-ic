@@ -1632,8 +1632,40 @@
           "select_when": "otherwise",
           "provider": "vibeic",
           "tools": "Python qualification resolver + LibreLane native smoke checks",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "pdk_consistency_check",
+            "validated current native receipt"
+          ],
+          "execution_status": "SOURCE_ADAPTER_IMPLEMENTED_COMPONENT_ONLY",
+          "dispatch": {
+            "kind": "native_adapter",
+            "adapter": "flow109_technology_qualification",
+            "native_step_id": "flow109.D03",
+            "producer": "flow109_technology_qualification.py:execute",
+            "consumer": "pdk_consistency_check.py + librelane_contract.py:validate_step_receipt",
+            "engine_families": [
+              "python3"
+            ],
+            "engine_executables": {
+              "python3": "python3"
+            },
+            "engine_steps": {
+              "python3": [
+                "pdk_consistency_check",
+                "validated current native receipt"
+              ]
+            },
+            "native_required_outputs": [
+              "current native receipt/config/State",
+              "selected PDK Liberty and technology views",
+              "PDK-mapped netlist"
+            ],
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "component_scope": "executed PDK/library/deck/tool component only",
+            "unsupported_scope": "unexecuted tools/decks/corners and formal D03 metrics",
+            "flow109_metrics_status": "UNIMPLEMENTED"
+          }
         }
       ],
       "complementary_tools": [
