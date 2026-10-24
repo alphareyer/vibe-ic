@@ -13,6 +13,18 @@ from flow109_admission import AdmissionRefusal
 import flow109_route_check as route
 
 
+def test_netlist_comments_do_not_create_a_constant_driver():
+    text = "/*\nTIE fake (.Z(ctrl));\n*/\nBUF real (.A(data), .Z(ctrl));\n"
+    instances = route._netlist_instances(text)
+    assert len(instances) == 1
+    assert "fake" not in instances and "real" in instances
+
+
+def test_duplicate_structural_instances_still_refuse():
+    with pytest.raises(AdmissionRefusal, match="duplicate netlist instance"):
+        route._netlist_instances("TIE same (.Z(ctrl));\nTIE same (.Z(other));\n")
+
+
 def _sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -103,10 +115,13 @@ def _d41(project, monkeypatch):
 
 
 def _native_folders(project, lane, *, route_errors=0, disconnected=0,
-                    wire_max=25, wire_threshold="100", omit_report=None):
+                    wire_max=25, wire_threshold="100", omit_report=None,
+                    disconnected_table="Pin,Reason\n"):
     values = {
         "Checker.TrDRC": {"route__drc_errors": route_errors},
-        "Odb.ReportDisconnectedPins": {"design__critical_disconnected_pin__count": disconnected},
+        "Odb.ReportDisconnectedPins": {
+            "design__disconnected_pin__count": disconnected,
+            "design__critical_disconnected_pin__count": disconnected},
         "Checker.DisconnectedPins": {"design__critical_disconnected_pin__count": disconnected},
         "Odb.ReportWireLength": {"route__wirelength__max": wire_max},
         "Checker.WireLength": {"route__wirelength__max": wire_max},
@@ -116,7 +131,7 @@ def _native_folders(project, lane, *, route_errors=0, disconnected=0,
         folder = project / "phase3/librelane" / lane / f"{index:02d}-{step.lower().replace('.', '-')}"
         reports = []
         if step == "Odb.ReportDisconnectedPins" and omit_report != "disconnected":
-            reports.append(("full_disconnected_pins_table.txt", "Pin,Reason\n"))
+            reports.append(("full_disconnected_pins_table.txt", disconnected_table))
         if step == "Odb.ReportWireLength" and omit_report != "wire":
             reports.append(("wire_lengths.csv", "net,length_um\n"))
         invocation = ("Threshold for Threshold-surpassing long wires is not set. "
@@ -129,6 +144,105 @@ def _native_folders(project, lane, *, route_errors=0, disconnected=0,
                                        "WIRE_LENGTH_THRESHOLD": wire_threshold})
         folders.append(folder)
     return folders
+
+
+def _inactive_pad_authority(project, views):
+    pdk = project / "pdk/gf180mcuD"
+    pad_lib = pdk / "libs.ref/io/lib/io.lib"
+    cell_lib = pdk / "libs.ref/sc/lib/sc.lib"
+    pad_lef = pdk / "libs.ref/io/lef/io.lef"
+    pad_lib.parent.mkdir(parents=True, exist_ok=True)
+    cell_lib.parent.mkdir(parents=True, exist_ok=True)
+    pad_lef.parent.mkdir(parents=True, exist_ok=True)
+    pad_lib.write_text('''library (io) {
+cell (fixture_io) {
+ pin (PAD) {
+   direction : inout;
+   is_pad : true;
+ }
+ pin (IE) {
+   direction : input;
+ }
+ pin (A) {
+   direction : input;
+ }
+ pin (Y) {
+   direction : output;
+   function : "((IE*PAD))";
+ }
+}}
+''')
+    cell_lib.write_text('''library (sc) {
+cell (fixture_tiel) {
+ pin (ZN) {
+   direction : output;
+   function : "0";
+ }
+}}
+''')
+    pad_lef.write_text('''VERSION 5.8 ;
+MACRO fixture_io
+  CLASS PAD INOUT ;
+  PIN PAD
+    DIRECTION INOUT ;
+    USE SIGNAL ;
+  END PAD
+  PIN IE
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+  END IE
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+  END A
+  PIN Y
+    DIRECTION OUTPUT ;
+    USE SIGNAL ;
+  END Y
+END fixture_io
+''')
+    netlist = '''module chip_top;
+ wire tie0;
+ fixture_tiel tie0_driver (.ZN(tie0));
+ fixture_io pad0 (.PAD(pad), .IE(tie0), .A(core));
+endmodule
+'''
+    views["nl"].write_text(netlist)
+    live_nl = project / "phase3/stage3/pnr/subservient_pnr.v"
+    live_nl.write_text(netlist)
+    generated = project / "phase3/stage3/pnr/chip_top_io.v"
+    generated.write_text(netlist)
+    record = _json(project / "reports/phase3/io_pad_chip_top.json", {
+        "program": "io_pad_chip_top_gen", "verdict": "WROTE",
+        "chip_top_verilog": str(generated),
+        "pad_instances": {"pad0": {"master": "fixture_io", "direction": "output"}},
+        "aux_pin_signal_connections": [{
+            "instance": "pad0", "pin": "IE", "level": 0, "net": "tie0",
+            "tie_instance": "tie0_driver", "tie_master": "fixture_tiel",
+            "tie_pin": "ZN"}]})
+    capture = project / "steps/phase3/stage3/155ic_pad_ring_chip_ic_path_only_1"
+    snapshot = capture / "io_pad_chip_top.json"
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    snapshot.write_bytes(record.read_bytes())
+    _json(capture / "outputs.json", {"outputs": [{
+        "rel": "reports/phase3/io_pad_chip_top.json",
+        "snapshot": snapshot.name, "sha256": _sha(record)}]})
+    folder = views["nl"].parent
+    config = json.loads((folder / "config.json").read_text())
+    config.update(PAD_LIBS={"*": [str(pad_lib)]},
+                  CELL_LIBS={"*": [str(cell_lib)]}, PAD_LEFS=[str(pad_lef)])
+    _json(folder / "config.json", config)
+    receipt_path = folder / "vibeic_receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["sha256"][views["nl"].name] = _sha(views["nl"])
+    receipt["sha256"]["config.json"] = _sha(folder / "config.json")
+    _json(receipt_path, receipt)
+    handoff_path = project / "reports/phase3/librelane_postroute_repair_handoff.json"
+    handoff = json.loads(handoff_path.read_text())
+    handoff["views"]["nl"].update(source_sha256=_sha(views["nl"]),
+                                   dest_sha256=_sha(live_nl))
+    _json(handoff_path, handoff)
+    return {"pad_lib": pad_lib, "cell_lib": cell_lib, "pad_lef": pad_lef}
 
 
 def test_default_d42_dispatch_and_product_reverse():
@@ -159,6 +273,100 @@ def test_whole_d42_adapter_positive_uses_native_consumer(tmp_path, monkeypatch):
     assert result["measurements"]["route_short_overlap_errors"] == 0
     assert result["measurements"]["disconnected_required_pins"] == 0
     assert result["flow109_acceptance"] == result["whole_flow_acceptance"] == "NOT_MEASURED"
+
+
+def test_current_disabled_pad_output_is_qualified_by_all_authorities(
+        tmp_path, monkeypatch):
+    views = _d41(tmp_path, monkeypatch)
+    _inactive_pad_authority(tmp_path, views)
+    configs = {step: _json(tmp_path / "configs" / f"{step}.json", {
+        "meta": {"step": step}, "WIRE_LENGTH_THRESHOLD": "100"})
+        for step in route.STEPS}
+    table = (
+        "┏━━━━┳━━━━┳━━━━┳━━━━┳━━━━┓\n"
+        "┃ Macro/Instance ┃ Power Pins ┃ Disconnected ┃ Signal Pins ┃ Disconnected ┃\n"
+        "│ pad0 │ │ │ pad0/IE │ pad0/Y │\n"
+        "└────┴────┴────┴────┴────┘\n")
+    monkeypatch.setattr(route.contract, "resolve_step_configs", lambda *a, **k: configs)
+    monkeypatch.setattr(route, "require_launch_admission", lambda *a, **k: {"status": "PASS"})
+    monkeypatch.setattr(route.contract, "run_chain", lambda project, image, steps, **kw:
+        _native_folders(project, kw["lane"], disconnected=1,
+                        disconnected_table=table))
+    result = route.execute(tmp_path, _context())
+    assert result["component_status"] == "PASS"
+    assert result["measurements"] == {
+        "route_short_overlap_errors": 0,
+        "native_disconnected_pins": 1,
+        "native_critical_disconnected_pins": 1,
+        "qualified_inactive_output_pins": 1,
+        "disconnected_required_pins": 0,
+        "wire_length_max_um": "25",
+        "wire_length_threshold_um": "100"}
+    proof = result["identity"]["disconnected_pin_qualification"]
+    assert proof["status"] == "QUALIFIED_INACTIVE_OUTPUTS"
+    assert proof["qualified"][0]["endpoint"] == "pad0/Y"
+
+
+def test_constant_driver_counts_dynamic_and_unknown_second_drivers():
+    models = {
+        "fixture_tiel": {"ZN": {"direction": "output", "function": "0"}},
+        "fixture_buf": {
+            "A": {"direction": "input"},
+            "Z": {"direction": "output", "function": "A"}},
+        "fixture_io": {"IE": {"direction": "input"}},
+    }
+    tie = {"tie0": ("fixture_tiel", {"ZN": "ctrl"}),
+           "pad0": ("fixture_io", {"IE": "ctrl"})}
+    assert route._constant_driver("ctrl", tie, models) == {
+        "instance": "tie0", "master": "fixture_tiel", "pin": "ZN", "level": 0}
+
+    dynamic = dict(tie, buf0=("fixture_buf", {"A": "data", "Z": "ctrl"}))
+    assert len(route._constant_driver("ctrl", dynamic, models) or {}) == 0
+
+    unknown = dict(tie, mystery0=("unmodelled_cell", {"X": "ctrl"}))
+    assert len(route._constant_driver("ctrl", unknown, models) or {}) == 0
+
+
+@pytest.mark.parametrize("netlist", [
+    "module top(input wire ctrl); endmodule\n",
+    "module top(ctrl); input ctrl; endmodule\n",
+    "module top; wire ctrl; assign ctrl = data; endmodule\n",
+])
+def test_noninstance_control_driver_is_ambiguous(netlist):
+    assert "ctrl" in route._noninstance_driver_nets(netlist)
+
+
+@pytest.mark.parametrize("mutation", ["tie_high", "liberty_function", "lef_role",
+                                      "producer_identity", "mixed_population"])
+def test_disabled_output_qualification_refuses_each_missing_or_changed_authority(
+        tmp_path, monkeypatch, mutation):
+    views = _d41(tmp_path, monkeypatch)
+    authority = _inactive_pad_authority(tmp_path, views)
+    prepared = route.prepare(tmp_path, _context())
+    table = tmp_path / "table.txt"
+    table.write_text("│ pad0 │ │ │ pad0/IE │ pad0/Y │\n")
+    native_disconnected = native_critical = 1
+    if mutation == "tie_high":
+        authority["cell_lib"].write_text(authority["cell_lib"].read_text().replace(
+            'function : "0"', 'function : "1"'))
+    elif mutation == "liberty_function":
+        authority["pad_lib"].write_text(authority["pad_lib"].read_text().replace(
+            'function : "((IE*PAD))"', 'function : "((PAD))"'))
+    elif mutation == "lef_role":
+        authority["pad_lef"].write_text(authority["pad_lef"].read_text().replace(
+            "PIN Y\n    DIRECTION OUTPUT", "PIN Y\n    DIRECTION INPUT"))
+    elif mutation == "producer_identity":
+        record = tmp_path / "reports/phase3/io_pad_chip_top.json"
+        body = json.loads(record.read_text())
+        body["aux_pin_signal_connections"][0]["net"] = "other"
+        _json(record, body)
+    else:
+        native_disconnected = 2
+    proof = route._qualify_inactive_outputs(
+        tmp_path, table, prepared, native_disconnected, native_critical)
+    assert proof["status"] == "UNQUALIFIED"
+    assert proof["required_disconnected_pins"] == 1
+    assert proof["qualified"] == []
 
 
 def test_unset_pdk_wire_threshold_is_disclosed_not_an_invented_requirement(

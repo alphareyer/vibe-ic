@@ -1,5 +1,6 @@
 """Owner DIE plus explicit operator absence retains IC obligations and catalogue evidence."""
 import json
+import shutil
 import pytest
 import _submission_template as ST
 import _tapeout_declaration as TD
@@ -8,6 +9,7 @@ import submission_template_check as CHK
 import tapeout_declaration_gen as GEN
 import tapeout_declaration_check as DC
 import tapeout_precheck as TP
+from _hostpaths import require_repo
 
 
 def fixture(tmp_path, kind='DIE', change=None, selected=False):
@@ -53,6 +55,90 @@ def test_owner_route_producer_checker_agree_without_deleting_catalogue(tmp_path)
     assert not any(x['rule']=='ROUTER_CONTRADICTION' for x in report['refusals'])
     # Choosing self-tapeout does not remove unanswered physical DIE questions.
     assert TD.audit(rec['declaration'])['sections'][TD.SECTION_PAD_RING]['unanswered']>0
+
+
+def _relocated_owner_tree(tmp_path):
+    """Run the real producer chain shape, then checkpoint-copy the project."""
+    original = tmp_path/'original'
+    original.mkdir()
+    catalogue = original/ST.STAGED_TEMPLATE_REL
+    catalogue.mkdir(parents=True)
+    (catalogue/'neutral.json').write_text(json.dumps({
+        'DIE_AREA':[0,0,800,1000], 'SEAL_RING_WIDTH':10}))
+    assert ING.main([str(original), '--template', str(catalogue)]) == 0
+    raw = {
+        'answers': {'deliverable': 'DIE'},
+        'answer_provenance': {'deliverable': {
+            'answered_by': 'owner', 'citation': 'Neutral owner DIE route'}},
+        'operator_template': {'path': None, 'slot': None,
+                              'absent_reason': 'Owner selects independent tapeout; no operator purchase applies.'},
+    }
+    own = original/ST.DESIGN_ANSWERS_REL
+    own.parent.mkdir(parents=True, exist_ok=True)
+    own.write_text(json.dumps(raw))
+    GEN.write_artefacts(original, GEN.build(original, own))
+    moved = tmp_path/'checkpoint'
+    shutil.copytree(original, moved)
+    shutil.rmtree(original)
+    return moved
+
+
+def test_relocated_catalogue_remains_information_not_a_second_route(tmp_path):
+    moved = _relocated_owner_tree(tmp_path)
+    report = DC.evaluate(moved)
+    assert [r['rule'] for r in report['refusals']] == [], report
+    record = json.loads((moved/ST.REPORT_REL).read_text())
+    checked = CHK.evaluate(moved, record, None)
+    assert checked['verdict'] == ST.VERDICT_NOT_APPLICABLE
+    assert checked['examined']['template_files_relocated'] == 1
+
+
+def test_relocated_catalogue_hash_change_preserves_route_refusal(tmp_path):
+    moved = _relocated_owner_tree(tmp_path)
+    (moved/ST.STAGED_TEMPLATE_REL/'neutral.json').write_text('{}')
+    assert CHK.catalogue_selects_self_tapeout(moved)[0] is False
+    report = DC.evaluate(moved)
+    assert any(r['rule'] == 'ROUTER_CONTRADICTION'
+               for r in report['refusals']), report
+
+
+def test_relocated_catalogue_selected_slot_preserves_route_refusal(tmp_path):
+    moved = _relocated_owner_tree(tmp_path)
+    record = json.loads((moved/ST.REPORT_REL).read_text())
+    record['ingest']['declared_slot'] = 'neutral'
+    (moved/ST.REPORT_REL).write_text(json.dumps(record))
+    own = moved/ST.DESIGN_ANSWERS_REL
+    owner = json.loads(own.read_text())
+    owner['operator_template']['slot'] = 'neutral'
+    own.write_text(json.dumps(owner))
+    assert CHK.catalogue_selects_self_tapeout(moved)[0] is False
+    report = DC.evaluate(moved)
+    assert any(r['rule'] == 'ROUTER_CONTRADICTION'
+               for r in report['refusals']), report
+
+
+def test_relocated_catalogue_source_escape_preserves_route_refusal(tmp_path):
+    moved = _relocated_owner_tree(tmp_path)
+    outside = tmp_path/'outside.json'
+    outside.write_text((moved/ST.STAGED_TEMPLATE_REL/'neutral.json').read_text())
+    record = json.loads((moved/ST.REPORT_REL).read_text())
+    record['ingest']['slots'][0]['source_relpath'] = '../outside.json'
+    (moved/ST.REPORT_REL).write_text(json.dumps(record))
+    assert CHK.catalogue_selects_self_tapeout(moved)[0] is False
+    report = DC.evaluate(moved)
+    assert any(r['rule'] == 'ROUTER_CONTRADICTION'
+               for r in report['refusals']), report
+
+
+def test_checked_in_catalogue_without_rehashable_sources_still_refuses(tmp_path):
+    fixture_root = require_repo(
+        'vibe-ic-marketplace', 'plugins', 'vibe-ic', 'programs', 'tests',
+        'fixtures', 'r0929_dieid_basis_self_tapeout_die')
+    project = tmp_path/'checked-in'
+    shutil.copytree(fixture_root, project)
+    report = DC.evaluate(project)
+    assert any(r['rule'] == 'ROUTER_CONTRADICTION'
+               for r in report['refusals']), report
 
 
 def test_self_tapeout_operator_arm_not_invoked(tmp_path):
