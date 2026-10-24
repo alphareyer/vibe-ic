@@ -2666,7 +2666,8 @@ def _finished_readback_fixture(tmp_path):
          'odb': str(odb), 'metrics': {
              'vibeic__prr__before__unrouted__count': 0,
              'vibeic__prr__after__unrouted__count': 0,
-             'vibeic__prr__unrouted__added': 0}})
+             'vibeic__prr__unrouted__added': 0,
+             'vibeic__prr__changed': 1}})
     chain = [(repair_state, repair_receipt)]
     for name, step in zip(('02-openroad-checkantennas', '03-openroad-rcx',
                            '04-openroad-stapostpnr'), prr.MEASURE_STEPS):
@@ -2789,7 +2790,7 @@ def _displace_finished_readback(project):
         'reason': 'one retained baseline violation', 'adopted': None,
         'baseline': baseline, 'final': baseline,
         'floors': {'setup': [0.0, 'fixture setup floor'],
-                   'hold': [0.0, 'fixture hold floor']}})
+                   'hold': [0.25, 'fixture hold floor']}})
     declared = project / prr.DECLARED_REPAIR_REL
     put(declared / 'postroute_timing_repair_decision.json', {
         'repair_needed': True, 'action': 'failed_normal_entry',
@@ -2910,6 +2911,10 @@ def test_recovered_promotion_crosses_full_existing_step32_consumer_chain(
         project, decision, source, source, out, producer, written, notes) == 0
     assert not notes
     assert (out / 'postroute_timing_repair_decision.canonical.json').is_file()
+    audit = importlib.import_module('postroute_timing_repair_audit')
+    findings, stats = audit.audit(project)
+    assert stats['re_verified'] is True
+    assert not [row for row in findings if row.severity == 'ERROR']
     history = (project / 'reports/phase3/postroute_repair_recovery_history' /
                displaced)
     archived = history / 'librelane_postroute_repair.failed.json'
@@ -2943,6 +2948,21 @@ def test_recovered_promotion_crosses_full_existing_step32_consumer_chain(
     assert (bad_project / 'phase3/stage3/pnr/routed.def').read_bytes() == before
     assert not (bad_project / 'reports/phase3/'
                 'librelane_postroute_repair_handoff.json').exists()
+
+    timing_root = tmp_path / 'timing-damaged'
+    timing_project, _r, _ready, _finished = _finished_readback_fixture(timing_root)
+    _displace_finished_readback(timing_project)
+    timing_report = prr.retained_finished_candidate_readback(timing_project)
+    timing_report['final']['hold_ws_min'] = 0.05
+    timing_report['candidates'][0]['measurement']['hold_ws_min'] = 0.05
+    timing_result = runner._postroute_repair_librelane_result(
+        timing_project, timing_project / 'phase3/stage3/pnr', timing_report,
+        0.0, handed=True, top='neutral')
+    assert timing_result.status == 'PASS'
+    timing_findings, timing_stats = audit.audit(timing_project)
+    assert timing_stats['re_verified'] is False
+    assert any(row.category == 'NOT_REVERIFIED'
+               and row.severity == 'ERROR' for row in timing_findings)
 
 
 @pytest.mark.parametrize('damage,message', [

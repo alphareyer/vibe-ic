@@ -1408,9 +1408,25 @@ def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path
             changes = [{"selected_arm": report.get("selected_arm"),
                         "route_state": report.get("adopted_state"),
                         "sta_state_sha256": after_state}]
-    re_verified = bool(changes and after[0] == 0 and
-                       after[1] >= setup_floor and after[2] >= hold_floor and
-                       final_antenna == (0, 0))
+    timing_reverified = False
+    try:
+        from _ppa import closure as _cl
+        registry = _cl.load_registry(programs_dir=Path(__file__).resolve().parent)
+        hard_improved = (after[0] < before[0] or
+                         sum(final_antenna) < sum(input_antenna))
+        timing_reverified = True
+        for domain_name, old, new, floor in (
+                ("timing.setup", before[1], after[1], setup_floor),
+                ("timing.hold", before[2], after[2], hold_floor)):
+            domain = registry.domains[domain_name]
+            regressed = domain.regresses(float(new), float(old))
+            if regressed and not (hard_improved and
+                                  domain.within_floor(float(new), float(floor))):
+                timing_reverified = False
+    except (OSError, ValueError, TypeError, KeyError, _cl.RegistryError):
+        timing_reverified = False
+    re_verified = bool(changes and after[0] == 0 and timing_reverified
+                       and final_antenna == (0, 0))
     out = project / DECLARED_REPAIR_REL
     action = ("candidate_adopted" if adopted else
               "alternate_route_selected" if route_changed else "input_route_kept")
