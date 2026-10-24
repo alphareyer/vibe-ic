@@ -30,6 +30,12 @@ codes and transcript paths (``gls_runs.json``), then applies the calibrated
 simulation nonzero exits are blocking even if a partial transcript looks like
 a pass; ``gls_results.json`` retains the decision.
 
+``Vibeic.TestPatternReplay`` runs producer-owned, self-checking pattern
+testbenches against the exact implementation netlist.  It binds both pattern
+and derived-testbench bytes by SHA-256, requires the transcript to name the
+exact case and vector population, and blocks on a changed input, native
+nonzero exit, missing marker, or functional failure marker.
+
 ``Vibeic.ClockPathDriveSizing`` (flow step 19, T98) runs after
 ``OpenROAD.CTS``: the #2160 clock-path drive sizing, see its class docstring
 and ``clock_path_drive_sizing.tcl``.
@@ -52,8 +58,10 @@ returns only the adopted state. See ``postroute_repair.py``.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from decimal import Decimal
@@ -68,8 +76,8 @@ from librelane.steps.odb import OdbpyStep
 from librelane.steps.openroad import OpenROADStep
 from librelane.steps.step import MetricsUpdate, Step, StepError, ViewsUpdate
 
-__all__ = ["InsertSpareCells", "GateLevelSim", "ClockPathDriveSizing",
-           "ExternalCaptureLaunchRetap"]
+__all__ = ["InsertSpareCells", "GateLevelSim", "TestPatternReplay",
+           "ClockPathDriveSizing", "ExternalCaptureLaunchRetap"]
 
 
 @Step.factory.register()
@@ -273,6 +281,114 @@ class GateLevelSim(Step):
             except subprocess.TimeoutExpired:
                 sink.write(f"\nVIBEIC_GLS_TIMEOUT after {limit} s\n")
                 return 124
+
+
+@Step.factory.register()
+class TestPatternReplay(Step):
+    """Replay producer-owned test patterns on their bound implementation.
+
+    The producer supplies one self-checking testbench per pattern case.  This
+    step owns only native compile/simulation and the blocking readback: every
+    pattern file must still hash to the manifest, every process must exit zero,
+    and every transcript must name the exact case and vector population it
+    checked.  A later DFT producer can therefore feed this shared native step
+    directly without a row-specific adapter.
+    """
+
+    id = "Vibeic.TestPatternReplay"
+    name = "Native test-pattern replay"
+    inputs = [DesignFormat.NETLIST]
+    outputs = []
+
+    config_vars = [
+        Variable("VIBEIC_PATTERN_MANIFEST", Path,
+                 "Producer-owned pattern/testbench manifest."),
+        Variable("VIBEIC_PATTERN_TIMEOUT_S", int,
+                 "Wall-clock limit for compile and replay, seconds.", default=900),
+    ]
+
+    _run = staticmethod(GateLevelSim._run)
+
+    @staticmethod
+    def _sha256(path: str) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def run(self, state_in: State, **kwargs) -> Tuple[ViewsUpdate, MetricsUpdate]:
+        with open(str(self.config["VIBEIC_PATTERN_MANIFEST"])) as stream:
+            manifest = json.load(stream)
+        cases = manifest.get("cases") or []
+        errors = []
+        if not cases or len({case.get("id") for case in cases}) != len(cases):
+            errors.append("pattern cases are empty or IDs are not unique")
+        for case in cases:
+            pattern = str(case.get("pattern") or "")
+            testbench = str(case.get("testbench") or "")
+            count = case.get("vector_count")
+            if not pattern or not os.path.isfile(pattern):
+                errors.append(f"{case.get('id')}: pattern file absent")
+            elif TestPatternReplay._sha256(pattern) != case.get("pattern_sha256"):
+                errors.append(f"{case.get('id')}: pattern digest changed")
+            if not testbench or not os.path.isfile(testbench):
+                errors.append(f"{case.get('id')}: testbench absent")
+            elif TestPatternReplay._sha256(testbench) != case.get("testbench_sha256"):
+                errors.append(f"{case.get('id')}: testbench digest changed")
+            if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+                errors.append(f"{case.get('id')}: invalid vector_count")
+
+        runs = []
+        if not errors:
+            netlist = str(state_in[DesignFormat.NETLIST])
+            limit = int(self.config["VIBEIC_PATTERN_TIMEOUT_S"])
+            os.makedirs(self.step_dir, exist_ok=True)
+            for case in cases:
+                cid = str(case["id"])
+                folder = os.path.join(self.step_dir, cid)
+                os.makedirs(folder, exist_ok=False)
+                vvp = os.path.join(folder, f"{cid}.vvp")
+                compile_log = os.path.join(folder, "compile.log")
+                stdout = os.path.join(folder, "stdout.log")
+                argv = ["iverilog", *(manifest.get("compile_flags") or "-g2012").split(),
+                        "-s", str(case["module"]), "-o", vvp,
+                        str(case["testbench"]), netlist,
+                        *map(str, manifest.get("models") or [])]
+                compile_rc = self._run(argv, compile_log, limit)
+                sim_rc = None
+                if compile_rc == 0:
+                    sim_rc = self._run(["vvp", vvp], stdout, limit, cwd=folder)
+                text = FilePath(stdout).read_text(errors="replace") \
+                    if os.path.isfile(stdout) else ""
+                marker = (f"VIBEIC_PATTERN_REPLAY PASS {cid} "
+                          f"{case['vector_count']}")
+                marker_count = len(re.findall(rf"(?m)^{re.escape(marker)}$", text))
+                failed = bool(re.search(r"(?m)^VIBEIC_PATTERN_REPLAY FAIL\b", text))
+                verdict = ("PASS" if compile_rc == 0 and sim_rc == 0
+                           and marker_count == 1 and not failed else "FAIL")
+                runs.append({"case": cid, "pattern": case["pattern"],
+                             "pattern_sha256": case["pattern_sha256"],
+                             "testbench_sha256": case["testbench_sha256"],
+                             "vector_count": case["vector_count"],
+                             "compile_rc": compile_rc, "sim_rc": sim_rc,
+                             "marker_count": marker_count, "verdict": verdict,
+                             "compile_log": compile_log, "stdout": stdout})
+        result = {"verdict": "PASS" if not errors and runs
+                  and all(run["verdict"] == "PASS" for run in runs) else "FAIL",
+                  "export_roundtrip_errors": errors, "runs": runs}
+        result_path = os.path.join(self.step_dir, "pattern_replay_results.json")
+        os.makedirs(self.step_dir, exist_ok=True)
+        with open(result_path, "w") as stream:
+            json.dump(result, stream, indent=2)
+        metrics = {"vibeic__pattern_replay__case__count": len(runs),
+                   "vibeic__pattern_replay__vector__count": sum(
+                       run["vector_count"] for run in runs),
+                   "vibeic__pattern_replay__passed": int(result["verdict"] == "PASS")}
+        if result["verdict"] != "PASS":
+            raise StepError(f"{self.id}: BLOCKING pattern replay verdict FAIL; "
+                            f"see {result_path}")
+        return {}, metrics
 
 
 @Step.factory.register()
