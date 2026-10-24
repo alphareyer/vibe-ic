@@ -209,14 +209,15 @@ def test_default_reads_semantic_image_live_but_keeps_explicit_file_bindings(tmp_
 
 @pytest.mark.parametrize("changed", ["em_current_density_check.py",
                                     "em_peak_current_authority_check.py",
+                                    "execution_backend_producers.py",
+                                    "_emit_ir_em_reports",
                                     "_emit_em_current_authority"])
 def test_current_ir_keeps_its_measured_failure_after_em_only_source_changes(
         tmp_path, monkeypatch, changed):
-    # The existing real adoption/consumer fixture establishes a current FAIL.
-    # Reading it under a later EM-only source must preserve that measured FAIL,
-    # without upgrading or rewriting the retained native receipt.
-    test_default_step24_adopts_its_current_native_primary(tmp_path, monkeypatch, "native_fail")
-    project = tmp_path / "project"
+    # This is a genuine current-owner receipt, not the older no-input-mode
+    # neutral fixture.  EM-only changes cannot revoke its measured IR FAIL.
+    project, _, _, _, _ = _external_current_primary(
+        tmp_path, monkeypatch, "native_fail")
     receipt = project / "reports/phase3/ir_drop_librelane.json"
     original_bytes = receipt.read_bytes()
     current = emc.native_source_identity()
@@ -227,6 +228,36 @@ def test_current_ir_keeps_its_measured_failure_after_em_only_source_changes(
     assert result["valid"] is True, result
     assert result["verdict"] == "FAIL", result
     assert receipt.read_bytes() == original_bytes
+
+
+def test_legacy_ir_receipt_still_requires_shared_ir_emitter_source(
+        tmp_path, monkeypatch):
+    test_default_step24_adopts_its_current_native_primary(tmp_path, monkeypatch, "current")
+    project = tmp_path / "project"
+    receipt = project / "reports/phase3/ir_drop_librelane.json"
+    assert json.loads(receipt.read_text())["record"].get("input_mode") is None
+    current = emc.native_source_identity()
+    current["_emit_ir_em_reports"] = "0" * 64
+    monkeypatch.setattr(emc, "native_source_identity", lambda: dict(current))
+    result = emc.validate_primary_ir(project)
+    assert result["valid"] is False, result
+    assert result["verdict"] == "NOT_MEASURED", result
+    assert "not adopted by current source" in result["reason"]
+
+
+@pytest.mark.parametrize("changed", [
+    "_librelane_step24_record", "_step24_adopt_primary", "librelane_ir_antenna.py",
+])
+def test_current_ir_still_refuses_changed_actual_ir_owner(
+        tmp_path, monkeypatch, changed):
+    project, _, _, _, _ = _external_current_primary(tmp_path, monkeypatch)
+    current = emc.native_source_identity()
+    current[changed] = "0" * 64
+    monkeypatch.setattr(emc, "native_source_identity", lambda: dict(current))
+    result = emc.validate_primary_ir(project)
+    assert result["valid"] is False, result
+    assert result["verdict"] == "NOT_MEASURED", result
+    assert "not adopted by current source" in result["reason"]
 
 
 def test_current_ir_rebinds_intact_project_relative_native_paths(tmp_path, monkeypatch):
@@ -280,7 +311,22 @@ def _external_current_primary(tmp_path, monkeypatch, case="current"):
         "selected_inputs": selected["records"],
         "input_source_chain": {key: selected[key] for key in
                                ("source", "image", "pdk_root", "pdk")},
+        "source_model": "declared supply pads through VSRC_LOC_FILES; source control",
+        "sources": {"sources": {
+            "VDD": [{"pad": "vdd_pad", "bterm": "VDD", "layer": "Metal5",
+                     "x": 10.0, "y": 20.0, "size": 4.0}],
+            "VSS": [{"pad": "vss_pad", "bterm": "VSS", "layer": "Metal5",
+                     "x": 30.0, "y": 40.0, "size": 4.0}],
+        }, "bterms_outside_declared_pads": ["VDD:VDD", "VSS:VSS"],
+            "coincident": False},
     })
+    vsrc_dir = project / "phase3/librelane/24-config/vsrc"
+    vsrc = {
+        "VDD": _write(vsrc_dir, "VDD.vsrc", "10.0000,20.0000,4.0000,5\n"),
+        "VSS": _write(vsrc_dir, "VSS.vsrc", "30.0000,40.0000,4.0000,0\n"),
+    }
+    doc["record"]["cross_check"]["vsrc"] = {
+        net: str(path) for net, path in vsrc.items()}
     for role in ("odb", "sdc", "spef"):
         row = selected["records"][role]
         path = Path(row["path"])

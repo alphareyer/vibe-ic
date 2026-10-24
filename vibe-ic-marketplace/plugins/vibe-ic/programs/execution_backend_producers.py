@@ -1724,13 +1724,16 @@ def produce_signoff(project, params):
         ordinary = params.get('execution_mode') == 'default'
         if ordinary:
             import em_current_density_check as density
-            primary = density.validate_primary_ir(project)
+            primary = density.validate_primary_ir(project, for_em=True)
             if not primary['valid']:
                 return {'verdict': 'NOT_MEASURED', 'detail': primary['reason']}
         ok = R._emit_ir_em_reports(
             project, top, pdk, container,
             rpt / ('ir_drop_psm_cross_check.rpt' if ordinary else 'ir_drop.rpt'),
-            rpt / 'em.rpt', notes, **({'em_only': True} if ordinary else {}))
+            rpt / 'em.rpt', notes, **({
+                'em_only': True,
+                'layout_basis': primary.get('current_em_basis'),
+            } if ordinary else {}))
         if not ok[1]:
             raise em.Refusal('BACKEND_EM_NATIVE_UNMEASURED', sid)
         R._emit_em_current_authority(project, pdk, container, notes)

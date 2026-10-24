@@ -1121,20 +1121,24 @@ def native_source_identity() -> Dict[str, str]:
             result[node.name] = hashlib.sha256(
                 "".join(lines[node.lineno - 1:node.end_lineno]).encode()).hexdigest()
     for name in ("em_current_density_check.py", "em_peak_current_authority_check.py",
+                 "execution_backend_producers.py",
                  "librelane_ir_antenna.py", "dynamic_ir_vectored_emit.py",
                  "ir_drop_report_check.py"):
         result[name] = hashlib.sha256((root / name).read_bytes()).hexdigest()
     return result
 
 
-# Step 24 consumes its IR producers/readers from the existing joint identity.
-# The EM-only consumers remain mandatory for Step 25, not for an unchanged
-# adopted IR measurement. Missing required keys never compare equal by absence.
-_PRIMARY_IR_SOURCE_KEYS = (
+# Current-owner Step 24 consumes its IR producers/readers without the later
+# Step-25 emitter.  A legacy receipt came through the joint IR/EM emitter and
+# keeps that source key. Missing required keys never compare equal by absence.
+_CURRENT_PRIMARY_IR_SOURCE_KEYS = (
     "_librelane_step24_record", "_librelane_step24_refusal_publish",
     "_librelane_step24_publish", "_step24_primary_mode", "_step24_adopt_primary",
-    "_step24_basis_inputs", "_step24_transient_argv", "_emit_ir_em_reports",
+    "_step24_basis_inputs", "_step24_transient_argv",
     "librelane_ir_antenna.py", "dynamic_ir_vectored_emit.py", "ir_drop_report_check.py",
+)
+_LEGACY_PRIMARY_IR_SOURCE_KEYS = (
+    *_CURRENT_PRIMARY_IR_SOURCE_KEYS, "_emit_ir_em_reports",
 )
 
 
@@ -1143,6 +1147,12 @@ def _native_sha(path: Path) -> Optional[str]:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None
+
+
+def _lexical_absolute(project: Path, raw: str) -> Path:
+    """Normalize spelling without following links or changing file identity."""
+    path = Path(raw)
+    return path.absolute() if path.is_absolute() else (project / path).absolute()
 
 
 def _retained_project_root(project: Path, doc: Dict[str, Any],
@@ -1216,7 +1226,7 @@ def native_project(em_path: Path) -> Optional[Path]:
     return None
 
 
-def validate_primary_ir(project: Path) -> Dict[str, Any]:
+def validate_primary_ir(project: Path, *, for_em: bool = False) -> Dict[str, Any]:
     """Step-24's existing gate consumes the adopted current tool result.
 
     This validates the IR producer's own state and publication, independently
@@ -1225,17 +1235,20 @@ def validate_primary_ir(project: Path) -> Dict[str, Any]:
     """
     try:
         doc = json.loads((project / "reports/phase3/ir_drop_librelane.json").read_text())
+        record = doc["record"]
         recorded_source = doc.get("source_identity")
         current_source = native_source_identity()
+        source_keys = (_CURRENT_PRIMARY_IR_SOURCE_KEYS
+                       if record.get("input_mode") == "current_stapostpnr_odb"
+                       else _LEGACY_PRIMARY_IR_SOURCE_KEYS)
         if (not doc.get("adopted") or not isinstance(recorded_source, dict)
                 or any(not current_source.get(name)
                        or recorded_source.get(name) != current_source[name]
-                       for name in _PRIMARY_IR_SOURCE_KEYS)):
+                       for name in source_keys)):
             raise ValueError("LibreLane IR primary was not adopted by current source")
         if (not {"def", "netlist", "sdc", "spef"}.issubset(doc["inputs"])
                 or not {"reports/phase3/ir_drop.json", "reports/phase3/ir_drop.rpt"}.issubset(doc["published"])):
             raise ValueError("LibreLane IR required input/publication binding removed")
-        record = doc["record"]
         recorded_state = Path(record["tool_state"])
         state_sha = record["tool_state_sha256"]
         if recorded_state.is_absolute() and _native_sha(recorded_state) != state_sha:
@@ -1246,12 +1259,14 @@ def validate_primary_ir(project: Path) -> Dict[str, Any]:
             tool_state = _retained_native_path(
                 project, record["tool_state"], state_sha, None)
         selected = None
+        selected_paths = None
         if record.get("input_mode") == "current_stapostpnr_odb":
             selected = record.get("selected_inputs")
             required = {"odb", "def", "netlist", "sdc", "spef", "sta_state",
                         "sta_receipt", "sta_config", "step23_record"}
             if not isinstance(selected, dict) or set(selected) != required:
                 raise ValueError("LibreLane IR current STA input population changed")
+            selected_paths = {}
             for role, row in selected.items():
                 if not isinstance(row, dict) or set(row) != {"path", "sha256"}:
                     raise ValueError(f"LibreLane IR current STA {role} binding malformed")
@@ -1261,6 +1276,7 @@ def validate_primary_ir(project: Path) -> Dict[str, Any]:
                         or not row["sha256"] or target.is_symlink()
                         or not target.is_file() or _native_sha(target) != row["sha256"]):
                     raise ValueError(f"LibreLane IR current STA bytes changed: {role}")
+                selected_paths[role] = target
             chain = record.get("input_source_chain") or {}
             if (chain.get("source") != "current validated OpenROAD.STAPostPNR state"
                     or not chain.get("image") or not chain.get("pdk_root")
@@ -1297,8 +1313,14 @@ def validate_primary_ir(project: Path) -> Dict[str, Any]:
                     raise ValueError(f"LibreLane IR current bytes changed: {name}")
         # Preserve exact native-basis/relocation validation after the more
         # specific current-selection checks, keeping their refusal diagnosis.
-        for row in [doc["native_basis"][key] for key in ("odb", "sdc", "spef", "tech_lef")] + doc["native_basis"]["liberties"]:
+        native_paths = {}
+        for key in ("odb", "sdc", "spef", "tech_lef"):
+            row = doc["native_basis"][key]
+            native_paths[key] = _retained_native_path(
+                project, row["path"], row["sha256"], old_root)
+        native_paths["liberties"] = [
             _retained_native_path(project, row["path"], row["sha256"], old_root)
+            for row in doc["native_basis"]["liberties"]]
         if selected is not None:
             native_odb = doc["native_basis"]["odb"]
             if (selected["odb"]["sha256"] != native_odb["sha256"]
@@ -1311,8 +1333,85 @@ def validate_primary_ir(project: Path) -> Dict[str, Any]:
         judged = la.judge_ir(rebound_record)
         if judged != doc["judgment"] or judged["verdict"] not in ("PASS", "FAIL"):
             raise ValueError("LibreLane IR measurement/coverage unavailable")
-        return {"valid": True, "verdict": judged["verdict"],
-                "producer": doc["producer"], "tool_state_sha256": record["tool_state_sha256"]}
+        result = {"valid": True, "verdict": judged["verdict"],
+                  "producer": doc["producer"],
+                  "tool_state_sha256": record["tool_state_sha256"]}
+        if selected is not None:
+            # Step 25 may consume these already-authorized bytes directly.
+            # Paths are resolved here only after the complete current-owner,
+            # role, digest, receipt and source-chain validation above.  The
+            # retained receipt is never rewritten and a malformed current
+            # owner never degrades to the legacy routed-DEF path.
+            result["current_em_basis"] = {
+                role: {"path": str(selected_paths[role].absolute()),
+                       "sha256": selected[role]["sha256"]}
+                for role in ("odb", "def", "netlist", "sdc", "spef")}
+            result["current_em_basis"]["tech_lef"] = {
+                "path": str(native_paths["tech_lef"].absolute()),
+                "sha256": doc["native_basis"]["tech_lef"]["sha256"]}
+            result["current_em_basis"]["liberties"] = [
+                {"path": str(path.absolute()), "sha256": row["sha256"]}
+                for path, row in zip(native_paths["liberties"],
+                                     doc["native_basis"]["liberties"])]
+        if selected is not None and for_em:
+            # The selected ODB is not the complete physical supply boundary.
+            # This is a Step-25 prerequisite, not part of D57's static-IR
+            # verdict: an otherwise valid BTerm/static primary stays measured
+            # for D57 while D58 refuses to acquire EM on a different boundary.
+            model = record.get("source_model")
+            source_record = record.get("sources")
+            source_rows = (source_record or {}).get("sources")
+            supply = record.get("lib_voltage_v")
+            rails = [*record.get("vdd_nets", []), *record.get("gnd_nets", [])]
+            vsrc_paths = (record.get("cross_check") or {}).get("vsrc")
+            if (not isinstance(model, str)
+                    or "through VSRC_LOC_FILES" not in model
+                    or not isinstance(source_record, dict)
+                    or source_record.get("coincident") is not False
+                    or not isinstance(source_rows, dict)
+                    or not rails or len(set(rails)) != len(rails)
+                    or set(source_rows) != set(rails)
+                    or not isinstance(vsrc_paths, dict)
+                    or set(vsrc_paths) != set(rails)
+                    or not isinstance(supply, (int, float))
+                    or isinstance(supply, bool) or not math.isfinite(supply)
+                    or supply <= 0):
+                raise ValueError("LibreLane IR declared VSRC model unavailable")
+            vsrc = {}
+            vdd = set(record["vdd_nets"])
+            for net in rails:
+                rows = source_rows[net]
+                if not isinstance(net, str) or not net or not isinstance(rows, list) or not rows:
+                    raise ValueError("LibreLane IR declared VSRC population malformed")
+                normalized = []
+                for row in rows:
+                    if not isinstance(row, dict) or set(row) != {
+                            "pad", "bterm", "layer", "x", "y", "size"}:
+                        raise ValueError("LibreLane IR declared VSRC row malformed")
+                    if (not all(isinstance(row[key], str) and row[key]
+                                for key in ("pad", "bterm", "layer"))
+                            or not all(isinstance(row[key], (int, float))
+                                       and not isinstance(row[key], bool)
+                                       and math.isfinite(row[key])
+                                       for key in ("x", "y", "size"))
+                            or row["size"] <= 0):
+                        raise ValueError("LibreLane IR declared VSRC row invalid")
+                    normalized.append(dict(row))
+                voltage = float(supply) if net in vdd else 0.0
+                content = "".join(
+                    f"{row['x']:.4f},{row['y']:.4f},{row['size']:.4f},{voltage:g}\n"
+                    for row in normalized)
+                expected = hashlib.sha256(content.encode()).hexdigest()
+                source_path = _retained_native_path(
+                    project, vsrc_paths[net], expected, old_root)
+                vsrc[net] = {
+                    "path": str(source_path.absolute()), "voltage_v": voltage,
+                    "sha256": expected,
+                }
+            result["current_em_basis"]["supply_sources"] = {
+                "model": model, "vsrc": vsrc,
+            }
+        return result
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         return {"valid": False, "verdict": "NOT_MEASURED",
                 "reason": str(exc), "rule": "LL_IR_CURRENT_BINDING_INVALID"}
@@ -1398,7 +1497,7 @@ def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN,
                 raise ValueError("power basis input digest disagrees")
         primary = doc.get("step24_primary")
         if primary is not None:
-            checked = validate_primary_ir(project)
+            checked = validate_primary_ir(project, for_em=True)
             if not checked["valid"] or checked != primary:
                 raise ValueError("current Step-24 primary binding changed")
             # This EM solve must carry its own complete basis. The primary
@@ -1407,10 +1506,32 @@ def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN,
             # that earlier step's published dictionary.
             if not (doc.get("librelane_ir") or {}).get("adopted"):
                 raise ValueError("current Step-24 primary reference absent")
+            current_basis = primary.get("current_em_basis")
+            if current_basis is not None:
+                source_basis = current_basis["supply_sources"]
+                recorded_sources = doc.get("supply_source_basis")
+                if (not isinstance(recorded_sources, dict)
+                        or recorded_sources.get("model") != source_basis["model"]
+                        or set(recorded_sources.get("vsrc") or {})
+                        != set(source_basis["vsrc"])):
+                    raise ValueError("current D57 VSRC model was not consumed")
+                for net, expected in source_basis["vsrc"].items():
+                    actual = recorded_sources["vsrc"][net]
+                    role = f"vsrc_{net}"
+                    if (actual != {"input_role": role,
+                                   "sha256": expected["sha256"],
+                                   "voltage_v": expected["voltage_v"]}
+                            or role not in doc["inputs"]
+                            or doc["inputs"][role]["sha256"] != expected["sha256"]):
+                        raise ValueError(f"current D57 VSRC input differs: {net}")
+        layout_row = doc["inputs"]["layout"]
+        subject_layout = _lexical_absolute(project, subject["subject_def"])
+        owned_layout = _lexical_absolute(
+            project, layout_row.get("project_path") or layout_row["declared_path"])
         if ((primary is None and basis != static["power_basis"])
                 or subject["power_basis"]["basis_id"] != basis["id"]
                 or subject["subject_def_sha256"] != doc["inputs"]["layout"]["sha256"]
-                or subject["subject_def"] != doc["inputs"]["layout"]["project_path"]):
+                or subject_layout != owned_layout):
             raise ValueError("DEF or power basis disagrees with the measurement")
         ll = doc.get("librelane_ir")
         if ll and ll.get("adopted"):

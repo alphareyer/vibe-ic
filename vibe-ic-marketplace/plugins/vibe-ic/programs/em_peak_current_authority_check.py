@@ -319,12 +319,41 @@ def jmax_tier(project: Path, jmax: Optional[Path], tech_lef: Optional[Path],
         if isinstance(nets, list) and len(nets) == 1:
             net_hint = str(nets[0])
         rel = Path(str(em_doc["subject_def"]))
-        candidate = project / rel
         digest = em_doc["subject_def_sha256"]
-        if (not rel.is_absolute() and ".." not in rel.parts and
-                candidate.is_file() and
-                hashlib.sha256(candidate.read_bytes()).hexdigest() == digest):
-            local_def = candidate
+        if not rel.is_absolute():
+            candidate = project / rel
+            if (".." not in rel.parts and not candidate.is_symlink()
+                    and candidate.is_file()
+                    and hashlib.sha256(candidate.read_bytes()).hexdigest() == digest):
+                local_def = candidate
+        else:
+            # A current native solve may read an independently owned final
+            # DEF outside the project. Authorize that exact object only after
+            # the existing density consumer has validated the invocation,
+            # current owner, source identities and complete input/output set.
+            native = emc.validate_native_density(project)
+            if native.get("valid"):
+                density_doc = json.loads((project / "reports/phase3" /
+                                          "em_openroad_density.json").read_text())
+                layout = density_doc["inputs"]["layout"]
+                primary = density_doc.get("step24_primary")
+                current_basis = (primary.get("current_em_basis")
+                                 if isinstance(primary, dict) else None)
+                owned_def = (current_basis.get("def")
+                             if isinstance(current_basis, dict) else None)
+                declared = Path(str(layout["declared_path"]))
+                if (layout.get("project_path") is None
+                        and declared.is_absolute()
+                        and isinstance(owned_def, dict)
+                        and emc._lexical_absolute(project, str(owned_def.get("path")))
+                        == emc._lexical_absolute(project, str(declared))
+                        and owned_def.get("sha256") == digest
+                        and emc._lexical_absolute(project, str(rel))
+                        == emc._lexical_absolute(project, str(declared))
+                        and layout.get("sha256") == digest
+                        and not declared.is_symlink() and declared.is_file()
+                        and hashlib.sha256(declared.read_bytes()).hexdigest() == digest):
+                    local_def = declared
     except (OSError, ValueError, KeyError, TypeError):
         pass
     geometry_path = None
