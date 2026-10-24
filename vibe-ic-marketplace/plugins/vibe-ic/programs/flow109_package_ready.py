@@ -158,9 +158,79 @@ def _consume_d67(project: Path) -> tuple[dict, list[dict]]:
         "d67_context_sha256": identity,
         "d67_report": _record(project, report_path),
         "d67_context": _record(project, context_path),
+        "package_model_ports_identity": consumed.get(
+            "package_model_ports_identity"),
         "metrics": consumed,
     }
     return detail, records
+
+
+def _join_d67_subject(project: Path, detail: Mapping, io: Mapping,
+                      current_geometry: Mapping | None) -> dict:
+    """Prove the accepted D67 result applies to D75's selected subject."""
+    port_identity = detail.get("package_model_ports_identity")
+    identity = (port_identity.get("value")
+                if isinstance(port_identity, Mapping) else None)
+    if (not isinstance(port_identity, Mapping)
+            or port_identity.get("status") != "PASS"
+            or not isinstance(identity, Mapping)):
+        raise D75Refusal("D75_D67_SUBJECT_UNBOUND",
+                         "D67 package_model_ports_identity is not measured PASS")
+    d67_top = identity.get("top")
+    io_top = io.get("chip_top_module")
+    if not isinstance(d67_top, str) or not d67_top:
+        raise D75Refusal("D75_D67_SUBJECT_UNBOUND", "D67 top")
+    if not isinstance(io_top, str) or not io_top:
+        raise D75Refusal("D75_D67_SUBJECT_UNBOUND", "D75 IO top")
+    d67_netlist_identity = identity.get("netlist")
+    d67_netlist = _d67_record(project, d67_netlist_identity, "netlist")
+    models = identity.get("models")
+    if not isinstance(models, list) or not models:
+        raise D75Refusal("D75_D67_SUBJECT_UNBOUND", "D67 model port maps")
+    port_maps = []
+    for model in models:
+        mapping = model.get("port_map") if isinstance(model, Mapping) else None
+        if not isinstance(mapping, Mapping) or not mapping:
+            raise D75Refusal("D75_D67_SUBJECT_UNBOUND", "D67 model port map")
+        design_ports = sorted({row["design_port"] for row in mapping.values()
+                               if isinstance(row, Mapping)
+                               and isinstance(row.get("design_port"), str)
+                               and row["design_port"]})
+        if not design_ports:
+            raise D75Refusal("D75_D67_SUBJECT_UNBOUND",
+                             "D67 model has no bound design port")
+        port_maps.append({"id": model.get("id"), "design_ports": design_ports})
+
+    native_top = native_netlist = None
+    mismatches = []
+    if d67_top != io_top:
+        mismatches.append("D67 top differs from D75 IO top")
+    if current_geometry is not None:
+        native = current_geometry.get("detail")
+        if not isinstance(native, Mapping):
+            raise D75Refusal("D75_D67_SUBJECT_UNBOUND",
+                             "current native subject detail")
+        native_top = native.get("top")
+        native_netlist = native.get("netlist")
+        if native_top != io_top:
+            mismatches.append("current native top differs from D75 IO top")
+        if (not isinstance(native_netlist, Mapping)
+                or d67_netlist.get("path") != native_netlist.get("path")
+                or d67_netlist.get("sha256") != native_netlist.get("sha256")):
+            mismatches.append("D67 netlist differs from current native netlist")
+    return {
+        "status": "FAIL" if mismatches else "PASS",
+        "basis": ("IO top plus exact current-native netlist"
+                  if current_geometry is not None else
+                  "existing legacy applicability: IO top"),
+        "d67_top": d67_top,
+        "d75_io_top": io_top,
+        "d75_native_top": native_top,
+        "netlist": dict(d67_netlist_identity),
+        "current_native_netlist": native_netlist,
+        "model_design_ports": port_maps,
+        "mismatches": mismatches,
+    }
 
 
 def _read(path: Path) -> dict:
@@ -364,6 +434,7 @@ def _current_native_geometry(project: Path, io_lefs: list[Path]) -> dict | None:
 
         current_def = selected_view("def", "def")
         current_odb = selected_view("odb", "odb")
+        current_netlist = selected_view("netlist", "nl")
         root_record = json.loads((folder / "pdk_root.json").read_text(encoding="utf-8"))
         mounts = (root_record.get("requested_mounts")
                   if root_record.get("execution_route") == "LOCAL"
@@ -429,6 +500,7 @@ def _current_native_geometry(project: Path, io_lefs: list[Path]) -> dict | None:
             bound_config_file(configured_pad_paths[path.resolve()], "PAD_LEFS")
 
         inputs = [_record(project, current_def), _record(project, current_odb),
+                  _record(project, current_netlist),
                   _record(project, config_path), _record(project, folder / "state_out.json"),
                   _record(project, folder / "vibeic_receipt.json"),
                   _record(project, folder / "pdk_root.json"),
@@ -442,13 +514,15 @@ def _current_native_geometry(project: Path, io_lefs: list[Path]) -> dict | None:
             if record not in inputs:
                 inputs.append(record)
         return {
-            "def": current_def, "odb": current_odb, "tech": tech,
+            "def": current_def, "odb": current_odb,
+            "netlist": current_netlist, "tech": tech,
             "inputs": inputs,
             "detail": {
                 "source": "current validated OpenROAD.STAPostPNR state",
                 "top": selected.get("top"),
                 "def": _record(project, current_def),
                 "odb": _record(project, current_odb),
+                "netlist": _record(project, current_netlist),
                 "config": _record(project, config_path),
                 "receipt": _record(project, folder / "vibeic_receipt.json"),
                 "pdk_root": _record(project, folder / "pdk_root.json"),
@@ -517,6 +591,11 @@ def validate(project: Path, receipt: Mapping) -> None:
         if package_required:
             if package_check is not None and package_check.get("status") == "PASS":
                 detail, _ = _consume_d67(project)
+                io = _read(project / IO_REPORT)
+                current_geometry = _current_native_geometry(
+                    project, _io_lefs(project, io))
+                detail["subject_join"] = _join_d67_subject(
+                    project, detail, io, current_geometry)
                 if package_check.get("detail") != detail:
                     raise D75Refusal("D75_D67_RECEIPT_STALE",
                                      "current D67 consumer result changed")
@@ -562,6 +641,7 @@ def execute(project: Path, context: Mapping) -> dict:
     checks: list[dict] = []
     inputs: list[dict] = []
     provider_identity = None
+    d67_detail = None
     try:
         _context(context)
         inputs.append(_context_input(project, context))
@@ -599,11 +679,11 @@ def execute(project: Path, context: Mapping) -> dict:
 
         features = context.get("features") or {}
         if features.get("package_model_required") is True:
-            detail, d67_inputs = _consume_d67(project)
+            d67_detail, d67_inputs = _consume_d67(project)
             inputs.extend(d67_inputs)
-            checks.append(_check("package_electrical_feedback",
-                                 detail["status"], detail))
-            if detail["status"] != "PASS":
+            if d67_detail["status"] != "PASS":
+                checks.append(_check("package_electrical_feedback",
+                                     d67_detail["status"], d67_detail))
                 raise D75Refusal(
                     "D75_D67_CONSUMER_FAILED",
                     "current D67 package electrical result failed",
@@ -628,6 +708,17 @@ def execute(project: Path, context: Mapping) -> dict:
             inputs.extend(current_geometry["inputs"])
             checks.append(_check("current_native_geometry_authority", "PASS",
                                  current_geometry["detail"]))
+
+        if d67_detail is not None:
+            subject_join = _join_d67_subject(
+                project, d67_detail, io, current_geometry)
+            d67_detail["subject_join"] = subject_join
+            checks.append(_check("package_electrical_feedback",
+                                 subject_join["status"], d67_detail))
+            if subject_join["status"] != "PASS":
+                raise D75Refusal(
+                    "D75_D67_SUBJECT_MISMATCH",
+                    "; ".join(subject_join["mismatches"]), failed=True)
         side = pad_side_constraint_check.check(project, def_path)
         if side.get("verdict") == "FAIL":
             checks.append(_check("pad_side_constraint_check", "FAIL", side))

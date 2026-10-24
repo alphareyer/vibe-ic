@@ -191,7 +191,7 @@ def _current_native_authority(project: Path, monkeypatch):
     netlist = folder / "chip_top.v"
     sdc = folder / "chip_top.sdc"
     spef = folder / "chip_top.nom.spef"
-    _write(netlist, "module chip_top; endmodule\n")
+    _write(netlist, "module chip_top(input a, output y); assign y = a; endmodule\n")
     _write(sdc, "set_propagated_clock [all_clocks]\n")
     _write(spef, "*SPEF neutral\n")
     tech = project / "input/pdk/tech.tlef"
@@ -245,6 +245,7 @@ def _current_native_authority(project: Path, monkeypatch):
     monkeypatch.setattr(backend, "_default_step24_current_subject",
                         lambda *_a, **_k: selected)
     return {"folder": folder, "def": current_def, "odb": current_odb,
+            "netlist": netlist,
             "tech": tech, "old_def": old_def, "selected": selected,
             "rebind": rebind}
 
@@ -461,9 +462,31 @@ def test_missing_geometry_and_missing_required_package_models_do_not_pass(tmp_pa
     assert packaged["reason"] == "D75_D67_REPORT_ABSENT_OR_INVALID"
 
 
-def test_current_produced_d67_is_consumed_by_whole_d75_component(tmp_path):
+def test_foreign_subject_d67_is_refused_then_same_subject_is_accepted(
+        tmp_path, monkeypatch):
     project = _project(tmp_path)
+    authority = _current_native_authority(project, monkeypatch)
     d67_context, requirements, reference, d67_report = _produced_d67(project)
+    result = D75.execute(project, _context(project, package_model_required=True))
+    assert result["component_status"] == "FAIL", result
+    assert result["reason"] == "D75_D67_SUBJECT_MISMATCH"
+    electrical = _by_name(result, "package_electrical_feedback")
+    assert electrical["status"] == "FAIL"
+    assert electrical["detail"]["subject_join"]["d67_top"] == "proof_alpha"
+    assert electrical["detail"]["subject_join"]["d75_io_top"] == "chip_top"
+    assert electrical["detail"]["subject_join"]["d75_native_top"] == "chip_top"
+
+    # Restore one exact subject: D67 remeasures the same adopted netlist that
+    # the current D75 native checkpoint selects. The model and bounds do not
+    # change; only their source-owned applicability identity is corrected.
+    native_netlist = D67._record(project, authority["netlist"])
+    requirements["top"] = "chip_top"
+    requirements["netlist"] = native_netlist
+    reference["reference"]["top"] = "chip_top"
+    reference["reference"]["netlist"] = native_netlist
+    D67T._bind(project, requirements, reference)
+    d67_report = D67T._native(project, d67_context)
+    assert d67_report["component_status"] == "PASS", d67_report
     result = D75.execute(project, _context(project, package_model_required=True))
     assert result["component_status"] == "PASS", result
     electrical = _by_name(result, "package_electrical_feedback")
@@ -472,6 +495,8 @@ def test_current_produced_d67_is_consumed_by_whole_d75_component(tmp_path):
     assert electrical["detail"]["metrics"]["status"] == "PASS"
     assert (electrical["detail"]["metrics"]["physical_package_qualification"]
             == "NOT_MEASURED")
+    assert electrical["detail"]["subject_join"]["status"] == "PASS"
+    assert electrical["detail"]["subject_join"]["netlist"] == native_netlist
     assert any(item["path"] == str(D75.D67_REPORT) for item in result["inputs"])
     D75.validate(project, result)
     report_path = project / D75.D67_REPORT
@@ -502,6 +527,30 @@ def test_current_produced_d67_is_consumed_by_whole_d75_component(tmp_path):
     model.write_text(original)
     restored = D75.execute(project, _context(project, package_model_required=True))
     assert restored["component_status"] == "PASS", restored
+
+
+def test_package_required_legacy_subject_does_not_invent_native_prerequisite(tmp_path):
+    project = _project(tmp_path)
+    d67_context, requirements, reference = D67T._case(project)
+    netlist_path = project / "input/legacy-chip-top.v"
+    _write(netlist_path,
+           "module chip_top(input a, output y); assign y = a; endmodule\n")
+    netlist = D67._record(project, netlist_path)
+    requirements["top"] = "chip_top"
+    requirements["netlist"] = netlist
+    reference["reference"]["top"] = "chip_top"
+    reference["reference"]["netlist"] = netlist
+    D67T._bind(project, requirements, reference)
+    report = D67T._native(project, d67_context)
+    assert report["component_status"] == "PASS", report
+
+    result = D75.execute(project, _context(project, package_model_required=True))
+    assert result["component_status"] == "PASS", result
+    subject = _by_name(
+        result, "package_electrical_feedback")["detail"]["subject_join"]
+    assert subject["status"] == "PASS"
+    assert subject["basis"] == "existing legacy applicability: IO top"
+    assert subject["d75_native_top"] is None
 
 
 def test_d67_wrong_netlist_port_and_unsupported_model_do_not_pass_d75(tmp_path):
