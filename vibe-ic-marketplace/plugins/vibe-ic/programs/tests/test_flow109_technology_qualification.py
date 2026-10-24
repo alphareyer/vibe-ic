@@ -81,6 +81,7 @@ def test_current_native_selected_views_and_cells_pass(tmp_path, monkeypatch):
     project, context, _ = _case(tmp_path, monkeypatch)
     result = d03.execute(project, context)
     assert result["component_status"] == "PASS"
+    assert result["native_started"] is True
     assert result["metric_acceptance_status"] == "UNIMPLEMENTED"
     assert result["delivery_accepted"] is False
     assert result["checks"][0]["total_cell_instances"] == 2
@@ -90,6 +91,7 @@ def test_removed_io_lib_preserves_real_cell_mismatch(tmp_path, monkeypatch):
     project, context, _ = _case(tmp_path, monkeypatch, include_io=False)
     result = d03.execute(project, context)
     assert result["component_status"] == "FAIL"
+    assert result["native_started"] is True
     assert {finding["cell_name"] for finding in result["checks"][0]["findings"]
             if finding["category"] == "CELL_NOT_IN_PDK"} == {"io_pad"}
 
@@ -99,6 +101,7 @@ def test_changed_selected_lib_is_stale_not_fail_or_pass(tmp_path, monkeypatch):
     io.write_text(io.read_text() + "/* changed */\n")
     result = d03.execute(project, context)
     assert result["component_status"] == "NOT_MEASURED"
+    assert result["native_started"] is False
     assert result["reason"] == "D03_INPUT_STALE"
 
 
@@ -108,4 +111,5 @@ def test_missing_current_native_authority_is_named(tmp_path, monkeypatch):
         d03.D03Refusal("D03_CURRENT_NATIVE_AUTHORITY_UNRESOLVED", "none")))
     result = d03.execute(project, context)
     assert result["component_status"] == "NOT_MEASURED"
+    assert result["native_started"] is False
     assert result["reason"] == "D03_CURRENT_NATIVE_AUTHORITY_UNRESOLVED"

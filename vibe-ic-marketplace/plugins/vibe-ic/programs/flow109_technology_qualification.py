@@ -141,6 +141,7 @@ def _matching_paths(project: Path, config: Mapping, receipt_input: Mapping,
 def execute(project: Path, context: Mapping) -> dict:
     project = Path(project).resolve(strict=True)
     checks, inputs = [], []
+    native_started = False
     try:
         row = context.get("resolved_row") or {}
         if (context.get("requested_step") != STEP or row.get("id") != STEP
@@ -170,6 +171,7 @@ def execute(project: Path, context: Mapping) -> dict:
         netlist_raw = state.get("nl")
         netlist = _bound(project, netlist_raw,
                          (fp.get("state_files") or {}).get(str(netlist_raw)), "state.nl")
+        native_started = True
         cells = pdk_check.extract_netlist_cells(netlist.read_text(errors="replace"), str(netlist))
         pdk_cells = set()
         for lib in libs:
@@ -197,7 +199,7 @@ def execute(project: Path, context: Mapping) -> dict:
         "context_sha256": context.get("context_sha256"),
         "component_status": status, "reason": reason,
         "checks": checks, "inputs": inputs,
-        "native_started": bool(checks),
+        "native_started": native_started,
         "metric_acceptance_status": "UNIMPLEMENTED",
         "flow109_acceptance": "NOT_MEASURED",
         "whole_flow_acceptance": "NOT_MEASURED",
