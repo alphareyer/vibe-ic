@@ -23,6 +23,7 @@ from pathlib import Path
 import re
 import sys
 import uuid
+from typing import Iterable
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -31,6 +32,7 @@ if str(HERE) not in sys.path:
 from _atomic_artefact import write_json
 from flow109_admission import AdmissionRefusal, require_launch_admission
 import librelane_contract as contract
+import _pad_ring as pad_ring
 
 SCHEMA = "vibeic.flow109.route-check.v1"
 EDA_IMAGE = ("ghcr.io/vibeic/vibeic-eda@sha256:"
@@ -42,10 +44,22 @@ METRICS = {"route_short_overlap_errors": "route__drc_errors",
            "disconnected_required_pins": "design__critical_disconnected_pin__count"}
 CAPABILITY_LIMITS = {
     "route_short_overlap_errors": "LibreLane exposes total routed DRC; zero is conservative",
-    "disconnected_required_pins": "LibreLane critical disconnected pins only",
+    "disconnected_required_pins": (
+        "LibreLane critical disconnected pins; an output disabled by the "
+        "current netlist's Liberty-proven constant control may be classified "
+        "inactive only when the native table, LEF, Liberty and pad-producer "
+        "record all agree"),
     "wire_length": "PDK threshold checker; not foundry signoff DRC",
 }
 _HEX = re.compile(r"[0-9a-f]{64}")
+_VERILOG_KEYWORDS = {"module", "endmodule", "input", "output", "inout",
+                     "wire", "reg", "assign", "supply0", "supply1", "tri"}
+_INSTANCE = re.compile(
+    r"^[ \t]*(?P<cell>[A-Za-z_][\w$]*)[ \t]+"
+    r"(?P<inst>\\\S+|[A-Za-z_][\w$\[\]]*)\s*"
+    r"\(\s*(?P<body>(?:\.[A-Za-z_][\w$]*\s*\([^()]*\)\s*,?\s*)+)\)\s*;",
+    re.M)
+_CONNECTION = re.compile(r"\.([A-Za-z_][\w$]*)\s*\(\s*([^()]*?)\s*\)")
 
 
 def _sha(path: Path) -> str:
@@ -100,7 +114,7 @@ def _ref(project: Path, path: Path) -> dict[str, str]:
 
 def operation_sources() -> dict[str, str]:
     paths = [Path(__file__), HERE / "flow109.py", HERE / "flow109_admission.py",
-             HERE / "librelane_contract.py"]
+             HERE / "librelane_contract.py", HERE / "_pad_ring.py"]
     result = {str(path.relative_to(HERE.parent)): _sha(path) for path in paths}
     # Bind the installed implementations that interpret the metrics and write
     # the disconnected/wire reports, not merely the Python executable.
@@ -109,6 +123,255 @@ def operation_sources() -> dict[str, str]:
     for key, cls in (("checker", TrDRC), ("odb", ReportDisconnectedPins)):
         native = Path(inspect.getsourcefile(cls))
         result[f"native/librelane/steps/{key}.py"] = _sha(native)
+    return result
+
+
+def _identifier(value: str) -> str:
+    value = (value or "").strip()
+    return value[1:].strip() if value.startswith("\\") else value
+
+
+def _netlist_instances(text: str) -> dict[str, tuple[str, dict[str, str]]]:
+    """Named structural instances only; ambiguity is refused by the caller."""
+    result = {}
+    for match in _INSTANCE.finditer(text or ""):
+        master = match.group("cell")
+        if master in _VERILOG_KEYWORDS:
+            continue
+        instance = _identifier(match.group("inst"))
+        pins = {_identifier(pin): _identifier(net)
+                for pin, net in _CONNECTION.findall(match.group("body"))}
+        if instance in result:
+            raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                                   f"duplicate netlist instance {instance}")
+        result[instance] = (master, pins)
+    return result
+
+
+def _config_paths(config: dict, key: str) -> list[str]:
+    raw = config.get(key)
+    values: Iterable[object]
+    if isinstance(raw, dict):
+        values = [item for group in raw.values()
+                  for item in (group if isinstance(group, list) else [group])]
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        values = []
+    return sorted(set(str(item) for item in values if isinstance(item, str) and item))
+
+
+def _pdk_file(pdk_root: Path, raw: str, pdk: str) -> Path:
+    """Map a resolved config path back into the admitted PDK root."""
+    parts = Path(raw).parts
+    try:
+        suffix = parts[parts.index(pdk):]
+    except ValueError as exc:
+        raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                               f"PDK path does not name {pdk}: {raw}") from exc
+    lexical = pdk_root.joinpath(*suffix)
+    current = lexical
+    while True:
+        if current.is_symlink():
+            raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                                   f"symlinked PDK authority: {lexical}")
+        if current == pdk_root or current.parent == current:
+            break
+        current = current.parent
+    path = lexical.resolve()
+    if not path.is_relative_to(pdk_root) or not path.is_file():
+        raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                               f"missing PDK authority: {path}")
+    return path
+
+
+def _merge_pin_views(paths: list[Path], parser, label: str) -> tuple[dict, dict[str, str]]:
+    """Every corner/view must agree; a first-file-wins merge is not authority."""
+    merged = {}
+    hashes = {}
+    for path in paths:
+        hashes[str(path)] = _sha(path)
+        for master, pins in parser(path.read_text(errors="replace")).items():
+            if master in merged and merged[master] != pins:
+                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                                       f"{label} views disagree for {master}")
+            merged[master] = pins
+    return merged, hashes
+
+
+def _disconnected_endpoints(table: Path) -> list[tuple[str, str]]:
+    endpoints = []
+    for line in table.read_text(errors="replace").splitlines():
+        if not line.startswith("│"):
+            continue
+        columns = [part.strip() for part in line.split("│")[1:-1]]
+        if len(columns) != 5 or not columns[4]:
+            continue
+        endpoint = columns[4]
+        if "/" not in endpoint:
+            raise AdmissionRefusal("D42_DISCONNECTED_REPORT_INVALID", endpoint)
+        instance, pin = endpoint.rsplit("/", 1)
+        endpoints.append((instance, pin))
+    if len(endpoints) != len(set(endpoints)):
+        raise AdmissionRefusal("D42_DISCONNECTED_REPORT_INVALID",
+                               "duplicate disconnected endpoint")
+    return endpoints
+
+
+def _constant_driver(net: str, instances: dict, liberty: dict) -> dict | None:
+    drivers = []
+    for instance, (master, pins) in instances.items():
+        model = liberty.get(master, {})
+        for pin, connected in pins.items():
+            rec = model.get(pin, {})
+            function = str(rec.get("function") or "").strip()
+            if connected == net and rec.get("direction") == "output" \
+                    and function in ("0", "1"):
+                drivers.append({"instance": instance, "master": master,
+                                "pin": pin, "level": int(function)})
+    return drivers[0] if len(drivers) == 1 else None
+
+
+def _producer_snapshot(project: Path, record_path: Path) -> dict:
+    """Bind the live producer report to its newest immutable step capture."""
+    captures = sorted((project / "steps/phase3/stage3").glob(
+        "155ic_pad_ring_chip_ic_path_only_*/outputs.json"), reverse=True)
+    if not captures:
+        raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                               "IO-pad producer capture is absent")
+    manifest_path = _inside(project, str(captures[0]), "IO-pad producer capture")
+    manifest = _read(manifest_path)
+    rows = [row for row in manifest.get("outputs", []) if isinstance(row, dict)
+            and row.get("rel") == "reports/phase3/io_pad_chip_top.json"]
+    if len(rows) != 1 or not _HEX.fullmatch(str(rows[0].get("sha256") or "")):
+        raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                               "newest IO-pad capture does not bind the producer report")
+    snapshot = _inside(project, str(manifest_path.parent / str(rows[0].get("snapshot") or "")),
+                       "IO-pad producer snapshot")
+    digest = _sha(record_path)
+    if rows[0]["sha256"] != digest or _sha(snapshot) != digest:
+        raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                               "live IO-pad report differs from newest captured producer output")
+    return {"manifest": _ref(project, manifest_path),
+            "snapshot": _ref(project, snapshot)}
+
+
+def _qualify_inactive_outputs(project: Path, table: Path, prepared: dict,
+                              native_disconnected: int,
+                              native_critical: int) -> dict:
+    """Prove that every native disconnect is a disabled receiver output.
+
+    This does not alter the native metric.  It produces a second, explicitly
+    qualified requirement count, and only when all current authorities agree.
+    Mixed or incomplete populations retain the full native critical count.
+    """
+    result = {"status": "UNQUALIFIED", "native_disconnected": native_disconnected,
+              "native_critical": native_critical, "qualified": [],
+              "required_disconnected_pins": native_critical}
+    if native_critical == 0:
+        result.update(status="NOT_NEEDED", required_disconnected_pins=0)
+        return result
+    try:
+        endpoints = _disconnected_endpoints(table)
+        if native_disconnected != native_critical or len(endpoints) != native_disconnected:
+            raise AdmissionRefusal(
+                "D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                "qualification requires the native full and critical populations to match")
+        record_path = _inside(project, "reports/phase3/io_pad_chip_top.json",
+                              "current IO-pad producer record")
+        record = _read(record_path)
+        producer_capture = _producer_snapshot(project, record_path)
+        generated = _inside(project, record.get("chip_top_verilog"),
+                            "current IO-pad producer output")
+        if record.get("program") != "io_pad_chip_top_gen" or record.get("verdict") != "WROTE":
+            raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                                   "IO-pad producer record is not WROTE")
+        pad_instances = record.get("pad_instances")
+        aux = record.get("aux_pin_signal_connections")
+        if not isinstance(pad_instances, dict) or not isinstance(aux, list):
+            raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                                   "IO-pad producer authority is incomplete")
+        aux_by_endpoint = {(item.get("instance"), item.get("pin")): item
+                           for item in aux if isinstance(item, dict)}
+        instances = _netlist_instances(prepared["views"]["nl"].read_text(errors="replace"))
+        pdk = str(prepared["config"].get("PDK") or "")
+        pdk_root = prepared["pdk_root"]
+        pad_lib_paths = [_pdk_file(pdk_root, raw, pdk)
+                         for raw in _config_paths(prepared["config"], "PAD_LIBS")]
+        cell_lib_paths = [_pdk_file(pdk_root, raw, pdk)
+                          for raw in _config_paths(prepared["config"], "CELL_LIBS")]
+        lef_paths = [_pdk_file(pdk_root, raw, pdk)
+                     for raw in _config_paths(prepared["config"], "PAD_LEFS")]
+        if not pad_lib_paths or not cell_lib_paths or not lef_paths:
+            raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                                   "PAD_LIBS, CELL_LIBS and PAD_LEFS are required")
+        pad_lib, pad_hashes = _merge_pin_views(
+            pad_lib_paths, pad_ring.parse_liberty_pad_cells, "pad Liberty")
+        cell_lib, cell_hashes = _merge_pin_views(
+            cell_lib_paths, pad_ring.parse_liberty_pad_cells, "cell Liberty")
+        lef, lef_hashes = _merge_pin_views(
+            lef_paths, pad_ring.parse_lef_pin_roles, "pad LEF")
+        qualified = []
+        for instance, pin in endpoints:
+            if instance not in instances or instance not in pad_instances:
+                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                                       f"unowned disconnected endpoint {instance}/{pin}")
+            master, pins = instances[instance]
+            producer = pad_instances[instance]
+            if (producer.get("master") != master or producer.get("direction") != "output"
+                    or pin in pins):
+                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                                       f"current netlist/producer mismatch at {instance}/{pin}")
+            lib_pin = pad_lib.get(master, {}).get(pin, {})
+            if lib_pin.get("direction") != "output" or not lib_pin.get("function"):
+                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                                       f"Liberty does not define output {master}/{pin}")
+            if lef.get(master, {}).get(pin) != ("OUTPUT", "SIGNAL"):
+                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                                       f"LEF does not define OUTPUT SIGNAL {master}/{pin}")
+            literals = pad_ring._product_literals(lib_pin.get("function"))
+            if not literals:
+                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                                       f"unreadable output function for {master}/{pin}")
+            disabling = []
+            for negated, control in literals:
+                net = pins.get(control)
+                if not net:
+                    continue
+                driver = _constant_driver(net, instances, cell_lib)
+                if driver is None:
+                    continue
+                literal_value = ((not bool(driver["level"])) if negated
+                                 else bool(driver["level"]))
+                authority = aux_by_endpoint.get((instance, control), {})
+                if (literal_value is False and authority.get("net") == net
+                        and authority.get("level") == driver["level"]
+                        and authority.get("tie_instance") == driver["instance"]
+                        and authority.get("tie_master") == driver["master"]
+                        and authority.get("tie_pin") == driver["pin"]):
+                    disabling.append({"control_pin": control, "net": net,
+                                      "negated": negated, "driver": driver})
+            if not disabling:
+                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                                       f"no current constant disables {instance}/{pin}")
+            qualified.append({"endpoint": f"{instance}/{pin}", "master": master,
+                              "function": lib_pin["function"],
+                              "disabling_controls": disabling})
+        result.update(
+            status="QUALIFIED_INACTIVE_OUTPUTS", qualified=qualified,
+            required_disconnected_pins=0,
+            authority={
+                "producer_record": _ref(project, record_path),
+                "producer_capture": producer_capture,
+                "producer_output": _ref(project, generated),
+                "adopted_netlist": _ref(project, prepared["views"]["nl"]),
+                "adopted_odb": _ref(project, prepared["views"]["odb"]),
+                "pad_liberty_sha256": pad_hashes,
+                "cell_liberty_sha256": cell_hashes,
+                "pad_lef_sha256": lef_hashes,
+                "native_table": _ref(project, table)})
+    except AdmissionRefusal as exc:
+        result.update(reason=exc.code, detail=str(exc))
     return result
 
 
@@ -240,6 +503,19 @@ def _consume(project: Path, folders: list[Path], configs: dict[str, Path],
         "route_short_overlap_errors"]), "route__drc_errors")
     disconnected = _count(states["Checker.DisconnectedPins"].get("metrics", {}).get(METRICS[
         "disconnected_required_pins"]), "design__critical_disconnected_pin__count")
+    reported_disconnected = _count(states["Odb.ReportDisconnectedPins"].get(
+        "metrics", {}).get("design__disconnected_pin__count"),
+        "design__disconnected_pin__count")
+    reported_critical = _count(states["Odb.ReportDisconnectedPins"].get(
+        "metrics", {}).get(METRICS["disconnected_required_pins"]),
+        "reporter design__critical_disconnected_pin__count")
+    if reported_critical != disconnected:
+        raise AdmissionRefusal("D42_NATIVE_METRIC_DISAGREEMENT",
+                               f"reporter={reported_critical}, checker={disconnected}")
+    qualification = _qualify_inactive_outputs(
+        project, table, prepared, reported_disconnected, disconnected)
+    required_disconnected = _count(
+        qualification["required_disconnected_pins"], "qualified disconnected count")
     wire_max = _decimal(states["Checker.WireLength"].get("metrics", {}).get(
         "route__wirelength__max"), "route__wirelength__max")
     wire_config = _read(configs["Checker.WireLength"])
@@ -258,13 +534,16 @@ def _consume(project: Path, folders: list[Path], configs: dict[str, Path],
         wire_check = {"status": "FAIL" if wire_max > threshold else "PASS",
                       "threshold_um": str(threshold)}
     measurements = {"route_short_overlap_errors": route,
-                    "disconnected_required_pins": disconnected,
+                    "native_disconnected_pins": reported_disconnected,
+                    "native_critical_disconnected_pins": disconnected,
+                    "qualified_inactive_output_pins": len(qualification["qualified"]),
+                    "disconnected_required_pins": required_disconnected,
                     "wire_length_max_um": str(wire_max),
                     "wire_length_threshold_um": str(threshold) if threshold is not None else None}
     failed = []
     if route:
         failed.append("route_check.route_short_overlap_errors")
-    if disconnected:
+    if required_disconnected:
         failed.append("route_check.disconnected_required_pins")
     if threshold is not None and wire_max > threshold:
         failed.append("route_check.wire_length_threshold")
@@ -279,6 +558,7 @@ def _consume(project: Path, folders: list[Path], configs: dict[str, Path],
                 "checker": {"steps": STEPS, "metric_keys": METRICS},
                 "tool_execution": outputs,
                 "consumed_inputs": prepared["inputs"],
+                "disconnected_pin_qualification": qualification,
                 "requirements": {"route_check.disconnected_required_pins": 0,
                                  "route_check.route_short_overlap_errors": 0},
                 "configuration": {step: _sha(path) for step, path in configs.items()},
@@ -294,16 +574,30 @@ def _retained_native(project: Path, prepared: dict) -> tuple[list[Path], dict[st
     root = project / "reports/flow109/D42"
     for receipt_path in sorted(root.glob("*/receipt.json"), reverse=True):
         prior = _read(receipt_path)
-        if (prior.get("schema") != SCHEMA or prior.get("reason") != "D42_WIRE_THRESHOLD_UNSTATED"
+        if (prior.get("schema") != SCHEMA
+                or prior.get("reason") not in ("D42_WIRE_THRESHOLD_UNSTATED",
+                                               "D42_NATIVE_CHECK_FAILED")
                 or prior.get("native_started") is not True or prior.get("inputs") != prepared["inputs"]
                 or prior.get("image") != prepared["image"]
                 or prior.get("adopted_candidate") != prepared["candidate"]):
             continue
-        lane = project / "phase3/librelane" / ("D42-route-check-" + receipt_path.parent.name[:12])
-        folders = [lane / f"{index:02d}-{step.lower().replace('.', '-')}"
-                   for index, step in enumerate(STEPS, 1)]
+        recorded = prior.get("outputs")
+        if isinstance(recorded, dict) and all(
+                isinstance(recorded.get(step), dict)
+                and recorded[step].get("folder") for step in STEPS):
+            folders = [project / recorded[step]["folder"] for step in STEPS]
+        else:
+            lane = project / "phase3/librelane" / (
+                "D42-route-check-" + receipt_path.parent.name[:12])
+            folders = [lane / f"{index:02d}-{step.lower().replace('.', '-')}"
+                       for index, step in enumerate(STEPS, 1)]
         for step, folder in zip(STEPS, folders):
-            contract.validate_step_receipt(folder, step)
+            receipt = contract.validate_step_receipt(folder, step)
+            recorded_step = recorded.get(step, {}) if isinstance(recorded, dict) else {}
+            if recorded_step and (recorded_step.get("receipt_sha256") != _sha(
+                    folder / "vibeic_receipt.json")
+                    or recorded_step.get("state_sha256") != _sha(folder / "state_out.json")):
+                raise AdmissionRefusal("D42_RETAINED_NATIVE_STALE", str(folder))
         fingerprint = _read(folders[0] / "input_fingerprint.json")
         actual = {_project_path(project, raw, "retained D42 input"): sha
                   for raw, sha in fingerprint.get("state_files", {}).items()}
