@@ -247,41 +247,15 @@ def _replace_with_owning_producer_receipts(project, monkeypatch, corners=('tt',)
     d44_receipt = final_gls._record(project, project / d44['receipt']['path'])
     baseline = final_gls._record(project, project / final_lec.BASELINE)
 
-    geometry = _put(project, 'inputs/owner-filled.odb', 'owner filled ODB control\n')
-    routed_def = _put(project, 'inputs/owner-filled.def', 'VERSION 5.8 ; DESIGN final_gls_dut ; END DESIGN\n')
-    sdc = manifest['d70_receipt']
-    old_d70 = json.loads((project / sdc['path']).read_text())
+    from test_flow109_d69_fill_visibility import _owner_fixture
+    old_d70 = json.loads((project / manifest['d70_receipt']['path']).read_text())
     sdc = old_d70['sdc']
-    d62_doc = {'outputs': {'filled.def': routed_def, 'filled.odb': geometry}}
-    d62 = _put(project, 'reports/flow109/D62/owner-component.json', d62_doc)
-    bridge = _put(project, 'reports/flow109/D64/owner-bridge.json', {'scope': 'owner control'})
-    monkeypatch.setattr(final_extract, 'require_launch_admission', lambda *args, **kwargs: None)
-    monkeypatch.setattr(final_extract.density, 'validate_filled_odb',
-                        lambda *_: {'odb': geometry})
-    monkeypatch.setattr(final_extract.files, 'validate_bridge',
-                        lambda *_: {'d62_receipt': d62, 'odb': geometry})
-    spef_paths = {scene: project / f'inputs/owner-{scene}.spef'
-                  for scene in ('nom', 'min', 'max')}
-    for path in spef_paths.values():
-        path.write_text('*SPEF "IEEE 1481-1998"\n*DESIGN "final_gls_dut"\n')
-    rcx = project / 'reports/owner-rcx'; rcx.mkdir(parents=True)
-    (rcx / 'state_in.json').write_text('{}')
-    (rcx / 'state_out.json').write_text(json.dumps(
-        {'spef': {f'{scene}_*': str(path.resolve()) for scene, path in spef_paths.items()}}))
-    (rcx / 'vibeic_receipt.json').write_text('{}')
-    monkeypatch.setattr(final_extract.signoff, 'run', lambda *args, **kwargs:
-        {'rcx': rcx, 'spef': {f'{scene}_*': path for scene, path in spef_paths.items()}})
-    monkeypatch.setattr(final_extract.signoff, 'bind_rcx_spefs', lambda *args, **kwargs: {'bound': True})
-    spef_facts = {'has_header': True, 'has_design': True, 'd_nets': 1, 'r_nets': 0,
-                  'negative_caps': [], 'negative_net_totals': []}
-    monkeypatch.setattr(final_extract, 'scan_spef', lambda _path: spef_facts)
-    _put(project, final_extract.INPUT, {'schema': final_extract.SCHEMA,
-        'd62_receipt': d62, 'stream_bridge': bridge,
-        'adopted_views': {'netlist': adopted, 'sdc': sdc},
-        'librelane': {'image': 'owner-control', 'pdk_root': str(pdk_root), 'pdk': 'neutral'}})
+    _owner_fixture(project, monkeypatch, top='final_gls_dut',
+                   adopted_views={'netlist': adopted, 'sdc': sdc})
     d69 = final_extract.execute(project, {'context_sha256': 'owner-d69'})
     assert d69['component_status'] == 'PASS', d69
     d69_receipt = d69['receipt']
+    spef_paths = {corner: project / ref['path'] for corner, ref in d69['final_spefs'].items()}
 
     sdf_paths = {}
     for corner in corners:

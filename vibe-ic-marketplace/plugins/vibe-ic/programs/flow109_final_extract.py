@@ -1,10 +1,13 @@
-"""D69 Default native component: final filled ODB -> OpenROAD.RCX -> SPEF consumer."""
+"""D69 native owner: final GDS/DEF -> released floating-fill Magic SPEF tool."""
 from __future__ import annotations
 
 import hashlib
 import json
 from pathlib import Path
 import uuid
+import shutil
+import subprocess
+import time
 
 import sys
 
@@ -16,8 +19,7 @@ from _atomic_artefact import write_json
 from flow109_admission import AdmissionRefusal, require_launch_admission
 import flow109_density_fill as density
 import librelane_fill_stream as files
-import librelane_signoff as signoff
-from librelane_contract import Refusal, _load
+from librelane_contract import Refusal
 from spef_extraction_check import scan_spef
 
 SCHEMA = 'vibeic.flow109.final-extract.v1'
@@ -91,43 +93,63 @@ def _native_refusal_status(code):
 
 
 def _fill_extraction_scope(d62):
-    """Derive the selected RCX scope; no caller field can upgrade it.
-
-    OpenROAD density_fill stores neutral metal as OpenDB dbFill objects.  The
-    selected OpenRCX implementation extracts routed-net wire/via shapes; an ODB
-    filename shared with D62 is therefore not proof that those dbFill objects
-    affected the produced parasitics.
-    """
+    """Current-geometry correlation is separate from tool availability."""
     measurements = d62.get('measurements') or {}
     count = measurements.get('fill_count_after')
-    if not isinstance(count, int):
-        reason = 'D69_NATIVE_FILL_CENSUS_ABSENT'
-        count = None
-    elif count <= 0:
-        reason = 'D69_FINAL_ODB_HAS_NO_NATIVE_DENSITY_FILL'
-    else:
-        reason = 'D69_SELECTED_RCX_DBFILL_RESPONSE_NOT_PROVEN'
-    return {'status': 'NOT_MEASURED', 'reason': reason,
-            'native_fill_count': count,
-            'basis': 'source-owned D62 census and selected OpenRCX data model'}
+    return {'status': 'NOT_MEASURED', 'reason': 'D69_CURRENT_FINAL_FILL_CORRELATION_NOT_MEASURED',
+            'native_fill_count': count if type(count) is int else None,
+            'basis': 'source-owned D62 census; current final-GDS correlation remains separate'}
 
 
 def _component_scope(record, d62):
     fill_scope = _fill_extraction_scope(d62)
-    if (record.get('reason') != 'D69_ROUTED_ODB_RCX_MEASURED'
-            or record.get('component_scope') != 'engineering_routed_odb_parasitics'
+    if (record.get('reason') != 'D69_NATIVE_FINAL_FILL_SPEF_MEASURED'
+            or record.get('component_scope') != 'native_final_gds_floating_fill_component'
             or record.get('fill_sensitive_parasitics') != fill_scope):
         raise AdmissionRefusal('D69_COMPONENT_SCOPE_CHANGED',
-                               'routed-ODB component cannot claim fill-sensitive parasitics')
+                               'native component cannot invent current-geometry correlation')
     return fill_scope
 
 
 def operation_sources():
-    paths = (Path(__file__), Path(signoff.__file__), Path(files.__file__),
+    paths = (Path(__file__), Path(files.__file__),
              Path(density.__file__), Path(__file__).with_name('spef_extraction_check.py'),
              Path(__file__).with_name('librelane_fill_dfm.py'),
              Path(__file__).with_name('_physical_current.py'))
     return {str(path.resolve()): _sha(path) for path in paths}
+
+
+def _native_outputs(project, receipt_ref, gds_ref, def_ref):
+    """Consume the released tool's own receipt, not a replacement extractor."""
+    native = _read(_bound(project, receipt_ref))
+    if (native.get('status') != 'PASS'
+            or native.get('geometry') != {'path': str(_bound(project, gds_ref)), 'sha256': gds_ref['sha256']}
+            or native.get('routed_def') != {'path': str(_bound(project, def_ref)), 'sha256': def_ref['sha256']}
+            or native.get('top') != files.fill_records(_bound(project, def_ref))['top']
+            or native.get('declared_corner_set') != ['min', 'nom', 'max']
+            or set(native.get('corners') or {}) != {'min', 'nom', 'max'}
+            or native.get('floating_boundary_condition') != 'zero-net-charge'
+            or native.get('grounded_fill_approximation') is not False
+            or type(native.get('keep_net_count')) is not int or native['keep_net_count'] <= 0):
+        raise AdmissionRefusal('D69_NATIVE_RECEIPT_MISMATCH', str(receipt_ref))
+    _bound(project, native.get('fill_aware_tech'))
+    spefs, scans = {}, {}
+    for corner, reduction in native['corners'].items():
+        if (reduction.get('status') != 'PASS'
+                or reduction.get('method') != 'exact-capacitance-matrix-schur-complement'
+                or reduction.get('floating_boundary_condition') != 'zero-net-charge'
+                or reduction.get('grounded_fill_approximation') is not False
+                or reduction.get('retained_net_count') != native['keep_net_count']
+                or reduction.get('keep_nets_sha256') != native.get('keep_nets_sha256')):
+            raise AdmissionRefusal('D69_NATIVE_CORNER_MISMATCH', corner)
+        for key in ('raw_spef', 'keep_nets', 'output_spef'):
+            _bound(project, {'path': reduction.get(key), 'sha256': reduction.get(key + '_sha256')})
+        path = Path(reduction['output_spef']); facts = scan_spef(path)
+        if (not facts['has_header'] or not facts['has_design'] or not (facts['d_nets'] or facts['r_nets'])
+                or facts['negative_caps'] or facts['negative_net_totals']):
+            raise AdmissionRefusal('D69_SPEF_CONSUMER_FAILED', corner, status='FAIL')
+        spefs[corner], scans[corner] = files._record(project, path), facts
+    return spefs, scans
 
 
 def execute(project, context):
@@ -154,6 +176,7 @@ def execute(project, context):
             odb = _bound(project, bridge['odb'])
             d62_path = _bound(project, manifest['retained_default_fill'])
             routed_def = _bound(project, retained_geometry['filled_def'])
+            final_gds = _bound(project, retained_geometry['final_gds'])
         else:
             d62 = density.validate_filled_odb(project, manifest.get('d62_receipt'))
             bridge = files.validate_bridge(project, manifest.get('stream_bridge'))
@@ -162,40 +185,46 @@ def execute(project, context):
             odb, d62_path = _bound(project, bridge['odb']), _bound(project, manifest['d62_receipt'])
             d62doc = _read(d62_path)
             routed_def = _bound(project, d62doc['outputs']['filled.def'])
+            final_gds = _bound(project, bridge.get('gds'))
         fill_scope = _fill_extraction_scope(d62)
         result['fill_sensitive_parasitics'] = fill_scope
-        native = manifest.get('librelane') or {}
-        if set(native) != {'image', 'pdk_root', 'pdk'}:
-            raise AdmissionRefusal('D69_NATIVE_CONFIGURATION_ABSENT', 'image/pdk_root/pdk required')
         views = manifest.get('adopted_views') or {}
         if set(views) != {'netlist', 'sdc'}:
             raise AdmissionRefusal('D69_ADOPTED_VIEWS_ABSENT', 'netlist and SDC required')
         netlist = _bound(project, views['netlist']); sdc = _bound(project, views['sdc'])
-        basis = {str(p): _sha(p) for p in (odb, routed_def, netlist, sdc, d62_path)}
+        basis = {str(p): _sha(p) for p in (project / INPUT, odb, routed_def, final_gds, netlist, sdc, d62_path)}
         sources = operation_sources()
+        binary = shutil.which('vibeic-final-fill-spef')
+        if binary is None:
+            raise AdmissionRefusal('D69_NATIVE_TOOL_ABSENT', 'released vibeic-final-fill-spef required')
+        tool = files._record(project, Path(binary))
+        argv = [binary, 'extract', '--gds', str(final_gds), '--def', str(routed_def),
+                '--top', files.fill_records(routed_def)['top'], '--output-dir', str(attempt / 'native')]
         result['native_started'] = True
-        run = signoff.run(project, native['image'], Path(native['pdk_root']), native['pdk'],
-                          routed_def=routed_def, routed_odb=odb, netlist=netlist, sdc=sdc,
-                          extract=True, time=False, lane='flow109-d69')
-        binding = signoff.bind_rcx_spefs(Path(run['rcx']), Path(run['rcx']) / 'state_in.json')
-        scans = {corner: scan_spef(Path(path)) for corner, path in run['spef'].items()}
-        bad = {c: f for c, f in scans.items() if not f['has_header'] or not f['has_design']
-               or not (f['d_nets'] or f['r_nets']) or f['negative_caps'] or f['negative_net_totals']}
-        if bad:
-            raise AdmissionRefusal('D69_SPEF_CONSUMER_FAILED', str(bad), status='FAIL')
-        final_spefs = {c: files._record(project, Path(p)) for c, p in run['spef'].items()}
-        result.update(component_status='PASS', reason='D69_ROUTED_ODB_RCX_MEASURED',
+        started = time.monotonic()
+        completed = subprocess.run(argv, cwd=project, capture_output=True, text=True)
+        log = attempt / 'native.log'; log.write_text(completed.stdout + completed.stderr)
+        result['native_execution'] = {'argv': argv, 'returncode': completed.returncode,
+            'elapsed_seconds': time.monotonic() - started, 'log': files._record(project, log), 'tool': tool}
+        if completed.returncode != 0:
+            raise AdmissionRefusal('D69_NATIVE_EXTRACT_FAILED', str(log), status='FAIL')
+        if sources != operation_sources() or any(_sha(Path(p)) != digest for p, digest in basis.items()):
+            raise AdmissionRefusal('D69_INPUT_CHANGED', 'source or geometry changed during extraction')
+        _bound(project, tool)
+        native_ref = files._record(project, attempt / 'native/FINAL_FILL_EXTRACTION.json')
+        gds_ref, def_ref = files._record(project, final_gds), files._record(project, routed_def)
+        final_spefs, scans = _native_outputs(project, native_ref, gds_ref, def_ref)
+        result.update(component_status='PASS', reason='D69_NATIVE_FINAL_FILL_SPEF_MEASURED',
                       producer='flow109_final_extract',
-                      component_scope='engineering_routed_odb_parasitics',
+                      component_scope='native_final_gds_floating_fill_component',
                       d62_receipt=manifest.get('d62_receipt'), stream_bridge=manifest.get('stream_bridge'),
                       retained_geometry=retained_geometry,
                       adopted_views=views, inputs=basis,
                       operation_sources=sources,
                       final_geometry=bridge['odb'],
-                      rcx_state=files._record(project, Path(run['rcx']) / 'state_out.json'),
-                      rcx_receipt=files._record(project, Path(run['rcx']) / 'vibeic_receipt.json'),
+                      final_gds=gds_ref, final_def=def_ref, native_receipt=native_ref,
                       spefs=final_spefs, final_spefs=final_spefs,
-                      spef_consumer=scans, rcx_binding=binding, execution_context=context)
+                      spef_consumer=scans, execution_context=context)
     except AdmissionRefusal as exc:
         result.update(component_status=exc.status, reason=exc.code, detail=str(exc))
     except Refusal as exc:
@@ -211,7 +240,7 @@ def execute(project, context):
 def validate_final_parasitics(project, receipt_ref):
     project = Path(project).resolve(); record = _read(_bound(project, receipt_ref))
     if record.get('schema') != SCHEMA or record.get('component_status') != 'PASS':
-        raise AdmissionRefusal('D69_COMPONENT_NOT_ACCEPTED', 'current native RCX receipt required')
+        raise AdmissionRefusal('D69_COMPONENT_NOT_ACCEPTED', 'current final-fill native receipt required')
     require_launch_admission(project, 'flow109.D69', {'flow109_context': record.get('execution_context')})
     if record.get('operation_sources') != operation_sources():
         raise AdmissionRefusal('D69_OPERATION_SOURCE_CHANGED', 'adapter or retained consumer changed')
@@ -223,30 +252,31 @@ def validate_final_parasitics(project, receipt_ref):
         d62 = {}
         bridge = {'odb': geometry['odb']}
         filled_def = geometry['filled_def']
+        final_gds = geometry['final_gds']
     else:
         d62 = density.validate_filled_odb(project, record['d62_receipt'])
         bridge = files.validate_bridge(project, record['stream_bridge'])
         if bridge['d62_receipt'] != record['d62_receipt'] or bridge['odb'] != d62['odb']:
             raise AdmissionRefusal('D69_FINAL_GEOMETRY_MISMATCH', 'stream-out and D62 ODB differ')
         filled_def = _read(_bound(project, record['d62_receipt']))['outputs']['filled.def']
+        final_gds = bridge['gds']
     if (record.get('producer') != 'flow109_final_extract'
             or record.get('final_geometry') != bridge['odb']
+            or record.get('final_gds') != final_gds or record.get('final_def') != filled_def
             or record.get('final_spefs') != record.get('spefs')):
         raise AdmissionRefusal('D69_FINAL_OUTPUT_BINDING_MISMATCH', 'final ODB/SPEF aliases drifted')
     fill_scope = _component_scope(record, d62)
     for path, sha in record['inputs'].items():
         if not Path(path).is_file() or _sha(path) != sha:
             raise AdmissionRefusal('D69_INPUT_CHANGED', path)
-    state = _read(_bound(project, record['rcx_state']))
-    for corner, ref in record['spefs'].items():
-        path = _bound(project, ref); facts = scan_spef(path)
-        if facts != record['spef_consumer'][corner] or str(path) != state.get('spef', {}).get(corner):
-            raise AdmissionRefusal('D69_SPEF_CHANGED', corner)
-    signoff.bind_rcx_spefs(_bound(project, record['rcx_state']).parent,
-                           _bound(project, record['rcx_state']).parent / 'state_in.json')
+    _bound(project, record['native_execution']['tool'])
+    spefs, scans = _native_outputs(project, record['native_receipt'], final_gds, filled_def)
+    if spefs != record['spefs'] or scans != record['spef_consumer']:
+        raise AdmissionRefusal('D69_SPEF_CHANGED', 'native corner outputs changed')
     return {'odb': bridge['odb'], 'filled_def': filled_def, 'd62_receipt': record['d62_receipt'],
             'adopted_views': record['adopted_views'],
             'spefs': record['spefs'], 'final_geometry': record['final_geometry'],
             'final_spefs': record['final_spefs'], 'parasitic_receipt': receipt_ref,
+            'final_gds': final_gds,
             'fill_sensitive_parasitics': fill_scope,
             'component_parasitics_current': True, 'flow109_acceptance': 'NOT_MEASURED'}

@@ -15072,10 +15072,10 @@
         {
           "id": "default",
           "select_when": "otherwise",
-          "provider": "librelane",
-          "tools": "OpenROAD.RCX",
+          "provider": "other",
+          "tools": "vibeic-final-fill-spef (Magic floating-fill final-GDS extraction)",
           "native_steps": [
-            "OpenROAD.RCX"
+            "vibeic-final-fill-spef extract"
           ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
@@ -15084,14 +15084,14 @@
             "native_step_id": "flow109.D69",
             "producer": "flow109_final_extract.py:execute",
             "consumer": "flow109_final_extract.py:validate_final_parasitics",
-            "engine_families": ["openroad"],
-            "engine_executables": {"openroad": "openroad"},
-            "engine_steps": {"openroad": ["OpenROAD.RCX"]},
+            "engine_families": ["magic"],
+            "engine_executables": {"magic": "magic"},
+            "engine_steps": {"magic": ["vibeic-final-fill-spef extract"]},
             "admission_policy": "source_owned_existing_native",
             "acceptance_scope": "existing_native_component_only",
-            "component_scope": "final_filled_odb_rcx_component_only",
+            "component_scope": "native_final_gds_floating_fill_component",
             "flow109_metrics_status": "UNIMPLEMENTED",
-            "native_required_outputs": ["native RCX state and receipt", "per-ruleset SPEF consumer census"]
+            "native_required_outputs": ["hash-bound FINAL_FILL_EXTRACTION.json", "min/nom/max floating-fill SPEF consumer census"]
           }
         }
       ],
@@ -15099,7 +15099,7 @@
       "capability_status": "SELECTED_NOT_ROUTE_QUALIFIED",
       "availability_status": "NOT_INVENTORIED_THIS_UPDATE",
       "source_components": [
-        "librelane_signoff",
+        "flow109_final_extract",
         "spef_extraction_check"
       ],
       "obligations": [

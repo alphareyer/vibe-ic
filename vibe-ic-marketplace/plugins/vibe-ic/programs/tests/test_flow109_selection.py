@@ -76,6 +76,8 @@ def test_analog_profile_cannot_be_forced_into_digital_default():
     features = profile("Analog hard-IP")
     plan = flow109.resolve_plan(features)
     assert flow109.resolve_step(plan, "D69")["selected_profile"] == "analog_die"
+    assert flow109.resolve_step(plan, "D69")["profile"]["tools"] == "Magic.RCX"
+    assert flow109.resolve_step(plan, "D69")["profile"]["native_steps"] == ["Magic.RCX"]
     with pytest.raises(flow109.Flow109Error, match="PROFILE_INAPPLICABLE"):
         flow109.resolve_plan(features, {"D69": "default"})
 
@@ -414,7 +416,7 @@ def test_owner_route_uses_native_span_without_generic_qualification_registry(
 
 @pytest.mark.parametrize("step, adapter, component_scope", [
     ("D45", "flow109_netlist_cdc", None),
-    ("D69", "flow109_final_extract", "final_filled_odb_rcx_component_only"),
+    ("D69", "flow109_final_extract", "native_final_gds_floating_fill_component"),
     ("D70", "flow109_final_electrical", "final_sta_native_component_only"),
     ("D71", "flow109_final_gls", "final_sdf_gls_component_only"),
 ])
@@ -425,6 +427,9 @@ def test_registered_native_component_route_does_not_claim_generic_qualification(
     dispatch = flow109.source_owned_native_dispatch(row)
     assert dispatch["adapter"] == adapter
     assert dispatch.get("component_scope") == component_scope
+    if step == "D69":
+        assert dispatch['engine_families'] == ['magic']
+        assert dispatch['engine_steps'] == {'magic': ['vibeic-final-fill-spef extract']}
     context = flow109.execution_context(plan, step, step)
     admission = flow109.source_owned_native_admission(context)
     assert admission["admitted"] is True

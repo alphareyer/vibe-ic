@@ -372,15 +372,15 @@ def prepare(project, context):
             or not set(corners) <= set(d70.get('required_corners') or [])
             or set(d70.get('final_sdfs') or {}) != set(d70.get('required_corners') or [])):
         raise AdmissionRefusal('D71_FINAL_CORNER_BINDING_MISMATCH', str(d70_path))
-
-    state_path = _bound(project, d70.get('sta_state'))
-    state = _read(state_path)
+    state_path = _bound(project, d70.get('sta_state')); state = _read(state_path)
+    state_spefs = state.get('spef') or {}
+    rc_spefs = {final_electrical.signoff.rc_corner(key): value for key, value in state_spefs.items()}
     if (set(state.get('sdf') or {}) != set(d70.get('required_corners') or [])
             or Path(str(state.get('nl') or '')).resolve() != netlist
             or Path(str(state.get('sdc') or '')).resolve() != sdc
-            or set(state.get('spef') or {}) != set(final_spefs)
-            or any(Path(str(state['spef'][scene])).resolve()
-                   != _bound(project, final_spefs[scene]) for scene in final_spefs)):
+            or len(rc_spefs) != len(state_spefs) or set(rc_spefs) != set(final_spefs)
+            or any(Path(str(rc_spefs[scene])).resolve() != _bound(project, final_spefs[scene])
+                   for scene in final_spefs)):
         raise AdmissionRefusal('D71_FINAL_STATE_IDENTITY_MISMATCH', str(state_path))
 
     sdfs, census = {}, {}
