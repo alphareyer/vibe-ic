@@ -199,6 +199,21 @@ def _synthesis(tmp_path, monkeypatch, *, ordinary=False):
     return p, rtl, pdk, calls
 
 
+def test_phase1_master_role_is_the_librelane_primary_clock(tmp_path, monkeypatch):
+    p, _, _, calls = _synthesis(tmp_path, monkeypatch, ordinary=True)
+    put(p / "phase1/generated_docs/L8_TIMING_WAVEFORM.json", {
+        "clock_domains": [{
+            "name": "clk", "source_pin": "clk", "period_ns": 10,
+            "domain_kind": "primary", "role": "master",
+        }]
+    })
+
+    result = D.step_yosys_synth(p, "top", "unused")
+
+    assert result.status == "PASS", result.detail
+    assert calls[0][:2] == ["Yosys.JsonHeader", "Yosys.Synthesis"]
+
+
 @pytest.mark.parametrize("selected", [None, "pdkA"])
 def test_ultra_design_bootstrap_passes_the_normal_resolved_pdk(tmp_path,
                                                                monkeypatch, selected):
@@ -301,6 +316,24 @@ def test_selected_pdk_preserves_declaration_refusals(tmp_path, primary, alternat
         assert exc.value.code == expected
     else:
         assert LC.phase2_pdk(tmp_path, selected=selected)[0] == expected
+
+
+def test_phase2_pdk_uses_adopted_target_not_staged_family_as_second_declaration(
+        tmp_path):
+    """The Phase-1 staging record preserves provenance, not two targets."""
+    put(tmp_path / "phase1/pdk_staging_read.json", {
+        "staged_identifier": "gf180mcu",
+        "adopted_pdk_target": "gf180mcuD",
+        "adopted_evidence_source": "command_line",
+    })
+    put(tmp_path / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json", {
+        "fields": {
+            "pdk_target": "gf180mcuD",
+            "pdk_target_alternates": ["gf180mcu"],
+        }
+    })
+
+    assert LC.phase2_pdk(tmp_path, selected="gf180mcuD")[0] == "gf180mcuD"
 
 
 @pytest.mark.parametrize("damage", ["missing", "conflict"])

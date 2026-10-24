@@ -975,31 +975,53 @@ def _complete_step14_handoff(project: Path) -> dict:
                       or str(record['result'].get('producer_return', {}))}
 
 
+def _current_step9_checkpoint(project: Path) -> tuple[dict | None, str | None]:
+    """Bind the current native synthesis state used by downstream owners.
+
+    Step 9 also measures an area budget.  An absent design-owned budget makes
+    that *row* NOT_MEASURED, but does not invalidate a receipt-bound mapped
+    netlist whose native handoff consumer passes.  DFT and pre-layout consume
+    that handoff, not the unrelated area comparison.
+    """
+    import step_output_collector as versions
+    import synth_handoff_netlist_check as handoff
+
+    pointer = next((row for row in versions._read_index(project).get('steps', ())
+                    if str(row.get('id')) == '9'), None)
+    if not pointer or not pointer.get('folder'):
+        return None, 'requires a current Step9 native synthesis record'
+    try:
+        prior = json.loads((versions._versions_root(project)
+                            / pointer['folder'] / 'outputs.json').read_text())
+        bound = handoff.bound_handoff(project)
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        return None, str(exc)
+    if prior.get('status') == 'FAIL':
+        return None, 'latest Step9 producer failed'
+    if not isinstance(bound, dict) or bound.get('verdict') != 'PASS':
+        findings = '; '.join((bound or {}).get('findings', ()))
+        return None, findings or 'current native synthesis handoff is not PASS'
+    declared = next((row for row in prior.get('outputs', ())
+                     if row.get('rel') == 'phase2/stage2/synth/netlist.v'), None)
+    canonical = Path(str(bound.get('canonical') or ''))
+    if (not declared or not canonical.is_file()
+            or versions._sha(canonical) != declared.get('sha256')
+            or bound.get('netlist_sha256') != declared.get('sha256')):
+        return None, 'Step9 versioned netlist no longer matches its native handoff'
+    return {'step9_record': prior, 'native_handoff': bound}, None
+
+
 def _complete_step10_prelayout(project: Path, top: str, pdk_name: str,
                               container: str) -> dict:
     """Resume the existing prelayout owner from a current synthesis handoff."""
-    import _flow_yaml
     import design_one_shot_runner as design
-    import execution_backend_gates as gates
     import phase3_one_shot_runner as phase3
     import step_output_collector as versions
     import synth_handoff_netlist_check as handoff
 
-    prior = versions.latest_pass(project, '9')
-    if (not prior or not prior.get('current_inputs')
-            or not prior.get('canonical_pass') or prior['status'] != 'PASS'):
-        return {'verdict': 'NOT_MEASURED', 'detail':
-                'Step10 requires a current complete canonical Step9 checkpoint'}
-    consumer = (prior.get('result') or {}).get('canonical_consumer') or {}
-    row9 = next(row for row in _flow_yaml.load()['steps'] if str(row['id']) == '9')
-    try:
-        current_outputs = gates.contracts(project, row9)
-    except (OSError, ValueError, RuntimeError) as exc:
-        return {'verdict': 'NOT_MEASURED', 'detail': str(exc)}
-    if (consumer.get('status') != 'PASS' or not consumer.get('outputs')
-            or current_outputs != consumer['outputs']):
-        return {'verdict': 'NOT_MEASURED', 'detail':
-                'Step9 declared outputs no longer match its complete consumer'}
+    prior, error = _current_step9_checkpoint(project)
+    if error:
+        return {'verdict': 'NOT_MEASURED', 'detail': 'Step10 ' + error}
     bound = handoff.bound_handoff(project)
     if not bound or bound['verdict'] != 'PASS':
         return {'verdict': (bound or {}).get('verdict', 'NOT_MEASURED'),
@@ -1027,6 +1049,63 @@ def _complete_step10_prelayout(project: Path, top: str, pdk_name: str,
         return {'verdict': 'FAIL' if current['status'] == 'FAIL' else 'NOT_MEASURED',
                 'folder': current['folder'],
                 'detail': 'Step10 has no complete canonical consumer'}
+    return {'verdict': status, 'folder': current['folder'],
+            'detail': '; '.join(consumer.get('step', {}).get('reasons', ()))
+                      or result.detail}
+
+
+def _complete_step11_dft(project: Path, top: str, container: str) -> dict:
+    """Run the existing Step-11 producer on the current Step-9 subject."""
+    import design_one_shot_runner as design
+    import fault_atpg_run as atpg
+    import fault_scan_chain_insert as scan
+    import step_output_collector as versions
+
+    _prior, error = _current_step9_checkpoint(project)
+    if error:
+        return {'verdict': 'NOT_MEASURED', 'detail': 'Step11 ' + error}
+    clk, reset, active_low = design.derive_dft_clock_reset(project)
+    # The retained entry owns a DFT insertion request, so validate the exact
+    # L20 contract against the mapped subject before either scan insertion or
+    # ATPG starts.  The underlying full-flow producer historically continues
+    # ATPG after a scan-insertion refusal; that is useful evidence in a broad
+    # run, but it is not completion of this selected D23 owner row.
+    try:
+        mapped_rel, _selection = atpg.resolve_mapped_netlist(
+            project, 'phase2/stage2/synth/netlist.v')
+        mapped = project / mapped_rel
+        if not mapped.is_file():
+            return {'verdict': 'NOT_MEASURED',
+                    'detail': 'Step11 mapped synthesis subject is absent'}
+        flop_count = scan.count_flops(mapped.read_text(errors='replace'))
+        _binding, problems = scan.load_l20_scan_contract(
+            project, expected_clock=clk, expected_length=flop_count)
+    except (OSError, ValueError, RuntimeError) as exc:
+        return {'verdict': 'NOT_MEASURED',
+                'detail': f'Step11 L20/native-subject validation failed: {exc}'}
+    if problems:
+        return {'verdict': 'NOT_MEASURED',
+                'detail': 'Step11 L20/native-subject mismatch: '
+                          + '; '.join(problems)}
+    began = time.time()
+    try:
+        result = design._step_dft_insertion(
+            project, top, container, clk, reset, active_low, True)
+    except (OSError, ValueError, RuntimeError) as exc:
+        return {'verdict': 'NOT_MEASURED', 'detail': str(exc)}
+    current = next((row for row in versions.current_acceptance(project, began)
+                    if str(row['id']) == '11'), None)
+    if current is None:
+        return {'verdict': 'FAIL' if result.status == 'FAIL' else 'NOT_MEASURED',
+                'detail': result.detail or 'Step11 published no complete consumer'}
+    consumer = (current.get('result') or {}).get('canonical_consumer')
+    if not isinstance(consumer, dict):
+        return {'verdict': 'FAIL' if current['status'] == 'FAIL' else 'NOT_MEASURED',
+                'folder': current['folder'],
+                'detail': 'Step11 has no complete canonical consumer'}
+    status = ('PASS' if current.get('canonical_pass') and current['status'] == 'PASS'
+              and consumer.get('status') == 'PASS' else
+              'FAIL' if current['status'] == 'FAIL' else 'NOT_MEASURED')
     return {'verdict': status, 'folder': current['folder'],
             'detail': '; '.join(consumer.get('step', {}).get('reasons', ()))
                       or result.detail}
@@ -2776,6 +2855,8 @@ def _main() -> int:
                         and execution_policy_value['mode'] == 'default')
     _sdc_postcheck_entry = (str(getattr(args, 'entry_step', None)) == '8'
                             and execution_policy_value['mode'] == 'default')
+    _dft_entry = (str(getattr(args, 'entry_step', None)) == '11'
+                  and execution_policy_value['mode'] == 'default')
     _post_dft_entry = (str(getattr(args, 'entry_step', None)) == '12'
                        and execution_policy_value['mode'] == 'default')
     if getattr(args, "entry_step", None):
@@ -2786,7 +2867,7 @@ def _main() -> int:
                   file=sys.stderr)
             return 2
         _entry_runner = _spf_o.runner_for_step(str(args.entry_step))
-        if _prelayout_entry or _sdc_postcheck_entry or _post_dft_entry:
+        if _prelayout_entry or _sdc_postcheck_entry or _dft_entry or _post_dft_entry:
             # These retained Default owners have complete consumers and do
             # not need the larger dispatch span that normally contains them.
             _entry_runner = 'design_one_shot_runner'
@@ -2824,6 +2905,10 @@ def _main() -> int:
             return 2
         if _post_dft_entry and str(args.exit_step) != '12':
             print('REFUSED: Default Step12 post-DFT owner needs --exit-step 12', file=sys.stderr)
+            lock.release()
+            return 2
+        if _dft_entry and str(args.exit_step) != '11':
+            print('REFUSED: Default Step11 DFT owner needs --exit-step 11', file=sys.stderr)
             lock.release()
             return 2
 
@@ -3509,6 +3594,24 @@ def _main() -> int:
                     'whole_flow_verdict': 'NOT_MEASURED'}, project)
                 lock.release()
                 return rc
+        if _dft_entry:
+            step11_acceptance = _complete_step11_dft(
+                project, args.top_name, args.container)
+            status = step11_acceptance['verdict']
+            rc = 0 if status == 'PASS' else 1 if status == 'FAIL' else 2
+            out = _pl.report_path(project, 'vibe_ic_one_shot.json')
+            out.parent.mkdir(parents=True, exist_ok=True)
+            _write_runner_summary(out, {
+                'program': 'vibe_ic_one_shot_runner', 'bounded': True,
+                **_delivery_route.report_label(project), 'verdict': status,
+                'halted_at': None if status == 'PASS' else 'phase2',
+                'declared_window': {'entry_step': '11', 'exit_step': '11'},
+                'phases': [{'name': n, 'verdict': v, 'rc': code}
+                           for n, v, code in plan],
+                'step11_dft': step11_acceptance,
+                'whole_flow_verdict': 'NOT_MEASURED'}, project)
+            lock.release()
+            return rc
         if _post_dft_entry:
             step12_acceptance = _complete_step12_post_dft(project, args.container)
             status = step12_acceptance['verdict']

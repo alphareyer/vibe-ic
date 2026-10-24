@@ -1430,7 +1430,13 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
     pads = _load(pad_path) if pad_path.is_file() else {}
     result: dict[str, Any] = {}
     sources: dict[str, str] = {}
-    clocks = [c for c in l8.get('clock_domains', []) if c.get('role') == 'primary'
+    # Phase-1's typed clock contract spells a primary source as
+    # domain_kind=primary / role=master.  Retain role=primary for older
+    # documents, using the same two-field primary semantics as the L8 timing
+    # consumers instead of demanding a vocabulary Phase-1 does not emit.
+    clocks = [c for c in l8.get('clock_domains', [])
+              if (c.get('domain_kind') == 'primary'
+                  or c.get('role') in ('primary', 'master'))
               and c.get('pdk_scoped_target') in (None, pdk)]
     if len(clocks) != 1:
         raise Refusal('LL_CLOCK_AMBIGUOUS', f'{len(clocks)} primary clocks for {pdk}')
@@ -1706,6 +1712,16 @@ def phase2_pdk(project: Path, *, selected: str | None = None) -> tuple[str, str]
                         continue
                     if not isinstance(value, str) or not _PDK_NAME.fullmatch(value.strip()):
                         raise ValueError(f'{key} must name an exact PDK distribution')
+                    # The staging record deliberately keeps both the raw
+                    # family token found in the staged enablement and the
+                    # executable target adopted from stronger evidence.  They
+                    # are provenance + decision, not two peer declarations.
+                    # Once an adopted target exists, validate but do not add
+                    # the raw staged identifier to the equality set.
+                    if (path.name == 'pdk_staging_read.json'
+                            and key == 'staged_identifier'
+                            and scope.get('adopted_pdk_target')):
+                        continue
                     values.add(value.strip())
         except (OSError, ValueError) as exc:
             raise Refusal('LL_PHASE2_PDK_INVALID', f'{path.relative_to(project)}: {exc}') from exc

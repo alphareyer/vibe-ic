@@ -22697,6 +22697,21 @@ def _dft_owned_result(rows, pdk=None):
         extras={}, rows=rows, pdk=pdk)
 
 
+def derive_dft_clock_reset(project: Path) -> tuple[str, str, bool]:
+    """Derive Step 11's clock/reset from the synthesized subject it consumes."""
+    netlist = _pl.synth_dir(project) / "netlist.v"
+    rtl_dir = project / "phase2/stage1/rtl"
+    try:
+        blob = netlist.read_text(errors="ignore")
+        if not _derive_dft_clock_name(blob):
+            rtl_files = sorted([*rtl_dir.glob("*.v"), *rtl_dir.glob("*.sv")])
+            blob = "\n".join(f.read_text(errors="ignore") for f in rtl_files)
+        return (_derive_dft_clock_name(blob),
+                *_derive_dft_reset_name(blob))
+    except Exception:
+        return "", "", False
+
+
 @_spf.retained_step('11', canonical_acceptance=True)
 def _step_dft_insertion(project: Path, top_name: str, container: str,
                         clk: str, dft_rst: str, dft_rst_active_low: bool,
@@ -23391,26 +23406,10 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
     # initialising to it would publish "there are no library-mapped cells" on a
     # run that never looked. DT1 measures it instead — see the sniff below.
     pdk: Optional[str] = None
-    try:
-        # DERIVE FROM THE TOP'S OWN PORTS, NOT FROM EVERY FILE IN rtl/.
-        # The old blob was the concatenation of every RTL file, so on any
-        # multi-module design a SUBMODULE's port name could win. Measured on
-        # subservient x sky130A: the blob yields `clk` — serv_top's port — while
-        # the chip top's clock is `i_clk`, and `fault chain --clock clk` then
-        # dies with "Module port `\clk' is not declared in module header",
-        # losing the scan chain exactly like the missing --reset did.
-        # The mapped netlist is flattened and contains ONLY the top's ports, and
-        # it is the very file `fault chain` is about to read, so it is the
-        # authoritative source here. Fall back to the RTL blob if unreadable.
-        blob = netlist.read_text(errors="ignore")
-        if not _derive_dft_clock_name(blob):
-            rtl_files = sorted([*rtl_dir.glob("*.v"), *rtl_dir.glob("*.sv")])
-            blob = "\n".join(f.read_text(errors="ignore") for f in rtl_files)
-        clk = _derive_dft_clock_name(blob)
-        dft_rst, dft_rst_active_low = _derive_dft_reset_name(blob)
-    except Exception:
-        clk = ""
-        dft_rst, dft_rst_active_low = "", False
+    # Derive from the exact Step-9 subject through the same helper used by the
+    # bounded Step-11 front door.  This prevents the normal entry and the
+    # monolithic 11..13 chain from silently choosing different DFT ports.
+    clk, dft_rst, dft_rst_active_low = derive_dft_clock_reset(project)
 
     _dft = _step_dft_insertion(project, top_name, container, clk,
                                dft_rst, dft_rst_active_low, full_chip)
