@@ -179,6 +179,32 @@ def test_m01_adapter_loads_by_path_with_sibling_imports():
     assert module.SCHEMA == mixed.SCHEMA
 
 
+@pytest.mark.parametrize('quote,subject,accepted', [
+    ('Supply pin VDD_A.', 'VDD_A:signal_type', True),
+    ('Supplies VDD_A (1.8 V).', 'VDD_A:signal_type', True),
+    ('Power pin VDD_A.', 'VDD_A:signal_type', True),
+    ('VDD_A is the core domain at 1.8 V.', 'VDD_A:signal_type', False),
+    ('Supplies VDD_B (1.8 V).', 'VDD_A:signal_type', False),
+    ('Supplies VDD_A (1.8 V).', 'VDD_A:domain', False),
+    ('Signal VDD_A supply_control.', 'VDD_A:signal_type', False),
+    ('RX is a digital input; IOVDD is a supply.', 'RX:signal_type', False),
+    ('RX is a digital input; IOVDD is a supply.', 'IOVDD:signal_type', True),
+    ('References VHI/VLO; supplies IOVDD (1.8 V), CORE (1.2 V), VLDO/VREF.',
+     'CORE:signal_type', True),
+    ('Supplies IOVDD (1.8 V); CORE is the core domain.', 'CORE:signal_type', False),
+])
+def test_m01_power_role_uses_explicit_named_supply_only(tmp_path, quote, subject, accepted):
+    source = tmp_path / 'source.md'
+    source.write_text(quote + '\n')
+    value = _bound('power', 'L1', 1, quote)
+    if accepted:
+        selected, receipt = mixed._field(tmp_path, {'L1': source}, value, subject)
+        assert selected == receipt['value'] == 'power'
+    else:
+        with pytest.raises(admission.AdmissionRefusal, match='M01_FIELD_NOT_SOURCE_BOUND'):
+            mixed._field(tmp_path, {'L1': source}, value, subject)
+
+
 def test_m01_normal_entry_uses_inherited_producers_and_consumer(tmp_path):
     _case(tmp_path)
     result = _run(tmp_path)
