@@ -1637,7 +1637,8 @@ def test_the_step_is_registered_with_every_earlier_plugin_step():
         assert re.search(rf'\b{name}\b', init), name
     src = (STEP_DIR / 'postroute_repair.py').read_text()
     assert 'id = "Vibeic.PostRouteRepair"' in src
-    assert src.count('@Step.factory.register()') == 1
+    assert 'id = "Vibeic.PostRouteRepairAdoption"' in src
+    assert src.count('@Step.factory.register()') == 2
 
 
 def test_the_script_orders_the_repair_and_connects_before_it_writes():

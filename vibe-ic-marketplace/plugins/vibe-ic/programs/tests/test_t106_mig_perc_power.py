@@ -684,13 +684,14 @@ def test_the_gate_level_sim_step_ships_in_the_plugin_the_contract_mounts():
     source = (contract.PLUGIN_ROOT / 'librelane_plugin_vibeic/__init__.py').read_text()
     assert 'id = "Vibeic.GateLevelSim"' in source
     assert contract._plugin_args(['Vibeic.GateLevelSim'])
-    # The step records; it parses nothing it produces (the judgement is the
-    # calibrated `sdf_gate_sim.judge_tool_arm` on the host).
+    # The native step applies the same calibrated judge before it returns a
+    # state; a bad native run must not advance to a later host-only reader.
     import ast
     tree = ast.parse(source)
     imported = ({a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
                 | {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)})
-    assert not imported & {'re', 'sdf_gate_sim'}
+    assert 'sdf_gate_sim' in imported
+    assert 'BLOCKING gate-level simulation verdict' in source
 
 
 def test_post_route_power_keeps_native_clock_analysis_and_pre_pnr_keeps_ideal_clocks(tmp_path, monkeypatch):

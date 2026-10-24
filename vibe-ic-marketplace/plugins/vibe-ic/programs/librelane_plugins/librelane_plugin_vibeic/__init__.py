@@ -21,14 +21,14 @@ marks them dont_touch, and records ``check_placement``'s count. See
 ``OpenROAD.STAPostPNR`` leaves -- the netlist it timed and its per-corner SDFs
 (``write_sdf -include_typ -divider . -corner <c>``) -- and re-runs the design's
 own executed L10 suite against each corner SDF in Icarus Verilog
-(``iverilog -gspecify -ginterconnect``, ``vvp -sdf-info``). It JUDGES
-NOTHING: what it runs comes from ``VIBEIC_GLS_MANIFEST``
+(``iverilog -gspecify -ginterconnect``, ``vvp -sdf-info``). What it runs
+comes from ``VIBEIC_GLS_MANIFEST``
 (``sdf_gate_sim.tool_arm_manifest``: bound testbenches, the model closure of
 the PDK's declared Verilog models, compile flags); it records each run's exit
-codes and transcript paths (``gls_runs.json``). The verdict -- every case
-passed, delays applied > 0, SDF ERROR = 0 -- is
-``sdf_gate_sim.judge_tool_arm`` on the host, where the transcript grammar is
-calibrated.
+codes and transcript paths (``gls_runs.json``), then applies the calibrated
+``sdf_gate_sim.judge_tool_arm`` verdict before returning a state. Compile or
+simulation nonzero exits are blocking even if a partial transcript looks like
+a pass; ``gls_results.json`` retains the decision.
 
 ``Vibeic.ClockPathDriveSizing`` (flow step 19, T98) runs after
 ``OpenROAD.CTS``: the #2160 clock-path drive sizing, see its class docstring
@@ -45,14 +45,19 @@ and the stream's UNITS is the declared grid. See ``signoff.py``.
 ``Vibeic.PostRouteRepair`` (flow step 32, T102) runs after
 ``OpenROAD.DetailedRouting``: one candidate of the post-route repair, on the
 routed ODB; ``programs/librelane_postroute_repair.py`` measures and adopts or
-rolls it back. See ``postroute_repair.py``.
+rolls it back. A complete native flow instead inserts
+``Vibeic.PostRouteRepairAdoption`` after detailed routing: it applies the same
+CheckAntennas/RCX/STAPostPNR measurement basis to the input and candidate and
+returns only the adopted state. See ``postroute_repair.py``.
 """
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 from decimal import Decimal
+from pathlib import Path as FilePath
 from typing import List, Optional, Tuple
 
 from librelane.common import Path
@@ -166,9 +171,9 @@ from .routing import DetailedRoutingSeeded, NamedViolationReroute  # noqa: E402,
 __all__ += ["DetailedRoutingSeeded", "NamedViolationReroute"]
 
 # Step 32 (lane mig102): the post-detailed-route repair.
-from .postroute_repair import PostRouteRepair  # noqa: E402,F401
+from .postroute_repair import PostRouteRepair, PostRouteRepairAdoption  # noqa: E402,F401
 
-__all__ += ["PostRouteRepair"]
+__all__ += ["PostRouteRepair", "PostRouteRepairAdoption"]
 
 # Step 17: close the fanout of buffers created by RepairDesignPostGPL before
 # DetailedPlacement and all later physical stages consume the placed state.
@@ -232,8 +237,32 @@ class GateLevelSim(Step):
         with open(os.path.join(self.step_dir, "gls_runs.json"), "w") as stream:
             json.dump({"manifest": str(self.config["VIBEIC_GLS_MANIFEST"]),
                        "netlist": netlist, "runs": runs}, stream, indent=2)
-        return {}, {"vibeic__gls__run__count": len(runs),
-                    "vibeic__gls__corner__count": len(sdfs)}
+        programs = str(FilePath(__file__).resolve().parents[2])
+        if programs not in sys.path:
+            sys.path.insert(0, programs)
+        import sdf_gate_sim as sgs
+
+        judged = sgs.judge_tool_arm(FilePath(self.step_dir), manifest)
+        exit_failures = [
+            {"corner": row["corner"], "case": row["case"],
+             "compile_rc": row.get("compile_rc"), "sim_rc": row.get("sim_rc")}
+            for row in runs
+            if row.get("compile_rc") != 0 or row.get("sim_rc") != 0
+        ]
+        if exit_failures:
+            judged["verdict"] = "FAIL"
+            judged["native_exit_failures"] = exit_failures
+        result = os.path.join(self.step_dir, "gls_results.json")
+        with open(result, "w") as stream:
+            json.dump(judged, stream, indent=2)
+        metrics = {"vibeic__gls__run__count": len(runs),
+                   "vibeic__gls__corner__count": len(sdfs),
+                   "vibeic__gls__passed": int(judged.get("verdict") == "PASS")}
+        if judged.get("verdict") != "PASS":
+            raise StepError(
+                f"{GateLevelSim.id}: BLOCKING gate-level simulation verdict "
+                f"{judged.get('verdict')}; see {result}")
+        return {}, metrics
 
     @staticmethod
     def _run(argv, log: str, limit: int, cwd=None) -> int:
