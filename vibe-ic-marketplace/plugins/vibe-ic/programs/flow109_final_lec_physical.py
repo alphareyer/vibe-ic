@@ -134,6 +134,64 @@ def native_fill_inputs(paths):
     return {str(path.resolve()): expected[str(path)] for path in dependencies}
 
 
+def retained_postroute_inputs(project, paths):
+    """Re-open the current D41 promotion and return its immutable read set.
+
+    The bounded post-route controller publishes a different adoption authority
+    from the ordinary Step-34 fill owner.  D44 must consume that authority via
+    its existing full readback, rather than accepting a caller-authored
+    ``adopted: true`` document.  Every file that can change the readback result
+    is returned so D44's before-tool freshness checks cover the same subject.
+    """
+    import librelane_postroute_repair as repair
+
+    receipt = paths['adopted_receipt'].resolve()
+    canonical = (project / repair.REPORT_REL).resolve()
+    if receipt != canonical:
+        return {}
+    current = repair.retained_finished_candidate_readback(project)
+    recorded = read(receipt)
+    if current is None or current != recorded:
+        raise ValueError('current D41 retained promotion differs from its report')
+
+    def host(raw):
+        path = Path(raw)
+        if path.is_absolute() and path.parts[:2] == ('/', 'project'):
+            return project.joinpath(*path.parts[2:]).resolve()
+        return (project / path).resolve() if not path.is_absolute() else path.resolve()
+
+    state_path = host(current.get('adopted_state', ''))
+    if state_path != paths['adopted_state'].resolve():
+        raise ValueError('current D41 adopted State differs')
+    state = read(state_path)
+    if (host(state.get('nl', '')) != paths['adopted_netlist'].resolve()
+            or host(state.get('def', '')) != paths['final_def'].resolve()):
+        raise ValueError('current D41 adopted netlist/DEF differs')
+
+    impl = project / repair.ARM_REL / repair.IMPL_DIR
+    adopted_pointer = read(impl / repair.CURRENT)
+    marker = current.get('retained_promotion_readback') or {}
+    ready_path = host(marker.get('ready_record') or adopted_pointer.get('finishing_record', ''))
+    decision_path = host(marker.get('decision_record') or str(ready_path.with_name('decision.json')))
+    ready = read(ready_path)
+    dependencies = [receipt, state_path, ready_path, decision_path,
+                    impl / repair.CURRENT, impl / repair.CONTEXT,
+                    project / repair.ARM_REL / repair.LEDGER]
+    dependencies.extend(host(raw) for raw in (ready.get('sealed_inputs') or {}))
+    lane = ready.get('lane')
+    signoff = project / repair.ARM_REL / 'candidate_signoff' / str(lane)
+    for kind in ('drc', 'lvs'):
+        record = signoff / f'{kind}.json'
+        dependencies.append(record)
+        for metric in (read(record).get('metrics') or {}).values():
+            folder = host(metric.get('folder', ''))
+            dependencies.extend((folder / 'state_out.json', folder / 'vibeic_receipt.json'))
+    unique = {path.resolve() for path in dependencies}
+    if any(path.is_symlink() or not path.is_file() for path in unique):
+        raise ValueError('current D41 retained promotion read set is incomplete')
+    return {str(path): sha(path) for path in sorted(unique)}
+
+
 def produce(project, manifest_path, output, *, before=None):
     import phase3_one_shot_runner as phase3
     import lec_post_layout_check as legacy
@@ -154,8 +212,9 @@ def produce(project, manifest_path, output, *, before=None):
     if (project / wrapper.get('chip_top_verilog', '')).resolve() != paths['wrapper']:
         raise ValueError('wrapper differs from producer receipt')
     native_inputs = native_fill_inputs(paths)
+    postroute_inputs = retained_postroute_inputs(project, paths)
     adopted, state = read(paths['adopted_receipt']), read(paths['adopted_state'])
-    if not native_inputs and (adopted.get('verdict') != 'PASS' or not adopted.get('adopted')
+    if not native_inputs and not postroute_inputs and (adopted.get('verdict') != 'PASS' or not adopted.get('adopted')
             or sha(adopted['adopted_state']) != sha(paths['adopted_state'])
             or sha(state['nl']) != sha(paths['adopted_netlist'])
             or sha(state['def']) != sha(paths['final_def'])):
@@ -180,7 +239,8 @@ def produce(project, manifest_path, output, *, before=None):
         raise ValueError('restored power conditions differ from producer authority')
     yosys = Path(shutil.which('yosys')).resolve()
     inputs = {str(manifest_path): sha(manifest_path),
-              **{str(path): sha(path) for path in paths.values()}, **native_inputs}
+              **{str(path): sha(path) for path in paths.values()}, **native_inputs,
+              **postroute_inputs}
     models, projections, outputs, commands = {}, {}, {}, []
     for side, source in [('gold', gold), ('gate', gate)]:
         model_path = output / f'{side}.elaborated.json'

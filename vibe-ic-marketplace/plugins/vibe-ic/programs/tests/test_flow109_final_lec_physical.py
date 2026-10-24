@@ -89,3 +89,48 @@ def test_native_fill_selection_propagates_owning_consumer_refusal(tmp_path, monk
     def refuse(*args, **kwargs): raise Refusal('LL_STEP_OUTPUT_UNBOUND', 'changed receipt')
     monkeypatch.setattr(fill, 'validate_fill_handoff', refuse)
     with pytest.raises(Refusal, match='LL_STEP_OUTPUT_UNBOUND'): physical.native_fill_inputs(paths)
+
+
+def _postroute_case(tmp_path):
+    import json
+    import librelane_postroute_repair as repair
+    from programs.tests.test_t102_librelane_postroute_repair import _finished_readback_fixture
+
+    project, report, ready, _gds = _finished_readback_fixture(tmp_path)
+    current = json.loads((project / repair.ARM_REL / repair.IMPL_DIR / repair.CURRENT).read_text())
+    state_path = physical.Path(current['repair_state'])
+    state = json.loads(state_path.read_text())
+    report['adopted_state'] = str(state_path)
+    (project / repair.REPORT_REL).write_text(json.dumps(report))
+    paths = {'adopted_receipt': project / repair.REPORT_REL,
+             'adopted_state': state_path,
+             'adopted_netlist': physical.Path(state['nl']),
+             'final_def': physical.Path(state['def'])}
+    return project, paths, ready
+
+
+def test_retained_postroute_selection_consumes_full_existing_owner(tmp_path):
+    project, paths, ready = _postroute_case(tmp_path)
+    inputs = physical.retained_postroute_inputs(project, paths)
+    assert inputs[str(paths['adopted_receipt'].resolve())] == physical.sha(paths['adopted_receipt'])
+    assert inputs[str(ready.resolve())] == physical.sha(ready)
+    assert any(name.endswith('/vibeic_receipt.json') for name in inputs)
+
+
+@pytest.mark.parametrize('damage', ['missing', 'stale'])
+def test_retained_postroute_selection_refuses_missing_or_stale_authority(tmp_path, damage):
+    project, paths, ready = _postroute_case(tmp_path)
+    if damage == 'missing':
+        ready.with_name('decision.json').unlink()
+    else:
+        ready.write_text(ready.read_text() + '\n')
+    with pytest.raises(Exception, match='LL_PRR_FINISHED_READBACK_STALE'):
+        physical.retained_postroute_inputs(project, paths)
+
+
+def test_retained_postroute_selection_never_claims_a_foreign_receipt(tmp_path):
+    project, paths, _ready = _postroute_case(tmp_path)
+    other = project / 'caller-authored-pass.json'
+    other.write_text('{"verdict":"PASS","adopted":true}')
+    paths['adopted_receipt'] = other
+    assert physical.retained_postroute_inputs(project, paths) == {}
