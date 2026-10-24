@@ -199,7 +199,9 @@ def test_frontend_rows_route_stable_ids_to_existing_default_owner_sites():
         assert (dispatch["native_step_id"], dispatch["owner_runner"],
                 dispatch["owner_entry_step"], dispatch["owner_exit_step"]) == values
         assert dispatch["native_step_id"] == row["legacy70"][0]["id"]
-        assert row["profile"]["execution_status"] == "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED"
+        expected_status = ("NATIVE_OWNER_WIRED_NOT_CASE_QUALIFIED" if row_id == "D11"
+                           else "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED")
+        assert row["profile"]["execution_status"] == expected_status
         assert dispatch["flow109_metrics_status"] == "UNIMPLEMENTED"
 
 
