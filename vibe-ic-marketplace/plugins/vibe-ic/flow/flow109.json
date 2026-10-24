@@ -13152,8 +13152,30 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "ngspice shared-library + Icarus/cocotb co-simulation",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "mixed_signal_m3_run",
+            "mixed_signal_cosim_check",
+            "mixed_signal_interface_si_check"
+          ],
+          "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
+          "dispatch": {
+            "adapter": "flow109_mixed_native",
+            "native_step_id": "flow109.M06",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "engine_families": ["python3", "ngspice", "iverilog", "vvp", "opensta"],
+            "engine_executables": {
+              "python3": "python3", "ngspice": "ngspice", "iverilog": "iverilog",
+              "vvp": "vvp", "opensta": "sta"
+            },
+            "engine_steps": {
+              "python3": ["mixed_signal_m3_run", "mixed_signal_cosim_check", "mixed_signal_interface_si_check"],
+              "ngspice": ["mixed_signal_m3_run.native_measurement"],
+              "iverilog": ["mixed_signal_m3_run.wrapper_compile"],
+              "vvp": ["mixed_signal_m3_run.wrapper_measurement"],
+              "opensta": ["mixed_signal_m3_run.interface_timing"]
+            }
+          }
         }
       ],
       "complementary_tools": [],
@@ -13462,8 +13484,24 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "KLayout Python GDS assembly + Netgen connectivity",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": ["mixed_signal_top_lvs_run", "mixed_signal_merge_check"],
+          "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
+          "dispatch": {
+            "adapter": "flow109_mixed_native",
+            "native_step_id": "flow109.M07",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "engine_families": ["python3", "klayout", "magic", "netgen"],
+            "engine_executables": {
+              "python3": "python3", "klayout": "klayout", "magic": "magic", "netgen": "netgen"
+            },
+            "engine_steps": {
+              "python3": ["mixed_signal_top_lvs_run", "mixed_signal_merge_check"],
+              "klayout": ["mixed_signal_top_lvs_run.merge"],
+              "magic": ["mixed_signal_top_lvs_run.extract"],
+              "netgen": ["mixed_signal_top_lvs_run.lvs"]
+            }
+          }
         }
       ],
       "complementary_tools": [],
@@ -15699,8 +15737,30 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "ngspice shared-library + Icarus/cocotb co-simulation",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "mixed_signal_m3_run",
+            "mixed_signal_cosim_check",
+            "mixed_signal_interface_si_check"
+          ],
+          "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
+          "dispatch": {
+            "adapter": "flow109_mixed_native",
+            "native_step_id": "flow109.M08",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "engine_families": ["python3", "ngspice", "iverilog", "vvp", "opensta"],
+            "engine_executables": {
+              "python3": "python3", "ngspice": "ngspice", "iverilog": "iverilog",
+              "vvp": "vvp", "opensta": "sta"
+            },
+            "engine_steps": {
+              "python3": ["mixed_signal_m3_run", "mixed_signal_cosim_check", "mixed_signal_interface_si_check"],
+              "ngspice": ["mixed_signal_m3_run.native_measurement"],
+              "iverilog": ["mixed_signal_m3_run.wrapper_compile"],
+              "vvp": ["mixed_signal_m3_run.wrapper_measurement"],
+              "opensta": ["mixed_signal_m3_run.interface_timing"]
+            }
+          }
         }
       ],
       "complementary_tools": [],
@@ -16301,8 +16361,26 @@
           "select_when": "otherwise",
           "provider": "vibeic",
           "tools": "Python mixed signoff aggregator + independent Codex review",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": ["mixed_signal_signoff_run", "mixed_signal_signoff_check"],
+          "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
+          "dispatch": {
+            "adapter": "flow109_mixed_native",
+            "native_step_id": "flow109.M09",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "engine_families": ["python3", "openroad", "magic", "klayout", "netgen"],
+            "engine_executables": {
+              "python3": "python3", "openroad": "openroad", "magic": "magic",
+              "klayout": "klayout", "netgen": "netgen"
+            },
+            "engine_steps": {
+              "python3": ["mixed_signal_signoff_run", "mixed_signal_signoff_check"],
+              "openroad": ["mixed_signal_signoff_run.router_antenna"],
+              "magic": ["mixed_signal_signoff_run.drc_lvs"],
+              "klayout": ["mixed_signal_signoff_run.density_antenna"],
+              "netgen": ["mixed_signal_signoff_run.lvs"]
+            }
+          }
         }
       ],
       "complementary_tools": [],
