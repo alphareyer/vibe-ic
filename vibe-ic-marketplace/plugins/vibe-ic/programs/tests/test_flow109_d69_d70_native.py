@@ -106,7 +106,12 @@ def test_d70_refuses_an_empty_declared_corner_population_before_native(tmp_path,
     assert result['native_started'] is False
 
 
-def test_d70_producer_accepts_equal_corner_population_in_different_order(tmp_path, monkeypatch):
+@pytest.mark.parametrize('spef_keys,expected', [
+    (('nom',), 'PASS'), (('nom_*',), 'PASS'),
+    (('nom', 'nom_*'), 'NOT_MEASURED'), (('max_*',), 'NOT_MEASURED'),
+])
+def test_d70_producer_accepts_equal_corner_population_in_different_order(
+        tmp_path, monkeypatch, spef_keys, expected):
     def ref(path):
         return {'path': str(path.relative_to(tmp_path)), 'sha256': '0' * 64}
 
@@ -125,7 +130,7 @@ def test_d70_producer_accepts_equal_corner_population_in_different_order(tmp_pat
     sta = tmp_path / 'sta'; sta.mkdir(); (sta / 'state_out.json').write_text('{}')
     state = {'sdf': {'ss': str(inputs['ss.sdf']), 'tt': str(inputs['tt.sdf'])},
              'nl': str(inputs['netlist.v']), 'sdc': str(inputs['constraint.sdc']),
-             'spef': {'nom': str(inputs['nom.spef'])}}
+             'spef': {key: str(inputs['nom.spef']) for key in spef_keys}}
     parasitics = {'odb': ref(inputs['filled.odb']), 'filled_def': ref(inputs['filled.def']),
         'adopted_views': {'netlist': ref(inputs['netlist.v']), 'sdc': ref(inputs['constraint.sdc'])},
         'spefs': {'nom': ref(inputs['nom.spef'])},
@@ -140,9 +145,12 @@ def test_d70_producer_accepts_equal_corner_population_in_different_order(tmp_pat
     monkeypatch.setattr(d70.postroute, 'corner_sdfs',
                         lambda *_: {'ss': inputs['ss.sdf'], 'tt': inputs['tt.sdf']})
     result = d70.execute(tmp_path, {'context_sha256': 'source-control'})
-    assert result['component_status'] == 'PASS'
-    assert result['required_corners'] == ['tt', 'ss']
-    assert list(state['sdf']) == ['ss', 'tt']
+    assert result['component_status'] == expected
+    if expected == 'PASS':
+        assert result['required_corners'] == ['tt', 'ss']
+        assert list(state['sdf']) == ['ss', 'tt']
+    else:
+        assert result['reason'] == 'D70_FINAL_SPEF_STATE_MISMATCH'
 
 
 def test_d70_validator_accepts_equal_corner_population_in_different_order(tmp_path, monkeypatch):

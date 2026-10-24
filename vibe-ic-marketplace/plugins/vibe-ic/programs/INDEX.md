@@ -497,7 +497,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `flow109_clock_plan` | any | — | D34 adapter for the existing special Default clock-plan producer. |
 | `flow109_density_fill` | any | — | Blocking D62 ODB density-fill component, not a density/tapeout signoff. |
 | `flow109_final_electrical` | any | — | D70 Default bounded component: final RCX SPEFs -> STAPostPNR and SDF. |
-| `flow109_final_extract` | any | — | D69 Default native component: final filled ODB -> OpenROAD.RCX -> SPEF consumer. |
+| `flow109_final_extract` | any | — | D69 native owner: final GDS/DEF -> released floating-fill Magic SPEF tool. |
 | `flow109_final_geometry` | any | — | D64 new-geometry component, never adoption of historical stream/PV PASS. |
 | `flow109_final_gls` | any | — | D71 final-SDF gate replay on the adopted D44 netlist. |
 | `flow109_final_lec` | any | — | Blocking D44 component: native LibreLane EQY on the adopted final netlist. |
@@ -2037,7 +2037,7 @@ _(no programs in this group)_
 - `flow109_clock_plan` — D34 adapter for the existing special Default clock-plan producer.
 - `flow109_density_fill` — Blocking D62 ODB density-fill component, not a density/tapeout signoff.
 - `flow109_final_electrical` — D70 Default bounded component: final RCX SPEFs -> STAPostPNR and SDF.
-- `flow109_final_extract` — D69 Default native component: final filled ODB -> OpenROAD.RCX -> SPEF consumer.
+- `flow109_final_extract` — D69 native owner: final GDS/DEF -> released floating-fill Magic SPEF tool.
 - `flow109_final_geometry` — D64 new-geometry component, never adoption of historical stream/PV PASS.
 - `flow109_final_gls` — D71 final-SDF gate replay on the adopted D44 netlist.
 - `flow109_final_lec` — Blocking D44 component: native LibreLane EQY on the adopted final netlist.

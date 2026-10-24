@@ -208,17 +208,37 @@ acceptance, or grant a 109-flow PASS. A D62 row PASS covers only its three
 current metric obligations; downstream and whole-flow acceptance remain
 separate.
 
-## Measured final-extraction blocker
+## Native final floating-fill extraction
 
-D69 remains unimplemented and cannot reuse a pre-fill SPEF as final evidence.
+D69 Default selects the released `vibeic-final-fill-spef extract` owner path:
+Magic reads the final GDS with the dedicated floating-fill deck, retains the
+matching DEF routed nets, and eliminates floating conductors using exact
+zero-net-charge Schur reduction. The existing `flow109_final_extract` owner
+invokes this tool and consumes its hash-bound `FINAL_FILL_EXTRACTION.json`
+and min/nom/max SPEFs. Its downstream STA owner consumes those same files;
+an old pre-fill SPEF cannot substitute for them. The `analog_die` profile
+remains `Magic.RCX`; this does not claim stock IHP fill-aware extraction.
+
 In EDA 0.4.29, OpenROAD `d4d1c6987aa8a1c4bdf99cf8166130549c981b03`
 produced identical SPEF bytes (excluding DATE) before and after adding 41,549
 explicit fills to the public Nangate45 RCX regression design. This is a
 capability counterexample for that use, not GF180 qualification or a statement
 about every extraction model. See `vibeic/vibeic-eda#333` for the pinned
-reproducer and the required correlation/common-geometry evidence. A suitable
-alternative extractor or authoritative correlated fill model can be evaluated;
-a caller-authored qualification label cannot replace those measurements.
+reproducer. OpenRCX results remain routed pre-fill RC component evidence.
+The replacement capability shipped in `vibeic/vibeic-eda#338` (first 0.4.40,
+also present in 0.4.43). Its published `run_final_fill_spef.sh` checks filled,
+omitted-fill and incorrectly-grounded controls for all three corners. The
+gate removes its temporary raw outputs; a source script or release summary
+is not a retained raw JSON receipt. Reuse genuine native gate logs/receipts
+when available and list absent evidence explicitly.
+
+Full-chip feasibility and current-geometry correlation remain unmeasured
+until the actual final filled GDS and corresponding DEF match D62/D65,
+fill-present/omitted extraction differs, required nets and min/nom/max are
+complete, and the resulting bound SPEFs reach downstream STA. Tool presence
+or matching file hashes alone do not prove electrical correctness. Issue
+`vibeic/vibeic-eda#336` closed the product capability; its historical missing
+whole-chip replay did not become PASS. No threshold or baseline changes.
 
 ## D55 GLS activity and vector-power component
 
@@ -230,3 +250,19 @@ inputs are bound. Only the self-contained single-rail scalar subset is
 implemented. See `docs/flow109/D55-functional-activity.md` for its inputs and
 retained producer/consumer evidence. This prepares activity evidence without
 claiming final post-route power adoption or all D55 obligations.
+
+## M05 tool inventory (availability only)
+
+The EDA 0.4.43 read-only inventory measured kpex 0.3.12, a FasterCap executable
+(version not measured), Magic 8.3.685 and ngspice 47. It also found a real
+openEMS ELF executable at `/foss/tools/openems/bin/openEMS` (17,560 bytes),
+with `--help` returning 0 and version `v0.0.36-209-ge9b47b5`, plus Python
+module 0.0.36. This corrects the 2026-10-25 addendum's factual claim that only
+the openEMS Python module was installed.
+
+Availability does not qualify a substrate extraction/model. kpex's FasterCap
+engine offers experimental supply-capacitance tooling, not a production
+substrate model. M05 remains `UNSUPPORTED_OPEN_DEFAULT`; no substrate or
+supply-coupling simulation was run for this inventory. Any later authorized
+supply-only evidence must retain `supply_coupling_only` scope and cannot
+complete the substrate obligation.

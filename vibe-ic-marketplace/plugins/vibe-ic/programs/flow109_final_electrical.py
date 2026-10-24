@@ -84,8 +84,7 @@ def execute(project, context):
                           routed_def=routed_def, routed_odb=odb, netlist=netlist, sdc=sdc,
                           extract=False, time=True, direct_spefs=spefs, lane='flow109-d70-sta')
         corners = signoff.corner_timing(Path(sta['sta'])); timing = signoff.judge_timing(corners)
-        state_path = Path(sta['sta']) / 'state_out.json'
-        record_path = project / postroute.STEP23_RECORD
+        state_path, record_path = Path(sta['sta']) / 'state_out.json', project / postroute.STEP23_RECORD
         write_json(record_path, {'step': 'OpenROAD.STAPostPNR', 'mode': 'librelane',
             'spef_producer': 'flow109.D69', 'sta_state': str(state_path),
             'sta_state_sha256': digest(state_path), 'corners': corners, 'judgment': timing})
@@ -98,10 +97,11 @@ def execute(project, context):
                 or Path(str(state.get('sdc') or '')).resolve() != sdc.resolve()):
             raise AdmissionRefusal('D70_ADOPTED_VIEW_STATE_MISMATCH', 'STA state netlist/SDC differ')
         state_spefs = state.get('spef') or {}
-        if (set(state_spefs) != set(parasitics['final_spefs'])
-                or any(Path(str(state_spefs[key])).resolve()
-                       != files._bound(project, parasitics['final_spefs'][key]).resolve()
-                       for key in state_spefs)):
+        by_corner = {signoff.rc_corner(key): value for key, value in state_spefs.items()}
+        expected = parasitics['final_spefs']
+        if (len(by_corner) != len(state_spefs) or set(by_corner) != set(expected)
+                or any(Path(str(by_corner[key])).resolve()
+                       != files._bound(project, expected[key]).resolve() for key in by_corner)):
             raise AdmissionRefusal('D70_FINAL_SPEF_STATE_MISMATCH', 'STA state RC scenes differ from D69')
         final_sdfs = {c: files._record(project, p) for c, p in sdfs.items()}
         state_record = files._record(project, state_path)
