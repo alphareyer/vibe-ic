@@ -3358,7 +3358,7 @@
           "provider": "other",
           "tools": "KLayout Python + Yosys.JsonHeader + OpenSTA child-view QA",
           "native_steps": [
-            "Yosys.JsonHeader"
+            "macro view-set audit"
           ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
@@ -8108,8 +8108,8 @@
           "provider": "librelane",
           "tools": "OpenROAD.CheckMacroInstances + Odb.CheckMacroAntennaProperties",
           "native_steps": [
-            "OpenROAD.CheckMacroInstances",
-            "Odb.CheckMacroAntennaProperties"
+            "current macro instance merge",
+            "merge receipt consumer"
           ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
@@ -8603,7 +8603,10 @@
           "select_when": "otherwise",
           "provider": "openroad",
           "tools": "OpenROAD read_upf/evaluate_upf/global_connect + Python crossing checks",
-          "native_steps": [],
+          "native_steps": [
+            "power-domain connectivity",
+            "crossing consumers"
+          ],
           "execution_status": "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED",
           "dispatch": {
             "kind": "native_adapter",
@@ -13199,7 +13202,11 @@
           "native_steps": [
             "mixed_signal_m3_run",
             "mixed_signal_cosim_check",
-            "mixed_signal_interface_si_check"
+            "mixed_signal_interface_si_check",
+            "mixed_signal_m3_run.native_measurement",
+            "mixed_signal_m3_run.wrapper_compile",
+            "mixed_signal_m3_run.wrapper_measurement",
+            "mixed_signal_m3_run.interface_timing"
           ],
           "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
           "dispatch": {
@@ -13528,7 +13535,13 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "KLayout Python GDS assembly + Netgen connectivity",
-          "native_steps": ["mixed_signal_top_lvs_run", "mixed_signal_merge_check"],
+          "native_steps": [
+            "mixed_signal_top_lvs_run",
+            "mixed_signal_merge_check",
+            "mixed_signal_top_lvs_run.merge",
+            "mixed_signal_top_lvs_run.extract",
+            "mixed_signal_top_lvs_run.lvs"
+          ],
           "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
           "dispatch": {
             "adapter": "flow109_mixed_native",
@@ -15784,7 +15797,11 @@
           "native_steps": [
             "mixed_signal_m3_run",
             "mixed_signal_cosim_check",
-            "mixed_signal_interface_si_check"
+            "mixed_signal_interface_si_check",
+            "mixed_signal_m3_run.native_measurement",
+            "mixed_signal_m3_run.wrapper_compile",
+            "mixed_signal_m3_run.wrapper_measurement",
+            "mixed_signal_m3_run.interface_timing"
           ],
           "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
           "dispatch": {
@@ -16425,7 +16442,14 @@
           "select_when": "otherwise",
           "provider": "vibeic",
           "tools": "Python mixed signoff aggregator + independent Codex review",
-          "native_steps": ["mixed_signal_signoff_run", "mixed_signal_signoff_check"],
+          "native_steps": [
+            "mixed_signal_signoff_run",
+            "mixed_signal_signoff_check",
+            "mixed_signal_signoff_run.router_antenna",
+            "mixed_signal_signoff_run.drc_lvs",
+            "mixed_signal_signoff_run.density_antenna",
+            "mixed_signal_signoff_run.lvs"
+          ],
           "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
           "dispatch": {
             "adapter": "flow109_mixed_native",
