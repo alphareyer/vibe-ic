@@ -17594,7 +17594,21 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
             stats = Path(_child["stats"])
             _log_surviving_artefact([str(netlist), str(netlist.parent / "netlist.v")],
                                   produced_by="Vibeic.PostMapRepair", tool="openroad", exit_code=0)
-        return StepResult("synth", "NOT_MEASURED" if area_incomplete else "PASS",
+        # The bounded Default synthesis owner completes mapped synthesis,
+        # not PPA signoff. A genuinely absent target is disclosed separately;
+        # conflicting/invalid targets and measured budget failures still stop.
+        import flow109_frontend as _frontend
+        _active = _frontend._ACTIVE.get()
+        _native_default = (_active is not None
+                           and _active['project'] == project.resolve()
+                           and _active['context']['runtime_tool_uses'] is None)
+        _no_area_target = (area_incomplete and _child is None
+                          and area_result.get('area_budget_authority', {}).get('status') == 'UNSET'
+                          and area_result.get('die_area_um2') is None
+                          and not area_result.get('ceiling_disagreement')
+                          and not area_result.get('cell_area_signoff', {}).get('determined'))
+        _complete = not area_incomplete or (_native_default and _no_area_target)
+        return StepResult("synth", "PASS" if _complete else "NOT_MEASURED",
                           time.time() - t0,
                           (f"Native post-map repair selected; child area gate rc={_child['area_budget_rc']}; LEC/timing remain independent; " if _child else "") +
                           f"LibreLane Yosys.Synthesis: {netlist.name}; "
@@ -17606,8 +17620,12 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
                              if area_incomplete else ""),
                           [str(netlist), str(stat), str(stats), str(folder / "state_out.json"),
                            str(area_report)],
-                          extras={"area_budget_rc": gate.returncode, **({"post_map": _child} if _child else {})},
-                          reason_class="inconclusive" if area_incomplete else "")
+                          extras={"area_budget_rc": gate.returncode,
+                                  "ppa_acceptance": "NOT_MEASURED",
+                                  "step_id": "9", "completed": _complete,
+                                  "default_row_status": "PASS" if _complete else "NOT_MEASURED",
+                                  **({"post_map": _child} if _child else {})},
+                          reason_class="inconclusive" if not _complete else "")
     except (_ll.Refusal, OSError, ValueError) as exc:
         stopped = (_ll.tool_stop_reason(exc.code)
                    if isinstance(exc, _ll.Refusal) else None)

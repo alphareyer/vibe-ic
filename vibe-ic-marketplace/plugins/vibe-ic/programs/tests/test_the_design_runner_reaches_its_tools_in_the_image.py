@@ -72,6 +72,26 @@ def _code_of(module_name: str, func_name: str) -> str:
     return "\n".join(ast.unparse(n) for n in body)
 
 
+def test_supervised_command_uses_the_same_local_route(monkeypatch, cex):
+    """A progress marker must not send an in-image job back through Docker."""
+    _local(monkeypatch, cex)
+    runner = _load("design_one_shot_runner")
+    import _docker_watchdog as watchdog
+
+    supervised = watchdog.run_docker_supervised
+
+    def bounded(*args, **kwargs):
+        return supervised(*args, poll_s=0.01, stall_grace_s=1,
+                          hard_ceiling_s=3, term_grace_s=0.1, **kwargs)
+
+    monkeypatch.setattr(watchdog, "run_docker_supervised", bounded)
+    rc, out, err = runner._docker_exec(
+        "not-a-running-container", "printf native_route_ok",
+        marker="native_route_ok")
+    assert rc == 0, err
+    assert out == "native_route_ok"
+
+
 # --------------------------------------------------------------------------
 # The seam exists and every site goes through it
 # --------------------------------------------------------------------------

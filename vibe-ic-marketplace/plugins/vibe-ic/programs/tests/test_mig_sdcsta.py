@@ -138,6 +138,20 @@ def test_linked_measured_slack_passes(tmp_path):
     assert prelayout.judge_slack(folder, tmp_path / "g.json")["verdict"] == "PASS"
 
 
+@pytest.mark.parametrize(("check", "setup", "hold"), [
+    ("setup", -0.01, 0.3),
+    ("hold", 5.0, -0.01),
+])
+def test_linked_negative_slack_fails_the_existing_step10_gate(
+        tmp_path, check, setup, hold):
+    folder, _ = sta_folder(tmp_path, setup=setup, hold=hold)
+    report = prelayout.judge_slack(folder, tmp_path / "g.json")
+    assert report["basis"] == "PRE_LAYOUT_ESTIMATE"
+    assert report["verdict"] == "FAIL"
+    assert any(f"LL_STA_{check.upper()}_VIOLATION" in finding
+               for finding in report["findings"])
+
+
 def test_opensta_rejecting_a_constraint_fails_step8(tmp_path):
     folder, deck = sta_folder(tmp_path, log="sta_prepnr_sdc_bad_port_positive.log",
                               checks="sta_prepnr_check_setup_clock_only_positive.rpt",

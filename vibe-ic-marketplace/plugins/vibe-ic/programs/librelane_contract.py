@@ -1420,7 +1420,7 @@ def _declared_flow_settings(l19: dict, pdk: str) -> tuple[dict, dict]:
     return result, sources
 
 
-def emit_config(project: Path, pdk: str, output: Path) -> dict:
+def emit_config(project: Path, pdk: str, output: Path, *, synthesis_only: bool = False) -> dict:
     """Emit only declared inputs; unavailable values stay absent, never guessed."""
     root = project / 'phase1/generated_docs'
     l8, l9, l19 = (_ldoc(root, name) for name in EMIT_CONFIG_LDOCS)
@@ -1430,7 +1430,13 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
     pads = _load(pad_path) if pad_path.is_file() else {}
     result: dict[str, Any] = {}
     sources: dict[str, str] = {}
-    clocks = [c for c in l8.get('clock_domains', []) if c.get('role') == 'primary'
+    # Phase-1's typed clock contract spells a primary source as
+    # domain_kind=primary / role=master.  Retain role=primary for older
+    # documents, using the same two-field primary semantics as the L8 timing
+    # consumers instead of demanding a vocabulary Phase-1 does not emit.
+    clocks = [c for c in l8.get('clock_domains', [])
+              if (c.get('domain_kind') == 'primary'
+                  or c.get('role') in ('primary', 'master'))
               and c.get('pdk_scoped_target') in (None, pdk)]
     if len(clocks) != 1:
         raise Refusal('LL_CLOCK_AMBIGUOUS', f'{len(clocks)} primary clocks for {pdk}')
@@ -1454,7 +1460,11 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
         for key in ('PNR_SDC_FILE', 'SIGNOFF_SDC_FILE'):
             _set(result, sources, key, 'dir::' + str(sdc.relative_to(project)),
                  'phase3/stage3/pnr/constraint.sdc (L9-derived producer artefact)')
-    declared, declared_sources = declaration_config(project)
+    # Mapped synthesis does not require a die/core/pad placement declaration.
+    # A present declaration is still validated; physical callers remain strict.
+    declared, declared_sources = (({}, {}) if synthesis_only
+                                 and not (project / DECLARATION_REL).exists()
+                                 else declaration_config(project))
     for key, value in declared.items():
         _set(result, sources, key, value, declared_sources[key])
     settings, setting_sources = _declared_flow_settings(l19, pdk)
@@ -1623,7 +1633,7 @@ def emit_synthesis_config(project: Path, pdk: str, output: Path,
     if not rtl_files or any(not path.is_file() or not path.resolve().is_relative_to(project.resolve())
                             for path in rtl_files):
         raise Refusal('LL_SYNTH_INPUT_MISSING', 'selected RTL must exist inside the project')
-    result = emit_config(project, pdk, output)
+    result = emit_config(project, pdk, output, synthesis_only=True)
     sources = _load(output.with_suffix('.provenance.json'))
     _set(result, sources, 'PDK', pdk, 'resolved PDK supplied by phase3_one_shot_runner')
     if std_cell_library:
@@ -1706,6 +1716,16 @@ def phase2_pdk(project: Path, *, selected: str | None = None) -> tuple[str, str]
                         continue
                     if not isinstance(value, str) or not _PDK_NAME.fullmatch(value.strip()):
                         raise ValueError(f'{key} must name an exact PDK distribution')
+                    # The staging record deliberately keeps both the raw
+                    # family token found in the staged enablement and the
+                    # executable target adopted from stronger evidence.  They
+                    # are provenance + decision, not two peer declarations.
+                    # Once an adopted target exists, validate but do not add
+                    # the raw staged identifier to the equality set.
+                    if (path.name == 'pdk_staging_read.json'
+                            and key == 'staged_identifier'
+                            and scope.get('adopted_pdk_target')):
+                        continue
                     values.add(value.strip())
         except (OSError, ValueError) as exc:
             raise Refusal('LL_PHASE2_PDK_INVALID', f'{path.relative_to(project)}: {exc}') from exc
@@ -1842,6 +1862,8 @@ def _detailed_route_drc_output(folder: Path, state: dict) -> Path:
 # One table for the run_chain floor and the bridge's chain requirements.
 _EARLY_STEP_INPUTS: dict[str, tuple[str, ...]] = {
     'Verilator.Lint': (), 'Yosys.JsonHeader': (), 'Yosys.Synthesis': ('json_h',),
+    'Checker.LintErrors': (), 'Checker.LintTimingConstructs': (),
+    'Checker.LintWarnings': (),
     'OpenROAD.CheckSDCFiles': ('nl',), 'OpenROAD.STAPrePNR': ('nl',),
     'OpenROAD.Floorplan': ('nl',), 'Yosys.EQY': ('nl',),
     'Vibeic.PostMapRepair': ('nl',),

@@ -1,8 +1,8 @@
 """D22 uses the existing Default synthesis owner and its complete consumer.
 
-The other frontend rows are deliberately not translated into an old shared
-span. Native proof/receipts are component evidence; 109 metric acceptance is
-NOT_MEASURED. The external qualification registry must be pre-reviewed.
+The Default native owner validates mapped synthesis; optional explicit tool
+qualification claims keep their strict registry path. PPA and whole-flow
+acceptance are independent of completing the selected synthesis operation.
 """
 from __future__ import annotations
 import hashlib
@@ -64,6 +64,11 @@ def input_census(project):
     roots = ('input', 'input_doc', 'phase1/generated_docs', 'phase2/stage1/rtl',
              'phase2/stage2/constraints')
     paths = {p for root in roots for p in (project / root).rglob('*') if p.is_file()}
+    from sdc_constraints import collect_sdc_files
+    paths.update(collect_sdc_files(project))
+    native_sdc = project / 'phase3/stage3/pnr/constraint.sdc'
+    if native_sdc.is_file():
+        paths.add(native_sdc)
     switch = project / 'phase3/librelane_switch.json'
     if switch.is_file():
         paths.add(switch)
@@ -108,7 +113,7 @@ def synthesis_fingerprint(project):
     _before(Path(project), active['context'], active['prepared'])
     return {'context_sha256': active['context']['context_sha256'],
             'qualification_uses': {use['use_id']: use['qualification_sha256']
-                                   for use in active['context']['runtime_tool_uses']}}
+                                   for use in (active['context']['runtime_tool_uses'] or [])}}
 
 
 def prepare(project, context):
@@ -116,7 +121,7 @@ def prepare(project, context):
     if context.get('requested_step') != 'D22':
         raise AdmissionRefusal('D22_CONTEXT_MISMATCH', 'synthesis component only')
     sources = operation_sources()
-    for use in context['runtime_tool_uses']:
+    for use in (context['runtime_tool_uses'] or []):
         if use.get('semantics', {}).get('operation_sources') != sources:
             raise AdmissionRefusal('D22_OPERATION_SOURCE_CHANGED', use['use_id'])
     manifest = _read(project / INPUT)
@@ -125,7 +130,7 @@ def prepare(project, context):
             or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_$]*', str(manifest.get('top', '')))
             or not isinstance(manifest.get('pdk'), str) or not manifest['pdk']):
         raise AdmissionRefusal('D22_INPUT_INVALID', 'explicit top and PDK required')
-    if not (project / 'input/submission_template/tapeout_declaration.json').is_file():
+    if context['runtime_tool_uses'] is not None and not (project / 'input/submission_template/tapeout_declaration.json').is_file():
         raise AdmissionRefusal('D22_REQUIRED_INPUT_ABSENT', 'canonical submission declaration required')
     from _hdl_code_text import strip_hdl_comments_and_strings
     for rtl in (project / 'phase2/stage1/rtl').rglob('*'):
@@ -139,7 +144,7 @@ def prepare(project, context):
     import design_one_shot_runner as runner
     pdk = runner._phase2_pdk_config(project, manifest['pdk'])
     liberty = Path(pdk.liberty).resolve()
-    for use in context['runtime_tool_uses']:
+    for use in (context['runtime_tool_uses'] or []):
         deck = use.get('deck') or {}
         if (not deck.get('path') or (project / deck['path']).resolve() != liberty
                 or deck.get('sha256') != _sha(liberty)):
@@ -175,7 +180,8 @@ def execute(project, context):
         try:
             result = step_preflight.retained_call(project, '9', runner.step_yosys_synth,
                 project, prepared['manifest']['top'], '', None,
-                pdk_name=prepared['manifest']['pdk'], canonical_acceptance=True)
+                pdk_name=prepared['manifest']['pdk'],
+                canonical_acceptance=context['runtime_tool_uses'] is not None)
         finally:
             _ACTIVE.reset(token)
             record['native_operations'] = active['operations']
@@ -193,8 +199,17 @@ def execute(project, context):
             record['native_receipt'] = {'path': str(receipt.relative_to(project)), 'sha256': _sha(receipt)}
         if result.status == 'FAIL':
             record.update(component_status='FAIL', reason='D22_EXISTING_PRODUCER_FAILED')
-        elif result.status == 'PASS' and record['canonical_current_pass']:
-            record.update(component_status='PASS', reason='D22_EXISTING_CANONICAL_CONSUMER_PASSED')
+        elif result.status == 'PASS':
+            if context['runtime_tool_uses'] is None:
+                # The native owner already validated current mapped bytes,
+                # library, provenance and all required native checkers.
+                record.update(component_status='PASS',
+                              completed=result.extras.get('completed') is True,
+                              default_row_status=result.extras.get('default_row_status', 'NOT_MEASURED'),
+                              reason='D22_EXISTING_NATIVE_OWNER_COMPLETED')
+            elif record['canonical_current_pass']:
+                record.update(component_status='PASS', completed=True, default_row_status='PASS',
+                              reason='D22_EXISTING_CANONICAL_CONSUMER_PASSED')
         else:
             record['reason'] = 'D22_CANONICAL_ACCEPTANCE_NOT_MEASURED'
     except AdmissionRefusal as exc:

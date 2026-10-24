@@ -256,6 +256,86 @@ def test_must_emit_without_a_field_table_is_not_a_declaration_contract(tmp_path)
     assert "NO_CONTRACT" in r.stderr
 
 
+GENERATED_SCALAR_CONTRACT = """## Declaration
+
+The Plugin MUST declare `{path}` before authoring:
+
+| Field | Required | Example |
+|---|---|---|
+| `serial_code` | Yes | `\"007\"` (primary) |
+| `lane_count` | Yes | `4` (primary) |
+"""
+
+
+def _make_generated_l_doc_project(tmp_path: Path, evidence: object,
+                                  name: str = "generated") -> Path:
+    project = tmp_path / name
+    out = project / "phase1" / "generated_docs"
+    out.mkdir(parents=True)
+    (out / "L9_INTEGRATION_SPEC.json").write_text(json.dumps({
+        "schema_version": 2,
+        "doc_class": "integration_spec",
+        "integration": {"build_declaration": [{
+            "id": 71,
+            "evidence": evidence,
+        }]},
+    }), encoding="utf-8")
+    return project
+
+
+def test_generated_l_doc_string_scalar_is_a_contract_and_keeps_value_types(tmp_path):
+    """Decode JSON strings without stringifying unrelated scalar types."""
+    import spec_declaration_emit as sde
+
+    p = _make_generated_l_doc_project(
+        tmp_path, GENERATED_SCALAR_CONTRACT.format(path=DECL_PATH))
+    contracts = sde.extract_contracts(p)
+    assert len(contracts) == 1, contracts
+    assert contracts[0]["source"].endswith("L9_INTEGRATION_SPEC.json")
+    assert contracts[0]["source_json_pointer"] == (
+        "/integration/build_declaration/0/evidence")
+
+    r = _run_emit(p)
+    assert r.returncode == 0, r.stdout + r.stderr
+    declaration = _declaration(p)
+    assert declaration["serial_code"] == "007"
+    assert isinstance(declaration["serial_code"], str)
+    assert declaration["lane_count"] == 4
+    assert type(declaration["lane_count"]) is int
+
+
+def test_generated_l_doc_does_not_join_separate_scalars_into_a_contract(tmp_path):
+    """A clause and table in different schema fields are not adjacent prose."""
+    import spec_declaration_emit as sde
+
+    p = _make_generated_l_doc_project(tmp_path, [
+        f"The Plugin MUST declare `{DECL_PATH}` before authoring:",
+        "| Field | Required | Example |\n|---|---|---|\n"
+        "| `unrelated_id` | Yes | `71` (primary) |",
+        109,
+        True,
+    ], "split-scalars")
+    assert sde.extract_contracts(p) == []
+    r = _run_emit(p)
+    assert r.returncode == 3
+    assert "NO_CONTRACT" in r.stderr
+
+
+def test_generated_l_doc_undesignated_menu_stays_undetermined(tmp_path):
+    """Fixing transport must not turn an allowed-value menu into a choice."""
+    p = _make_generated_l_doc_project(tmp_path, """The Plugin MUST declare
+`plugin_output/declaration.json` before authoring:
+
+| Field | Required | Example |
+|---|---|---|
+| `integer_encoding` | Yes | `signed_2c` / `unsigned` |
+""", "menu")
+    r = _run_emit(p)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "integer_encoding" in r.stderr
+    assert not (p / DECL_PATH).exists()
+
+
 # --------------------------------------------------------------------------- #
 # 2. FALSIFIABILITY — the emitter can refuse, and the gate stays red
 # --------------------------------------------------------------------------- #

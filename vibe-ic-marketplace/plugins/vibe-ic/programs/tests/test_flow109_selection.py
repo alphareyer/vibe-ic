@@ -182,7 +182,7 @@ def test_frontend_rows_route_stable_ids_to_existing_default_owner_sites():
         "D02": ("0.5ic", "phase1_one_shot_runner", "D1", "D1"),
         "D09": ("1", "design_one_shot_runner", "1", "1"),
         "D10": ("P0", "design_one_shot_runner", "1", "1"),
-        "D11": ("2", "design_one_shot_runner", "2", "3"),
+        "D11": ("2", "design_one_shot_runner", "2", "2"),
         "D12": ("3", "design_one_shot_runner", "2", "3"),
         "D13": ("4", "design_one_shot_runner", "4", "4"),
         "D14": ("5", "design_one_shot_runner", "4", "5"),
@@ -199,8 +199,190 @@ def test_frontend_rows_route_stable_ids_to_existing_default_owner_sites():
         assert (dispatch["native_step_id"], dispatch["owner_runner"],
                 dispatch["owner_entry_step"], dispatch["owner_exit_step"]) == values
         assert dispatch["native_step_id"] == row["legacy70"][0]["id"]
-        assert row["profile"]["execution_status"] == "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED"
+        expected_status = ("NATIVE_OWNER_WIRED_NOT_CASE_QUALIFIED" if row_id == "D11"
+                           else "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED")
+        assert row["profile"]["execution_status"] == expected_status
         assert dispatch["flow109_metrics_status"] == "UNIMPLEMENTED"
+
+
+def test_d24_routes_to_existing_default_dft_producer_and_consumer(tmp_path, monkeypatch):
+    features = profile("Mapped soft-IP with prestitched scan")
+    plan = flow109.resolve_plan(features)
+    row = flow109.resolve_step(plan, "D24")
+    dispatch = row["profile"]["dispatch"]
+    assert dispatch["kind"] == "canonical_owner_window"
+    assert (dispatch["native_step_id"], dispatch["owner_runner"],
+            dispatch["owner_entry_step"], dispatch["owner_exit_step"]) == (
+                "12", "design_one_shot_runner", "12", "12")
+    assert dispatch["producer"] == (
+        "design_one_shot_runner.py:_step_post_dft_optimization")
+    assert dispatch["consumer"] == (
+        "design_one_shot_runner retained Step 12 canonical acceptance")
+    assert row["profile"]["execution_status"] == (
+        "NATIVE_OWNER_WIRED_NOT_CASE_QUALIFIED")
+    import _delivery_route
+    assert _delivery_route.admit(tmp_path, "ip") is None
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"features": features}))
+    monkeypatch.setenv(flow109.CONTEXT_ENV, "")
+    args = SimpleNamespace(flow="109", flow109_manifest=manifest,
+                           flow109_plan_only=False, execution_mode="default",
+                           entry_step="D24", exit_step="D24", container="")
+    assert flow109.prepare_front_door(args, tmp_path) is None
+    assert (args.entry_step, args.exit_step) == ("12", "12")
+    owner = json.loads((tmp_path / "reports/flow109/owner_route.json").read_text())
+    assert owner["owner_runner"] == "design_one_shot_runner"
+    assert owner["native_step_id"] == "12"
+
+
+def test_d23_routes_to_existing_default_dft_producer_and_consumer(tmp_path, monkeypatch):
+    features = profile("Mapped soft-IP with prestitched scan")
+    plan = flow109.resolve_plan(features)
+    row = flow109.resolve_step(plan, "D23")
+    dispatch = row["profile"]["dispatch"]
+    assert dispatch["kind"] == "canonical_owner_window"
+    assert (dispatch["native_step_id"], dispatch["owner_runner"],
+            dispatch["owner_entry_step"], dispatch["owner_exit_step"]) == (
+                "11", "design_one_shot_runner", "11", "11")
+    assert dispatch["producer"] == (
+        "design_one_shot_runner.py:_step_dft_insertion")
+    assert dispatch["consumer"] == (
+        "design_one_shot_runner retained Step 11 canonical acceptance")
+    assert row["profile"]["execution_status"] == (
+        "NATIVE_OWNER_WIRED_NOT_CASE_QUALIFIED")
+    import _delivery_route
+    assert _delivery_route.admit(tmp_path, "ip") is None
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"features": features}))
+    monkeypatch.setenv(flow109.CONTEXT_ENV, "")
+    args = SimpleNamespace(flow="109", flow109_manifest=manifest,
+                           flow109_plan_only=False, execution_mode="default",
+                           entry_step="D23", exit_step="D23", container="")
+    assert flow109.prepare_front_door(args, tmp_path) is None
+    assert (args.entry_step, args.exit_step) == ("11", "11")
+    owner = json.loads((tmp_path / "reports/flow109/owner_route.json").read_text())
+    assert owner["owner_runner"] == "design_one_shot_runner"
+    assert owner["native_step_id"] == "11"
+
+
+def _step9_native_state(tmp_path, monkeypatch):
+    import hashlib
+    import vibe_ic_one_shot_runner as runner
+
+    netlist = tmp_path / "phase2/stage2/synth/netlist.v"
+    netlist.parent.mkdir(parents=True)
+    netlist.write_text("module top(input clk); endmodule\n")
+    sha = hashlib.sha256(netlist.read_bytes()).hexdigest()
+    folder = "phase2/stage2/9_current"
+    record = tmp_path / "steps" / folder / "outputs.json"
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({
+        "status": "NOT_MEASURED",
+        "canonical_pass": False,
+        "outputs": [{"rel": "phase2/stage2/synth/netlist.v", "sha256": sha}],
+    }))
+    versions = SimpleNamespace(
+        _read_index=lambda _p: {"steps": [{"id": "9", "folder": folder}]},
+        _versions_root=lambda _p: tmp_path / "steps",
+        _sha=lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+    )
+    handoff = SimpleNamespace(bound_handoff=lambda _p: {
+        "verdict": "PASS", "canonical": str(netlist), "mapped": str(netlist),
+        "netlist_sha256": sha, "findings": [],
+    })
+    monkeypatch.setitem(sys.modules, "step_output_collector", versions)
+    monkeypatch.setitem(sys.modules, "synth_handoff_netlist_check", handoff)
+    return runner, netlist
+
+
+def test_d23_accepts_current_native_step9_handoff_without_area_budget(
+        tmp_path, monkeypatch):
+    runner, _ = _step9_native_state(tmp_path, monkeypatch)
+
+    current, error = runner._current_step9_checkpoint(tmp_path)
+
+    assert error is None
+    assert current["step9_record"]["status"] == "NOT_MEASURED"
+    assert current["native_handoff"]["verdict"] == "PASS"
+
+
+def test_d23_rejects_step9_handoff_after_netlist_bytes_change(tmp_path, monkeypatch):
+    runner, netlist = _step9_native_state(tmp_path, monkeypatch)
+    netlist.write_text("module changed; endmodule\n")
+
+    current, error = runner._current_step9_checkpoint(tmp_path)
+
+    assert current is None
+    assert "no longer matches" in error
+
+
+def test_d23_rejects_wrong_l20_before_scan_or_atpg_launch(tmp_path, monkeypatch):
+    import vibe_ic_one_shot_runner as runner
+
+    mapped = tmp_path / "phase2/stage2/synth/top_synth.v"
+    mapped.parent.mkdir(parents=True)
+    mapped.write_text("module top(input clk); endmodule\n")
+    monkeypatch.setattr(runner, "_current_step9_checkpoint",
+                        lambda _p: ({"native_handoff": {"verdict": "PASS"}}, None))
+    design = SimpleNamespace(
+        derive_dft_clock_reset=lambda _p: ("clk", "rst", False),
+        _step_dft_insertion=lambda *a, **k: pytest.fail(
+            "wrong L20 must refuse before the native producer"),
+    )
+    atpg = SimpleNamespace(resolve_mapped_netlist=lambda *_a, **_k: (
+        "phase2/stage2/synth/top_synth.v", "test"))
+    scan = SimpleNamespace(
+        count_flops=lambda _text: 64,
+        load_l20_scan_contract=lambda *_a, **_k: (
+            None, ["L20 length=63 does not match mapped-netlist flop count 64"]),
+    )
+    monkeypatch.setitem(sys.modules, "design_one_shot_runner", design)
+    monkeypatch.setitem(sys.modules, "fault_atpg_run", atpg)
+    monkeypatch.setitem(sys.modules, "fault_scan_chain_insert", scan)
+
+    result = runner._complete_step11_dft(tmp_path, "top", "unused")
+
+    assert result["verdict"] == "NOT_MEASURED"
+    assert "length=63" in result["detail"]
+
+
+@pytest.mark.parametrize("step,native", [("D23", "11"), ("D24", "12")])
+@pytest.mark.parametrize("status", ["PASS", "FAIL", "NOT_MEASURED"])
+def test_bounded_dft_owner_publishes_its_actual_selected_step_verdict(
+        tmp_path, monkeypatch, step, native, status):
+    import _delivery_route
+    import vibe_ic_one_shot_runner as runner
+
+    features = profile("Mapped soft-IP with prestitched scan")
+    assert _delivery_route.admit(tmp_path, "ip") is None
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"features": features}))
+    monkeypatch.setenv(flow109.CONTEXT_ENV, "")
+    monkeypatch.setenv(flow109.ATTEMPT_ENV, "")
+    args = SimpleNamespace(flow="109", flow109_manifest=manifest,
+                           flow109_plan_only=False, execution_mode="default",
+                           entry_step=step, exit_step=step, container="")
+    assert flow109.prepare_front_door(args, tmp_path) is None
+
+    result = runner._finish_selected_native_owner(
+        tmp_path, native, {"verdict": status})
+
+    published = json.loads((tmp_path / "reports/flow109/default_rows" /
+                            f"{step}.json").read_text())
+    assert result["default_row_status"] == published["default_row_status"] == status
+    assert published["step_id"] == step
+    assert published["completed"] is (status == "PASS")
+    assert published["whole_flow_acceptance"] == "NOT_MEASURED"
+    assert published["delivery_accepted"] is False
+
+
+def test_bounded_owner_finish_does_not_change_legacy_execution(tmp_path, monkeypatch):
+    import vibe_ic_one_shot_runner as runner
+
+    monkeypatch.delenv(flow109.CONTEXT_ENV, raising=False)
+    assert runner._finish_selected_native_owner(
+        tmp_path, "11", {"verdict": "PASS"}) is None
+    assert not (tmp_path / "reports/flow109/default_rows").exists()
 
 
 def test_owner_route_uses_native_span_without_generic_qualification_registry(
@@ -432,3 +614,87 @@ def test_frontend_owner_window_preserves_existing_indivisible_spans():
     assert [row["id"] for row in window["resolved_rows"]] == [
         "D09", "D10", "D11", "D12", "D13", "D14"]
     assert (window["native_entry_step"], window["native_exit_step"]) == ("1", "5")
+
+# Native completion is an owner answer, separate from whole-flow acceptance.
+@pytest.mark.parametrize('component,status,completed,expected', [
+    ('PASS','PASS',True,'PASS'), ('PASS','PASS',False,'NOT_MEASURED'),
+    ('PASS',None,True,'NOT_MEASURED'), ('FAIL','PASS',True,'FAIL'),
+    ('NOT_MEASURED','PASS',True,'NOT_MEASURED'), ('PASS','FAIL',False,'FAIL')])
+def test_selected_native_completion_is_not_blanket_component_pass(
+        tmp_path, component, status, completed, expected):
+    context = flow109.execution_context(flow109.resolve_plan(profile()), 'D11', 'D11')
+    result = {'step_id':'D11','context_sha256':context['context_sha256'],
+              'component_status':component,'completed':completed}
+    if status is not None: result['default_row_status'] = status
+    answer = flow109._selected_step_result(tmp_path, context, result)
+    assert answer['default_row_status'] == expected
+    assert answer['whole_flow_acceptance'] == 'NOT_MEASURED'
+    assert answer['delivery_accepted'] is False
+
+
+@pytest.mark.parametrize('field,value', [
+    ('step_id','foreign'), ('context_sha256','foreign'),
+    ('whole_flow_acceptance','PASS'), ('delivery_accepted',True)])
+def test_selected_native_completion_rejects_foreign_identity_and_whole_claims(tmp_path,field,value):
+    context = flow109.execution_context(flow109.resolve_plan(profile()), 'D11', 'D11')
+    result = {'step_id':'D11','context_sha256':context['context_sha256'],
+              'component_status':'PASS','default_row_status':'PASS','completed':True}
+    result[field] = value
+    with pytest.raises(flow109.Flow109Error, match='FLOW109_COMPONENT_RESULT_INVALID'):
+        flow109._selected_step_result(tmp_path, context, result)
+    assert not (tmp_path/'reports/flow109/default_rows/D11.json').exists()
+
+
+def test_selected_native_completion_empty_is_not_a_result(tmp_path):
+    context = flow109.execution_context(flow109.resolve_plan(profile()), 'D11', 'D11')
+    with pytest.raises(flow109.Flow109Error, match='FLOW109_COMPONENT_RESULT_INVALID'):
+        flow109._selected_step_result(tmp_path, context, {})
+
+
+def test_selected_completion_consumer_is_not_limited_to_a_row_allowlist(tmp_path):
+    context = flow109.execution_context(flow109.resolve_plan(profile()), 'D11', 'D11')
+    calls=[]
+    def consume(project, request, component):
+        calls.append(request['requested_step'])
+        return {'step_id':'D11','context_sha256':request['context_sha256'],
+                'default_row_status':'PASS','completed':True}
+    answer=flow109._selected_step_result(tmp_path,context,
+        {'step_id':'D11','context_sha256':context['context_sha256'],
+         'component_status':'PASS','flow109_acceptance':'NOT_MEASURED'},
+        SimpleNamespace(consume_default_row_completion=consume))
+    assert calls==['D11'] and answer['default_row_status']=='PASS'
+
+
+@pytest.mark.parametrize('native,status,completed,expected', [
+    ('2','PASS',True,'PASS'), ('2','PASS',False,'NOT_MEASURED'),
+    ('2','FAIL',False,'FAIL'), ('foreign','PASS',True,'NOT_MEASURED')])
+def test_owner_finish_uses_only_selected_completed_native_result(
+        tmp_path, monkeypatch, native,status,completed,expected):
+    context=flow109.execution_context(flow109.resolve_plan(profile()),'D11','D11')
+    request=tmp_path/'request.json';request.write_text(json.dumps(context))
+    monkeypatch.setenv(flow109.CONTEXT_ENV,str(request))
+    report={'steps':[{'status':status,'extras':{'step_id':native,
+        'context_sha256':context['context_sha256'],
+        'default_row_status':status,'completed':completed}}]}
+    result=flow109.finish_native_window(tmp_path,report)
+    assert result['default_row_status']==expected
+    assert result['whole_flow_acceptance']=='NOT_MEASURED'
+    assert result['delivery_accepted'] is False
+
+
+def test_owner_finish_rejects_stale_context_and_empty_report(tmp_path,monkeypatch):
+    context=flow109.execution_context(flow109.resolve_plan(profile()),'D11','D11')
+    request=tmp_path/'request.json';request.write_text(json.dumps(context))
+    monkeypatch.setenv(flow109.CONTEXT_ENV,str(request))
+    report={'steps':[{'status':'PASS','extras':{'step_id':'2',
+        'context_sha256':'foreign','default_row_status':'PASS','completed':True}}]}
+    with pytest.raises(flow109.Flow109Error,match='FLOW109_CONTEXT_STALE'):
+        flow109.finish_native_window(tmp_path,report)
+    assert flow109.finish_native_window(tmp_path,{'steps':[]})['default_row_status']=='NOT_MEASURED'
+    context['context_sha256']='stale';request.write_text(json.dumps(context))
+    assert flow109.finish_native_window(tmp_path,report) is None
+
+
+def test_selected_lint_window_stops_at_its_own_step():
+    window=flow109.resolve_execution_window(flow109.resolve_plan(profile()),'D11','D11')
+    assert window['resolved_row']['profile']['dispatch']['owner_exit_step']=='2'

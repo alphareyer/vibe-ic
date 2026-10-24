@@ -132,7 +132,8 @@ def test_lint_config_carries_declared_inputs_and_refuses_foreign_rtl(tmp_path):
     assert config['meta'] == {'step': 'Verilator.Lint'}
     assert config['VERILOG_FILES'] == [str(src.resolve())]
     assert set(json.loads(out.with_suffix('.provenance.json').read_text())) == \
-        {'DESIGN_NAME', 'PDK', 'VERILOG_FILES'}
+        {'DESIGN_NAME', 'PDK', 'VERILOG_FILES', 'USE_SLANG'}
+    assert config['USE_SLANG'] is False
     with pytest.raises(contract.Refusal, match='LL_LINT_INPUT_MISSING'):
         contract.emit_lint_config(tmp_path / 'design', 'pdkA', out, 'cal_pos',
                                   [tmp_path / 'elsewhere.v'], 'x')
@@ -181,6 +182,7 @@ def _design(tmp_path, mode, log, errors, warnings):
             config = json.loads(Path(cmd[cmd.index('-c') + 1]).read_text())
             step_dir(folder, log.replace(POS_SRC, config['VERILOG_FILES'][0]),
                      config['VERILOG_FILES'], errors, warnings)
+            put(folder / 'config.json', config)  # retain native step identity
         return SimpleNamespace(returncode=0, stdout='', stderr='')
 
     return project, src, calls, tool
@@ -196,7 +198,7 @@ def _runner(monkeypatch, tool):
 
 
 def test_librelane_mode_lints_the_synthesis_file_set_and_blocks(tmp_path, monkeypatch):
-    project, src, calls, tool = _design(tmp_path, 'librelane', MULTI, 0, 1)
+    project, src, calls, tool = _design(tmp_path, 'librelane', POS, 1, 1)
     _, step = _runner(monkeypatch, tool)
     row = step(project) if step else None
     report_path = project / 'reports/phase2/lint/verilator_lint_gate.json'
@@ -243,6 +245,9 @@ def test_step2_books_the_shared_supervisor_refusal(tmp_path, monkeypatch,
     assert row.status == status
     assert row.reason_class == reason
     assert code in row.detail
+    assert row.extras['step_id'] == '2'
+    assert row.extras['default_row_status'] == status
+    assert row.extras['completed'] is False
 
 
 def test_direct_mode_is_unchanged_and_adds_no_row(tmp_path, monkeypatch):
@@ -295,3 +300,55 @@ def test_a_width_behind_a_define_is_compared_from_the_tool_ports(tmp_path):
 def test_a_top_missing_from_the_tool_ports_is_not_measured(tmp_path):
     other = put(tmp_path / 'other.json', {'modules': {'else': {'ports': {}}}})
     assert _conformance(tmp_path, '--tool-ports', str(other)).returncode == 2
+
+
+def _native_checks(root, metrics):
+    result={}
+    for sid,flag in [('Checker.LintErrors','ERROR_ON_LINTER_ERRORS'),
+                     ('Checker.LintTimingConstructs','ERROR_ON_LINTER_TIMING_CONSTRUCTS'),
+                     ('Checker.LintWarnings','ERROR_ON_LINTER_WARNINGS')]:
+        folder=root/sid;put(folder/'config.json',{'meta':{'step':sid},
+            flag:sid!='Checker.LintWarnings'})
+        put(folder/'state_out.json',{'metrics':metrics});result[sid]=folder
+    return result
+
+
+def test_default_lint_uses_native_checker_authority(tmp_path,monkeypatch):
+    project,src,_,tool=_design(tmp_path,'librelane',MULTI,0,1)
+    _,step=_runner(monkeypatch,tool)
+    result=step(project)
+    assert result.status=='PASS',result.detail
+    report=json.loads((project/'reports/phase2/lint/verilator_lint_gate.json').read_text())
+    assert report['counts']=={'errors':0,'warnings':1}
+    assert report['authority']=='LibreLane native lint checkers'
+    assert result.extras['completed'] is True
+
+
+@pytest.mark.parametrize('mutation,expected', [
+    ('missing','NOT_MEASURED'),('foreign','NOT_MEASURED'),
+    ('counter','NOT_MEASURED'),('disabled','NOT_MEASURED'),
+    ('latch','FAIL'),('error','FAIL'),('timing','FAIL'),
+    ('strict_warning','FAIL'),('missing_metric','NOT_MEASURED')])
+def test_native_lint_checks_preserve_failure_and_missing_work(tmp_path,mutation,expected):
+    src=rtl(tmp_path)
+    folder=step_dir(tmp_path/'lint','native diagnostics need no second parser\n',[src],0,307)
+    metrics=json.loads((folder/'state_out.json').read_text())['metrics']
+    if mutation in ('latch','error','timing'):
+        metric={'latch':'design__inferred_latch__count','error':'design__lint_error__count',
+                'timing':'design__lint_timing_construct__count'}[mutation];metrics[metric]=1
+    if mutation=='missing_metric':metrics.pop('design__inferred_latch__count')
+    put(folder/'state_out.json',{'metrics':metrics});checks=_native_checks(tmp_path/'checks',metrics)
+    errors=checks['Checker.LintErrors']
+    if mutation=='missing':(errors/'state_out.json').unlink()
+    if mutation=='foreign':put(errors/'config.json',{'meta':{'step':'Checker.TrDRC'}})
+    if mutation=='counter':put(errors/'state_out.json',{'metrics':{**metrics,'design__lint_error__count':9}})
+    if mutation=='disabled':put(errors/'config.json',{'meta':{'step':'Checker.LintErrors'},'ERROR_ON_LINTER_ERRORS':False})
+    if mutation=='strict_warning':put(checks['Checker.LintWarnings']/'config.json',{'meta':{'step':'Checker.LintWarnings'},'ERROR_ON_LINTER_WARNINGS':True})
+    answer=gate().judge(folder,[src],checker_dirs=checks)
+    assert answer['verdict']==expected,answer
+
+
+def test_native_metric_only_inputs_do_not_relax_physical_step_views():
+    contract._check_state({'metrics':{}},step_id='Checker.LintErrors')
+    with pytest.raises(contract.Refusal,match='LL_STATE_MISSING'):
+        contract._check_state({'metrics':{}},step_id='OpenROAD.DetailedRouting')

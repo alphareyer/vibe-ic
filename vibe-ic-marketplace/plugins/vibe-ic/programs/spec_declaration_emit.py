@@ -730,8 +730,32 @@ def _parse_field_table(text: str, start: int) -> Optional[Dict[str, Any]]:
 # Contract extraction
 # --------------------------------------------------------------------------- #
 
+def _json_pointer_token(value: Any) -> str:
+    """RFC 6901 spelling for one already-decoded object key."""
+    return str(value).replace("~", "~0").replace("/", "~1")
+
+
+def _iter_json_strings(value: Any, pointer: str = ""):
+    """Yield each string scalar with its stable JSON pointer.
+
+    Contracts are prose carried by string values.  Object keys, numbers,
+    booleans and null are schema data, not prose: stringifying them would
+    silently change their types and could join unrelated fields into a
+    declaration that no source scalar actually contains.
+    """
+    if isinstance(value, str):
+        yield pointer, value
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            token = _json_pointer_token(key)
+            yield from _iter_json_strings(child, f"{pointer}/{token}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from _iter_json_strings(child, f"{pointer}/{index}")
+
+
 def _iter_doc_texts(project: Path):
-    """Yield ``(relative_path, text)`` for every Phase-1 input doc.
+    """Yield ``(source_path, text, json_pointer)`` for Phase-1 prose.
 
     Directory set and extension set both come from
     ``spec_required_artifact_check`` so this program cannot look somewhere the
@@ -743,16 +767,20 @@ def _iter_doc_texts(project: Path):
             if not p.is_file() or p.suffix.lower() not in _srac._DOC_EXTS:
                 continue
             try:
-                yield str(p.relative_to(project)), p.read_text(errors="replace")
+                yield (str(p.relative_to(project)),
+                       p.read_text(errors="replace"), None)
             except OSError:
                 continue
     l_doc_dir = project / "phase1" / "generated_docs"
     if l_doc_dir.is_dir():
         for jf in sorted(l_doc_dir.glob("L*.json")):
             try:
-                yield str(jf.relative_to(project)), jf.read_text(errors="replace")
-            except OSError:
+                document = json.loads(jf.read_text(errors="replace"))
+            except (OSError, ValueError):
                 continue
+            rel = str(jf.relative_to(project))
+            for pointer, text in _iter_json_strings(document):
+                yield rel, text, pointer or "/"
 
 
 def extract_contracts(project: Path,
@@ -771,7 +799,7 @@ def extract_contracts(project: Path,
     """
     contracts: List[Dict[str, Any]] = []
     seen: set = set()
-    for rel, text in _iter_doc_texts(project):
+    for rel, text, pointer in _iter_doc_texts(project):
         for pattern_name, rx in (("english_imperative", _srac._EN_PATTERN),
                                  ("zh_tw_imperative", _srac._ZH_PATTERN)):
             for m in rx.finditer(text):
@@ -795,6 +823,7 @@ def extract_contracts(project: Path,
                         rejected.append({
                             "artifact_path": path,
                             "source": rel,
+                            "source_json_pointer": pointer,
                             "clause_text": m.group(0).strip(),
                             "reason": ("the declared artifact path resolves "
                                        "outside the project root; this "
@@ -805,6 +834,7 @@ def extract_contracts(project: Path,
                 contracts.append({
                     "artifact_path": path,
                     "source": rel,
+                    "source_json_pointer": pointer,
                     "clause_text": m.group(0).strip(),
                     "pattern": pattern_name,
                     **table,
@@ -1419,7 +1449,10 @@ def resolve(contract: Dict[str, Any],
                         "%s designates %r as the value for this field "
                         "(annotation %r); the other listed values are "
                         "alternates"
-                        % (contract.get("source", "the spec"), designated[0],
+                        % ((contract.get("source", "the spec")
+                            + (("#" + contract["source_json_pointer"])
+                               if contract.get("source_json_pointer") else "")),
+                           designated[0],
                            (f.get("value_annotations") or {}).get(
                                designated[0], ""))),
                     recovered_from_prose=False,
@@ -2217,7 +2250,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     sidecar = out_path.with_name(out_path.stem + ".provenance.json")
     # Capture the author/spec sources and the carried declaration
     # preimages before publication replaces them. CLI choices are in argv.
-    publication_sources = [project / rel for rel, _ in _iter_doc_texts(project)]
+    publication_sources = list(dict.fromkeys(
+        project / rel for rel, _, _ in _iter_doc_texts(project)))
     if args.from_json:
         publication_sources.append(Path(args.from_json).resolve())
     publication_sources.extend(p for p in (out_path, sidecar) if p.is_file())
@@ -2362,6 +2396,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "generated_at": _now(),
         "declaration_path": contract["artifact_path"],
         "contract_source": contract["source"],
+        "contract_source_json_pointer": contract.get("source_json_pointer"),
         "contract_clause": contract["clause_text"],
         "required_column_found": contract["required_column"] is not None,
         "fields": status,

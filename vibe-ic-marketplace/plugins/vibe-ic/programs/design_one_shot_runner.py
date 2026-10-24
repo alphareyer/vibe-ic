@@ -1093,7 +1093,7 @@ def _docker_exec(container: str, cmd: str, timeout: int = 600, *,
     import _docker_watchdog as _dw
     return _dw.run_docker_supervised(
         container, cmd, marker, docker_exec_raw=_docker_exec_raw,
-        log_path=log_path)
+        exec_argv=_exec_argv, log_path=log_path)
 
 
 def _tool_in_container(container: str, tool: str) -> bool:
@@ -13958,16 +13958,30 @@ def step_rtl_lint_tool(project: Path, *, pdk_name: Optional[str] = None) -> Opti
             config_dir / "header_resolved.json", mounts=mounts, pdk_root=pdk_root)
         state_in = config_dir / "lint_state_in.json"
         _ll.write_json(state_in, {})
-        folder, header_dir = _ll.run_chain(
-            project, image, [("Verilator.Lint", resolved, state_in),
+        checks = []
+        for sid in ("Checker.LintTimingConstructs", "Checker.LintErrors", "Checker.LintWarnings"):
+            raw = config_dir / (sid.replace(".", "_") + ".json")
+            _ll.write_json(raw, {**header, "meta": {"step": sid}})
+            checked_config = _ll.resolve_step_config(
+                project, image, raw, raw.with_name(raw.stem + "_resolved.json"),
+                mounts=mounts, pdk_root=pdk_root)
+            checks.append((sid, checked_config, state_in))
+        input_hashes = {str(path): _ll.digest(path) for path in rtl}
+        folders = _ll.run_chain(
+            project, image, [("Verilator.Lint", resolved, state_in), *checks,
                              ("Yosys.JsonHeader", header_resolved, state_in)],
             mounts=mounts, pdk_root=pdk_root, lane="step2")
+        folder, header_dir = folders[0], folders[-1]
+        if input_hashes != {str(path): _ll.digest(path) for path in rtl}:
+            raise _ll.Refusal("LL_LINT_INPUT_CHANGED", "RTL changed during native lint")
     except (_ll.Refusal, OSError, ValueError) as exc:
         stopped = (_ll.tool_stop_reason(exc.code)
                    if isinstance(exc, _ll.Refusal) else None)
         return StepResult("rtl_lint_tool", "NOT_MEASURED" if stopped else "FAIL",
                           time.time() - t0, str(exc),
-                          reason_class=(stopped or ""))
+                          reason_class=(stopped or ""),
+                          extras={"step_id": "2", "completed": False,
+                                  "default_row_status": "NOT_MEASURED" if stopped else "FAIL"})
     # The step-2 port conformance, against the tool's elaborated interface.
     # Advisory like its flow clause: recorded, never the lint verdict.
     conformance = project / "reports/phase2/gates/spec_conformance_tool_ports.json"
@@ -13982,7 +13996,10 @@ def step_rtl_lint_tool(project: Path, *, pdk_name: Optional[str] = None) -> Opti
              *(["--top", str(top)] if top else []),
              "--tool-ports", str(json_h), "--json", str(conformance)],
             capture_output=True, text=True).returncode
-    report = _vlg.judge(folder, rtl)
+    report = _vlg.judge(folder, rtl, **({"checker_dirs": {
+        sid: path for (sid, _, _), path in zip(checks, folders[1:-1])}}
+        if mode == "librelane" else {}))
+    report["input_sha256"] = input_hashes
     report["mode"] = mode
     out_dir.mkdir(parents=True, exist_ok=True)
     _ll.write_json(gate_json, report)
@@ -14012,7 +14029,11 @@ def step_rtl_lint_tool(project: Path, *, pdk_name: Optional[str] = None) -> Opti
     reason = "" if status != "NOT_MEASURED" else (
         "input_absent" if report.get("reason_class") == "INPUT_ABSENT" else "inconclusive")
     return StepResult("rtl_lint_tool", status, time.time() - t0, detail, outputs,
-                      extras={"mode": mode, "spec_conformance_tool_ports_rc": conformance_rc},
+                      extras={"mode": mode, "spec_conformance_tool_ports_rc": conformance_rc,
+                              "step_id": "2", "default_row_status": status,
+                              "completed": status == "PASS",
+                              "native_checks": report.get("native_checks", {}),
+                              "input_sha256": input_hashes},
                       reason_class=reason)
 
 
@@ -22697,6 +22718,21 @@ def _dft_owned_result(rows, pdk=None):
         extras={}, rows=rows, pdk=pdk)
 
 
+def derive_dft_clock_reset(project: Path) -> tuple[str, str, bool]:
+    """Derive Step 11's clock/reset from the synthesized subject it consumes."""
+    netlist = _pl.synth_dir(project) / "netlist.v"
+    rtl_dir = project / "phase2/stage1/rtl"
+    try:
+        blob = netlist.read_text(errors="ignore")
+        if not _derive_dft_clock_name(blob):
+            rtl_files = sorted([*rtl_dir.glob("*.v"), *rtl_dir.glob("*.sv")])
+            blob = "\n".join(f.read_text(errors="ignore") for f in rtl_files)
+        return (_derive_dft_clock_name(blob),
+                *_derive_dft_reset_name(blob))
+    except Exception:
+        return "", "", False
+
+
 @_spf.retained_step('11', canonical_acceptance=True)
 def _step_dft_insertion(project: Path, top_name: str, container: str,
                         clk: str, dft_rst: str, dft_rst_active_low: bool,
@@ -23391,26 +23427,10 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
     # initialising to it would publish "there are no library-mapped cells" on a
     # run that never looked. DT1 measures it instead — see the sniff below.
     pdk: Optional[str] = None
-    try:
-        # DERIVE FROM THE TOP'S OWN PORTS, NOT FROM EVERY FILE IN rtl/.
-        # The old blob was the concatenation of every RTL file, so on any
-        # multi-module design a SUBMODULE's port name could win. Measured on
-        # subservient x sky130A: the blob yields `clk` — serv_top's port — while
-        # the chip top's clock is `i_clk`, and `fault chain --clock clk` then
-        # dies with "Module port `\clk' is not declared in module header",
-        # losing the scan chain exactly like the missing --reset did.
-        # The mapped netlist is flattened and contains ONLY the top's ports, and
-        # it is the very file `fault chain` is about to read, so it is the
-        # authoritative source here. Fall back to the RTL blob if unreadable.
-        blob = netlist.read_text(errors="ignore")
-        if not _derive_dft_clock_name(blob):
-            rtl_files = sorted([*rtl_dir.glob("*.v"), *rtl_dir.glob("*.sv")])
-            blob = "\n".join(f.read_text(errors="ignore") for f in rtl_files)
-        clk = _derive_dft_clock_name(blob)
-        dft_rst, dft_rst_active_low = _derive_dft_reset_name(blob)
-    except Exception:
-        clk = ""
-        dft_rst, dft_rst_active_low = "", False
+    # Derive from the exact Step-9 subject through the same helper used by the
+    # bounded Step-11 front door.  This prevents the normal entry and the
+    # monolithic 11..13 chain from silently choosing different DFT ports.
+    clk, dft_rst, dft_rst_active_low = derive_dft_clock_reset(project)
 
     _dft = _step_dft_insertion(project, top_name, container, clk,
                                dft_rst, dft_rst_active_low, full_chip)
@@ -26872,6 +26892,35 @@ def main() -> int:
         print(f"REFUSED: canonical Phase-2 admission: {_canonical.reason} "
               f"({_canonical.detail})", file=sys.stderr)
         return 2
+
+    # A native Step-2 request owns lint, not slot packaging, arithmetic
+    # declarations or the neighbouring CDC span. Consume the actual native
+    # checker answer through this existing normal entry and report writer.
+    import librelane_contract as _lint_contract
+    if (str(args.entry_step) == "2" and str(args.exit_step) == "2"
+            and _lint_contract.selected_mode(project, "2") == "librelane"):
+        row = step_rtl_lint_tool(project, pdk_name=args.pdk)
+        raw_context = os.environ.get("VIBEIC_FLOW109_CONTEXT")
+        if raw_context:
+            row.extras["context_sha256"] = json.loads(Path(raw_context).read_text())["context_sha256"]
+        summary = {"project": str(project), "steps": [asdict(row)], "verdict": row.status,
+                   "declared_window": {"entry_step": "2", "exit_step": "2",
+                                       "dispatched_step_ids": ["2"]},
+                   "bounded_disclosures": ["native lint only; whole flow not measured"]}
+        out = _pl.report_path(project, "phase2_one_shot.json")
+        _write_phase2_report(out, summary, project,
+                            invocation_context=_dispatch_invocation_context)
+        import flow109
+        finished = flow109.finish_native_window(project, summary, out)
+        status = (finished.get("default_row_status", "NOT_MEASURED")
+                  if raw_context and finished is not None
+                  else "NOT_MEASURED" if raw_context else row.status)
+        if status != summary["verdict"]:
+            summary["verdict"] = status
+            _write_phase2_report(out, summary, project,
+                                invocation_context=_dispatch_invocation_context)
+        print(f"native Step 2: {row.status} — {row.detail}")
+        return {"PASS": 0, "FAIL": 1}.get(status, 2)
 
     plan: List[StepResult] = []
 
