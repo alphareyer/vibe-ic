@@ -209,6 +209,8 @@ def test_default_reads_semantic_image_live_but_keeps_explicit_file_bindings(tmp_
 
 @pytest.mark.parametrize("changed", ["em_current_density_check.py",
                                     "em_peak_current_authority_check.py",
+                                    "execution_backend_producers.py",
+                                    "_emit_ir_em_reports",
                                     "_emit_em_current_authority"])
 def test_current_ir_keeps_its_measured_failure_after_em_only_source_changes(
         tmp_path, monkeypatch, changed):

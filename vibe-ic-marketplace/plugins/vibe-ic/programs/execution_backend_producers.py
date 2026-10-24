@@ -1730,7 +1730,10 @@ def produce_signoff(project, params):
         ok = R._emit_ir_em_reports(
             project, top, pdk, container,
             rpt / ('ir_drop_psm_cross_check.rpt' if ordinary else 'ir_drop.rpt'),
-            rpt / 'em.rpt', notes, **({'em_only': True} if ordinary else {}))
+            rpt / 'em.rpt', notes, **({
+                'em_only': True,
+                'layout_basis': primary.get('current_em_basis'),
+            } if ordinary else {}))
         if not ok[1]:
             raise em.Refusal('BACKEND_EM_NATIVE_UNMEASURED', sid)
         R._emit_em_current_authority(project, pdk, container, notes)

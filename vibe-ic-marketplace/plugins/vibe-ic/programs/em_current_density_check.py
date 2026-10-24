@@ -1121,6 +1121,7 @@ def native_source_identity() -> Dict[str, str]:
             result[node.name] = hashlib.sha256(
                 "".join(lines[node.lineno - 1:node.end_lineno]).encode()).hexdigest()
     for name in ("em_current_density_check.py", "em_peak_current_authority_check.py",
+                 "execution_backend_producers.py",
                  "librelane_ir_antenna.py", "dynamic_ir_vectored_emit.py",
                  "ir_drop_report_check.py"):
         result[name] = hashlib.sha256((root / name).read_bytes()).hexdigest()
@@ -1133,7 +1134,7 @@ def native_source_identity() -> Dict[str, str]:
 _PRIMARY_IR_SOURCE_KEYS = (
     "_librelane_step24_record", "_librelane_step24_refusal_publish",
     "_librelane_step24_publish", "_step24_primary_mode", "_step24_adopt_primary",
-    "_step24_basis_inputs", "_step24_transient_argv", "_emit_ir_em_reports",
+    "_step24_basis_inputs", "_step24_transient_argv",
     "librelane_ir_antenna.py", "dynamic_ir_vectored_emit.py", "ir_drop_report_check.py",
 )
 
@@ -1246,12 +1247,14 @@ def validate_primary_ir(project: Path) -> Dict[str, Any]:
             tool_state = _retained_native_path(
                 project, record["tool_state"], state_sha, None)
         selected = None
+        selected_paths = None
         if record.get("input_mode") == "current_stapostpnr_odb":
             selected = record.get("selected_inputs")
             required = {"odb", "def", "netlist", "sdc", "spef", "sta_state",
                         "sta_receipt", "sta_config", "step23_record"}
             if not isinstance(selected, dict) or set(selected) != required:
                 raise ValueError("LibreLane IR current STA input population changed")
+            selected_paths = {}
             for role, row in selected.items():
                 if not isinstance(row, dict) or set(row) != {"path", "sha256"}:
                     raise ValueError(f"LibreLane IR current STA {role} binding malformed")
@@ -1261,6 +1264,7 @@ def validate_primary_ir(project: Path) -> Dict[str, Any]:
                         or not row["sha256"] or target.is_symlink()
                         or not target.is_file() or _native_sha(target) != row["sha256"]):
                     raise ValueError(f"LibreLane IR current STA bytes changed: {role}")
+                selected_paths[role] = target
             chain = record.get("input_source_chain") or {}
             if (chain.get("source") != "current validated OpenROAD.STAPostPNR state"
                     or not chain.get("image") or not chain.get("pdk_root")
@@ -1297,8 +1301,14 @@ def validate_primary_ir(project: Path) -> Dict[str, Any]:
                     raise ValueError(f"LibreLane IR current bytes changed: {name}")
         # Preserve exact native-basis/relocation validation after the more
         # specific current-selection checks, keeping their refusal diagnosis.
-        for row in [doc["native_basis"][key] for key in ("odb", "sdc", "spef", "tech_lef")] + doc["native_basis"]["liberties"]:
+        native_paths = {}
+        for key in ("odb", "sdc", "spef", "tech_lef"):
+            row = doc["native_basis"][key]
+            native_paths[key] = _retained_native_path(
+                project, row["path"], row["sha256"], old_root)
+        native_paths["liberties"] = [
             _retained_native_path(project, row["path"], row["sha256"], old_root)
+            for row in doc["native_basis"]["liberties"]]
         if selected is not None:
             native_odb = doc["native_basis"]["odb"]
             if (selected["odb"]["sha256"] != native_odb["sha256"]
@@ -1311,8 +1321,27 @@ def validate_primary_ir(project: Path) -> Dict[str, Any]:
         judged = la.judge_ir(rebound_record)
         if judged != doc["judgment"] or judged["verdict"] not in ("PASS", "FAIL"):
             raise ValueError("LibreLane IR measurement/coverage unavailable")
-        return {"valid": True, "verdict": judged["verdict"],
-                "producer": doc["producer"], "tool_state_sha256": record["tool_state_sha256"]}
+        result = {"valid": True, "verdict": judged["verdict"],
+                  "producer": doc["producer"],
+                  "tool_state_sha256": record["tool_state_sha256"]}
+        if selected is not None:
+            # Step 25 may consume these already-authorized bytes directly.
+            # Paths are resolved here only after the complete current-owner,
+            # role, digest, receipt and source-chain validation above.  The
+            # retained receipt is never rewritten and a malformed current
+            # owner never degrades to the legacy routed-DEF path.
+            result["current_em_basis"] = {
+                role: {"path": str(selected_paths[role]),
+                       "sha256": selected[role]["sha256"]}
+                for role in ("odb", "def", "netlist", "sdc", "spef")}
+            result["current_em_basis"]["tech_lef"] = {
+                "path": str(native_paths["tech_lef"]),
+                "sha256": doc["native_basis"]["tech_lef"]["sha256"]}
+            result["current_em_basis"]["liberties"] = [
+                {"path": str(path), "sha256": row["sha256"]}
+                for path, row in zip(native_paths["liberties"],
+                                     doc["native_basis"]["liberties"])]
+        return result
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         return {"valid": False, "verdict": "NOT_MEASURED",
                 "reason": str(exc), "rule": "LL_IR_CURRENT_BINDING_INVALID"}

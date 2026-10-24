@@ -73279,7 +73279,8 @@ def _polarity_accepted_tool_lines(log: str, pattern: str,
 
 def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
                         container: str, ir_rpt: Path, em_rpt: Path,
-                        notes: List[str], *, em_only: bool = False) -> Tuple[bool, bool]:
+                        notes: List[str], *, em_only: bool = False,
+                        layout_basis: Optional[Dict[str, Any]] = None) -> Tuple[bool, bool]:
     """OpenROAD PSM IR-drop + EM on the routed DEF (no SPEF required).
 
     Runs `analyze_power_grid -enable_em` for each discovered supply and ground
@@ -73289,7 +73290,35 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     Best-effort: returns (ir_ok, em_ok). chip-AGNOSTIC — power net names
     are discovered from the DEF SPECIALNETS."""
     pnr_out = _pl.pnr_dir(project)
-    def_file = pnr_out / f"{top}.def"
+    current_paths = None
+    if layout_basis is not None:
+        required = {"odb", "def", "netlist", "sdc", "spef", "tech_lef",
+                    "liberties"}
+        if not em_only or set(layout_basis) != required or not layout_basis["liberties"]:
+            notes.append("EM skipped: current layout basis is malformed")
+            return False, False
+        current_paths = {}
+        for role in ("odb", "def", "netlist", "sdc", "spef", "tech_lef"):
+            row = layout_basis[role]
+            path = Path(row.get("path", "")) if isinstance(row, dict) else Path()
+            if (not isinstance(row, dict) or set(row) != {"path", "sha256"}
+                    or path.is_symlink() or not path.is_file()
+                    or _sha256_file(path) != row["sha256"]):
+                notes.append(f"EM skipped: current {role} basis changed")
+                return False, False
+            current_paths[role] = path
+        current_paths["liberties"] = []
+        for row in layout_basis["liberties"]:
+            path = Path(row.get("path", "")) if isinstance(row, dict) else Path()
+            if (not isinstance(row, dict) or set(row) != {"path", "sha256"}
+                    or path.is_symlink() or not path.is_file()
+                    or _sha256_file(path) != row["sha256"]):
+                notes.append("EM skipped: current liberty basis changed")
+                return False, False
+            current_paths["liberties"].append(path)
+        def_file = current_paths["def"]
+    else:
+        def_file = pnr_out / f"{top}.def"
     if not def_file.is_file():
         notes.append("IR/EM skipped: routed DEF missing")
         return False, False
@@ -73311,7 +73340,9 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
         return False, False
     mp = pdk.metal_prefix
     def_c = _to_container_path(str(def_file), container)
-    tech_lef_c = _to_container_path(str(pdk.tech_lef), container)
+    tech_lef = (current_paths["tech_lef"] if current_paths is not None
+                else Path(pdk.tech_lef))
+    tech_lef_c = _to_container_path(str(tech_lef), container)
     cell_lef_c = _to_container_path(str(pdk.cell_lef), container)
     liberty_c = _to_container_path(str(pdk.liberty), container)
     macro_lefs_tcl = "\n".join(
@@ -73333,7 +73364,7 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     # separately cited per-cut authority. Apply the same single margin below.
     # Apply the same margin as the retained vibe-ic gate for a meaningful A/B.
     import em_current_density_check as _emcd
-    _tlef = _read_pdk_text(str(pdk.tech_lef), container) or ""
+    _tlef = _read_pdk_text(str(tech_lef), container) or ""
     _jmax, _per_cut_authority = _emcd.native_jmax_table(_tlef, pdk.name)
     _em_limits = out_dir / "em_openroad_limits.txt"
     _limit_rows = _emcd.native_limits(_tlef, pdk_name=pdk.name).splitlines()
@@ -73370,7 +73401,7 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     # invalid values" once the grid is actually connected (straps present). Emit
     # `set_layer_rc -via <cut> -resistance <r>` from the discovered per-cut values
     # so PSM can build a valid resistance map and compute static IR.
-    via_res = _discover_via_resistances(pdk.tech_lef)
+    via_res = _discover_via_resistances(tech_lef)
     via_rc_tcl = "".join(
         f"catch {{set_layer_rc -via {cut} -resistance {r}}}\n"
         for cut, r in sorted(via_res.items()))
@@ -73427,20 +73458,30 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     # 15.0 mV. On this one basis: 21.9 mW, 7.41/8.39 mV static, 14.8/16.8 mV
     # quasi-static, and every record carries the same basis id.
     import dynamic_ir_vectored_emit as _dyn_basis
-    _basis = _step24_basis_inputs(project, def_file, pdk, container)
+    _basis = (_step24_basis_inputs(project, def_file, pdk, container)
+              if current_paths is None else {
+                  "def": def_file, "sdc": current_paths["sdc"],
+                  "spef": current_paths["spef"], "spef_reason": None,
+                  "liberty": str(current_paths["liberties"][0]),
+                  "extra_liberties": [str(path) for path in
+                                       current_paths["liberties"][1:]],
+              })
     _primary_ir_mode = _step24_primary_mode(project)
     if _primary_ir_mode != "direct":
         if not em_only:
             _librelane_step24_record(project, top, pdk, _primary_ir_mode,
                                       _basis["spef"] or (_pl.extracted_dir(project) / f"{top}.spef"), [])
-        _basis = _step24_basis_inputs(project, def_file, pdk, container)
+        if current_paths is None:
+            _basis = _step24_basis_inputs(project, def_file, pdk, container)
         liberty_c = _to_container_path(_basis["liberty"], container)
         _oc = _liberty_operating_condition(_basis["liberty"], container)
         _oc_tcl = (f"catch {{set_operating_conditions {_oc}}}\n" if _oc else "")
     _source_identity = _emcd.native_source_identity()
     _native_inputs = {}
-    _input_paths = {"layout": str(def_file), "tech_lef": str(pdk.tech_lef),
+    _input_paths = {"layout": str(def_file), "tech_lef": str(tech_lef),
                     "cell_lef": str(pdk.cell_lef), "liberty0": _basis["liberty"]}
+    if current_paths is not None:
+        _input_paths["netlist"] = str(current_paths["netlist"])
     if _per_cut_authority is not None:
         _input_paths["per_cut_authority"] = str(_per_cut_snapshot)
     for role in ("sdc", "spef"):
@@ -73454,7 +73495,10 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     # Use the actual LibreLane IR input ODB when the route ran. It is the
     # bridge of this current DEF and preserves the tool's PSM source subject.
     _ll_doc_path = out_dir / _LL_IR_RECORD
-    if _primary_ir_mode != "direct":
+    if current_paths is not None:
+        _input_paths["librelane_odb"] = str(current_paths["odb"])
+        _read_layout_tcl = f"read_db {_dyn_basis._tcl_word(_to_container_path(str(current_paths['odb']), container))}"
+    elif _primary_ir_mode != "direct":
         _ll_doc = json.loads(_ll_doc_path.read_text())
         if _ll_doc.get("record"):
             _ll_state_path = Path(_ll_doc["record"]["tool_state"]).parent / "state_in.json"
@@ -73609,7 +73653,7 @@ catch {{set_wire_rc -clock -layer {mp}5}}
                            if _per_cut_authority is not None else "LEF-native literal areal authority"),
         "def_sha256": hashlib.sha256(def_file.read_bytes()).hexdigest(),
         "signal_em": "NOT_MEASURED: no activity and signal J-limit authority",
-        "pdk": {"name": pdk.name, "tech_lef": str(pdk.tech_lef)},
+        "pdk": {"name": pdk.name, "tech_lef": str(tech_lef)},
         "authority": {"snapshot": str(_authority_snapshot.relative_to(project))},
         "margin": _emcd._DEFAULT_MARGIN, "source_identity": _source_identity,
         "inputs": _native_inputs, "power_basis": _basis_record,
@@ -73838,8 +73882,8 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "source_model": _psm_model["model"],
             "psm_source_model": _psm_model,
             "power_basis": _ppa_power.em_power_basis(
-                log, sdc=(str(_basis["sdc"].relative_to(project)) if _basis["sdc"] else None),
-                spef=(str(_basis["spef"].relative_to(project)) if _basis["spef"] else None),
+                log, sdc=(_rel_to_project(_basis["sdc"], project) if _basis["sdc"] else None),
+                spef=(_rel_to_project(_basis["spef"], project) if _basis["spef"] else None),
                 spef_reason=_basis["spef_reason"], liberties=[liberty_c, *_pb_libs],
                 uncalibrated=_pb_uncal, basis_id=_basis_record["id"]),
             "segments_analysed": seg_count,
@@ -73850,7 +73894,7 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             # disk later and compare it with itself, which is why the PDN floor
             # could be sized from a previous run's current with nothing able to
             # notice. See `_pdn_em_measures_this_layout`.
-            "subject_def": str(def_file.relative_to(project)),
+            "subject_def": _rel_to_project(def_file, project),
             "subject_def_sha256": _native_inputs["layout"]["sha256"],
             # NOT a sign-off verdict — see the ir_drop.json note above. The EM
             # sign-off PASS/FAIL (segment current density vs PDK Jmax) is
