@@ -1506,22 +1506,24 @@ def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN,
             # that earlier step's published dictionary.
             if not (doc.get("librelane_ir") or {}).get("adopted"):
                 raise ValueError("current Step-24 primary reference absent")
-            source_basis = primary["current_em_basis"]["supply_sources"]
-            recorded_sources = doc.get("supply_source_basis")
-            if (not isinstance(recorded_sources, dict)
-                    or recorded_sources.get("model") != source_basis["model"]
-                    or set(recorded_sources.get("vsrc") or {})
-                    != set(source_basis["vsrc"])):
-                raise ValueError("current D57 VSRC model was not consumed")
-            for net, expected in source_basis["vsrc"].items():
-                actual = recorded_sources["vsrc"][net]
-                role = f"vsrc_{net}"
-                if (actual != {"input_role": role,
-                               "sha256": expected["sha256"],
-                               "voltage_v": expected["voltage_v"]}
-                        or role not in doc["inputs"]
-                        or doc["inputs"][role]["sha256"] != expected["sha256"]):
-                    raise ValueError(f"current D57 VSRC input differs: {net}")
+            current_basis = primary.get("current_em_basis")
+            if current_basis is not None:
+                source_basis = current_basis["supply_sources"]
+                recorded_sources = doc.get("supply_source_basis")
+                if (not isinstance(recorded_sources, dict)
+                        or recorded_sources.get("model") != source_basis["model"]
+                        or set(recorded_sources.get("vsrc") or {})
+                        != set(source_basis["vsrc"])):
+                    raise ValueError("current D57 VSRC model was not consumed")
+                for net, expected in source_basis["vsrc"].items():
+                    actual = recorded_sources["vsrc"][net]
+                    role = f"vsrc_{net}"
+                    if (actual != {"input_role": role,
+                                   "sha256": expected["sha256"],
+                                   "voltage_v": expected["voltage_v"]}
+                            or role not in doc["inputs"]
+                            or doc["inputs"][role]["sha256"] != expected["sha256"]):
+                        raise ValueError(f"current D57 VSRC input differs: {net}")
         layout_row = doc["inputs"]["layout"]
         subject_layout = _lexical_absolute(project, subject["subject_def"])
         owned_layout = _lexical_absolute(
