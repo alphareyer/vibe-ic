@@ -122,10 +122,14 @@ def test_actual_general_entry_proves_final_mapped_netlist_and_publishes_common_s
     result = subprocess.run([sys.executable, str(main), str(tmp_path), '--flow', '109',
         '--flow109-manifest', str(tmp_path / 'manifest.json'), '--entry-step', 'D44', '--exit-step', 'D44',
         '--route', 'ic', '--no-dashboard'], capture_output=True, text=True)
+    _put(tmp_path, 'normal-cli.json', {'argv': result.args, 'rc': result.returncode,
+        'stdout': result.stdout, 'stderr': result.stderr})
     assert result.returncode == 0, result.stdout + result.stderr
     record = json.loads((tmp_path / 'reports/flow109/components/D44.json').read_text())
     assert record['component_status'] == 'PASS'
-    assert record['flow109_acceptance'] == record['baseline_adoption'] == 'NOT_MEASURED'
+    assert record['flow109_acceptance'] == record['default_row_status'] == 'PASS'
+    assert record['completed'] is True
+    assert record['baseline_adoption'] == 'NOT_MEASURED'
     assert record['proof']['verdict'] == 'PASS'
     assert record['proof']['compared_points'] > 0
     assert len(record['proof']['declared_partitions']) == 1
@@ -142,7 +146,8 @@ def test_actual_general_entry_proves_final_mapped_netlist_and_publishes_common_s
     assert {item['id']: item['status'] for item in acceptance['obligations']} == {
         'final_lec.final_lec_unproved': 'PASS',
         'final_lec.sta_lvs_release_netlist_mapping': 'PASS'}
-    assert record['flow109_acceptance'] == 'NOT_MEASURED'
+    assert record['whole_flow_acceptance'] == 'NOT_MEASURED'
+    assert record['delivery_accepted'] is False
     baseline = json.loads((tmp_path / lec.BASELINE).read_text())
     assert baseline['consumer_adoption'] == 'NOT_MEASURED'
     assert all(r['sha256'] == baseline['adopted_netlist']['sha256']
@@ -153,8 +158,17 @@ def test_actual_general_entry_proves_final_mapped_netlist_and_publishes_common_s
 
 @pytest.mark.parametrize('damage, expected', [('logic', 'FAIL'), ('blackbox', 'NOT_MEASURED')])
 def test_native_logic_change_or_functionless_cell_never_passes(tmp_path, damage, expected):
-    context = _case(tmp_path, bad_logic=damage == 'logic', blackbox=damage == 'blackbox')
-    record = lec.execute(tmp_path, context)
+    _case(tmp_path, bad_logic=damage == 'logic', blackbox=damage == 'blackbox')
+    result = subprocess.run([sys.executable, str(lec.HERE / 'vibe_ic_one_shot_runner.py'),
+        str(tmp_path), '--flow', '109', '--flow109-manifest', str(tmp_path / 'manifest.json'),
+        '--entry-step', 'D44', '--exit-step', 'D44', '--route', 'ic', '--no-dashboard'],
+        capture_output=True, text=True)
+    _put(tmp_path, 'normal-cli.json', {'argv': result.args, 'rc': result.returncode,
+        'stdout': result.stdout, 'stderr': result.stderr})
+    assert result.returncode == {'FAIL': 1, 'NOT_MEASURED': 2}[expected], result.stdout + result.stderr
+    record = json.loads((tmp_path / 'reports/flow109/components/D44.json').read_text())
+    assert record['default_row_status'] == expected
+    assert record['completed'] is False
     assert record['component_status'] == expected, record
     assert not (tmp_path / lec.BASELINE).exists()
     if damage == 'logic':
@@ -168,6 +182,31 @@ def test_native_logic_change_or_functionless_cell_never_passes(tmp_path, damage,
         assert record['reason'] == 'D44_FUNCTIONAL_MODEL_UNSUPPORTED'
         assert record['metric_bindings']['status'] == 'NOT_MEASURED'
         assert record['metric_acceptance_status'] == 'NOT_MEASURED'
+
+
+def test_actual_native_pass_with_missing_registered_metric_refuses_at_front_door(tmp_path):
+    _case(tmp_path)
+    registry = flow109.load_registry()
+    next(row for row in registry['rows'] if row['id'] == 'D44')['obligations'].pop()
+    registry_path = tmp_path / 'source-control-registry.json'
+    registry_path.write_text(json.dumps(registry))
+    driver = ('import sys; from pathlib import Path; import flow109; '
+              'flow109.REGISTRY=Path(sys.argv.pop(1)); '
+              'import vibe_ic_one_shot_runner as runner; sys.exit(runner.main())')
+    result = subprocess.run([sys.executable, '-c', driver, str(registry_path), str(tmp_path),
+        '--flow', '109', '--flow109-manifest', str(tmp_path / 'manifest.json'),
+        '--entry-step', 'D44', '--exit-step', 'D44', '--route', 'ic', '--no-dashboard'],
+        capture_output=True, text=True)
+    _put(tmp_path, 'normal-cli.json', {'argv': result.args, 'rc': result.returncode,
+        'stdout': result.stdout, 'stderr': result.stderr})
+    assert result.returncode == 2, result.stdout + result.stderr
+    record = json.loads((tmp_path / 'reports/flow109/components/D44.json').read_text())
+    assert record['component_status'] == 'PASS'
+    assert record['proof']['compared_points'] > 0
+    assert record['metric_acceptance_status'] == record['default_row_status'] == 'NOT_MEASURED'
+    assert record['metric_acceptance']['reason'] == 'METRIC_OBLIGATIONS_UNREGISTERED'
+    assert record['metric_acceptance']['delivery_blocked'] is True
+    assert record['completed'] is False
 
 
 @pytest.mark.skipif(shutil.which('eqy') is None, reason='native EQY is required')

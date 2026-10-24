@@ -710,9 +710,9 @@ def execute(project, context):
         record.update(component_status='NOT_MEASURED', reason='D44_NATIVE_UNAVAILABLE_OR_UNSUPPORTED', detail=str(exc))
     record['metric_bindings'] = bind_metrics(project, context, record)
     record['metric_acceptance'] = accept_d44(project, context, record)
-    record['metric_acceptance_status'] = record['metric_acceptance']['status']
-    record['unimplemented_obligations'] = [
-        item['id'] for item in record['metric_acceptance']['obligations']
+    record['default_row_status'] = record['metric_acceptance_status'] = record['metric_acceptance']['status']
+    record['completed'] = record['metric_acceptance_status'] == 'PASS'
+    record['unimplemented_obligations'] = [item['id'] for item in record['metric_acceptance']['obligations']
         if item['status'] == 'UNIMPLEMENTED_METRIC_BINDING']
     record['receipt'] = {'path': str((attempt / 'component.json').relative_to(project))}
     write_json(attempt / 'component.json', record)
