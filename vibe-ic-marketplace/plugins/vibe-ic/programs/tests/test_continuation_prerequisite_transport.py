@@ -49,7 +49,7 @@ def test_whole_prerequisite_consumer_after_exact_transport(tmp_path,monkeypatch)
 
 
 @pytest.mark.parametrize('damage',['missing_report','missing_padring','stale_source','wrong_owner','wrong_geometry','wrong_wiring','stale_state','conflicting_existing'])
-def test_missing_stale_owner_geometry_refuse_atomically(tmp_path,monkeypatch,damage):
+def test_missing_stale_owner_geometry_refuse_without_invalid_pad(tmp_path,monkeypatch,damage):
     project,owner,folder,native_def=scene(tmp_path,monkeypatch)
     if damage=='missing_report':(owner/template.REPORT_REL).unlink()
     elif damage=='missing_padring':(owner/'phase3/stage3/pnr/padring.def').unlink()
@@ -66,7 +66,9 @@ def test_missing_stale_owner_geometry_refuse_atomically(tmp_path,monkeypatch,dam
         target=project/'phase3/stage3/pnr/padring.def';target.parent.mkdir(parents=True,exist_ok=True);target.write_text('different')
     with pytest.raises((ValueError,OSError,contract.Refusal)):
         adapters.restore_continuation_prerequisites(project)
-    assert not (project/template.REPORT_REL).exists()
+    assert (project/template.REPORT_REL).exists() == (damage in {'missing_padring','wrong_geometry','wrong_wiring','conflicting_existing'})
+    if damage != 'conflicting_existing':
+        assert not (project/'phase3/stage3/pnr/padring.def').exists()
 
 
 def test_checkpoint_manifest_carries_genuine_catalogue_and_source(tmp_path,monkeypatch):
@@ -82,6 +84,8 @@ def test_checkpoint_manifest_carries_genuine_catalogue_and_source(tmp_path,monke
 def test_normal_frontdoor_restores_before_d75_attempt(tmp_path,monkeypatch):
     from types import SimpleNamespace
     import flow109
+    monkeypatch.setenv(flow109.CONTEXT_ENV,'')
+    monkeypatch.setenv(flow109.ATTEMPT_ENV,'')
     from test_flow109_package_ready import _context
     project,owner,_,_=scene(tmp_path,monkeypatch)
     context=_context(project)
@@ -96,3 +100,22 @@ def test_normal_frontdoor_restores_before_d75_attempt(tmp_path,monkeypatch):
     args=SimpleNamespace(flow='109',flow109_manifest=manifest,flow109_plan_only=False,
         execution_mode='default',entry_step='D75',exit_step='D75',container='')
     with pytest.raises(Prepared):flow109.prepare_front_door(args,project)
+
+
+def test_sc_library_endcap_is_not_an_io_ring_instance(tmp_path,monkeypatch):
+    project,owner,folder,native_def=scene(tmp_path,monkeypatch)
+    sc=project/'input/pdk/sc.lef'
+    sc.write_text(sc.read_text()+'\nMACRO physical_boundary\n CLASS ENDCAP PRE ;\nEND physical_boundary\n')
+    receipt=json.loads((folder/'vibeic_receipt.json').read_text())
+    receipt['input']['config_files'][str(sc)]=contract.digest(sc)
+    (folder/'vibeic_receipt.json').write_text(json.dumps(receipt))
+    import re
+    text=re.sub(r'COMPONENTS (\d+)',lambda m:f'COMPONENTS {int(m[1])+1}',native_def.read_text())
+    native_def.write_text(text.replace('END COMPONENTS',
+        '- edge physical_boundary + FIXED ( 200000 200000 ) N ;\nEND COMPONENTS'))
+    record=json.loads((owner/fill.RECORD_REL).read_text())
+    record['odb']['tool']['filled_def_sha256']=contract.digest(native_def)
+    (owner/fill.RECORD_REL).write_text(json.dumps(record));_reseal(folder)
+    restored=adapters.restore_continuation_prerequisites(project)
+    assert len(restored['inputs'])==2
+    assert catalogue.catalogue_selects_self_tapeout(project)[0] is True

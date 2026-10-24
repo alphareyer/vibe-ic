@@ -950,7 +950,8 @@ def restore_continuation_prerequisites(project: Path) -> dict:
 
     This is input transport, not adoption of an old verdict. Current native
     State/receipt, owner inputs, catalogue sources and pad geometry must agree
-    before the existing transactional copier touches either missing file.
+    before the existing transactional copier touches each missing file.
+    Independently valid catalogue bytes remain available if pad geometry refuses.
     """
     import librelane_postroute as postroute
     import librelane_contract as contract
@@ -1011,14 +1012,41 @@ def restore_continuation_prerequisites(project: Path) -> dict:
     if judged.get('verdict') != template.VERDICT_NOT_APPLICABLE:
         raise ValueError('CONTINUATION_CATALOGUE_CONSUMER_REFUSED: ' + str(judged.get('refusals')))
 
+    def carry(selected):
+        hashes = {name: snapshot.sha(path) for name, path in selected.items()}
+        journal = snapshot.Journal(root)
+        try:
+            for name, source in selected.items():
+                target = snapshot.safe_target(root, name)
+                if target.exists():
+                    if snapshot.sha(target) != hashes[name]:
+                        raise ValueError('CONTINUATION_EXISTING_INPUT_CHANGED: ' + name)
+                    continue
+                data = source.read_bytes()
+                if hashlib.sha256(data).hexdigest() != hashes[name]:
+                    raise ValueError('CONTINUATION_SOURCE_CHANGED: ' + name)
+                journal.write(name, data)
+        except BaseException:
+            journal.rollback()
+            raise
+        return {name: {'source': str(selected[name]), 'sha256': sha}
+                for name, sha in hashes.items()}
+
+    transported = carry({template.REPORT_REL: source_report})
+
     rel = pads.PADRING_DEF_REL
     original = snapshot.safe_target(owner, rel)
     roles = geometry.current_lef_context(root, folder, original)['roles']
     roles.update(geometry.current_lef_context(root, folder, views['def'])['roles'])
+    config = json.loads((folder / 'config.json').read_text())
+    io_masters = set()
+    for path in config['PAD_LEFS']:
+        io_masters.update(pads.parse_lef_macro_classes(Path(path).read_text()))
     before, after = (pads.parse_def(path.read_text()) for path in (original, views['def']))
     def ring(value):
         return {name: cell.as_dict() for name, cell in value.components.items()
-                if roles.get(cell.master, '').partition(' ')[0] in {'PAD', 'ENDCAP'}}
+                if cell.master in io_masters
+                and roles.get(cell.master, '').partition(' ')[0] in {'PAD', 'ENDCAP'}}
     if (before.design != after.design or before.units != after.units
             or before.diearea != after.diearea or not ring(before)
             or ring(before) != ring(after)
@@ -1034,27 +1062,10 @@ def restore_continuation_prerequisites(project: Path) -> dict:
     if pad_nets(original) != pad_nets(views['def']):
         raise ValueError('CONTINUATION_PADRING_CONNECTIVITY_CHANGED')
 
-    selected = {template.REPORT_REL: source_report, rel: original}
-    hashes = {name: snapshot.sha(path) for name, path in selected.items()}
-    journal = snapshot.Journal(root)
-    try:
-        for name, source in selected.items():
-            target = snapshot.safe_target(root, name)
-            if target.exists():
-                if snapshot.sha(target) != hashes[name]:
-                    raise ValueError('CONTINUATION_EXISTING_INPUT_CHANGED: ' + name)
-                continue
-            data = source.read_bytes()
-            if hashlib.sha256(data).hexdigest() != hashes[name]:
-                raise ValueError('CONTINUATION_SOURCE_CHANGED: ' + name)
-            journal.write(name, data)
-    except BaseException:
-        journal.rollback()
-        raise
-    return {'source_project': str(owner), 'inputs': {
-        name: {'source': str(selected[name]), 'sha256': sha} for name, sha in hashes.items()},
-        'current_state': {'path': str(folder / 'state_out.json'),
-                          'sha256': snapshot.sha(folder / 'state_out.json')}}
+    transported.update(carry({rel: original}))
+    return {'source_project': str(owner), 'inputs': transported,
+            'current_state': {'path': str(folder / 'state_out.json'),
+                              'sha256': snapshot.sha(folder / 'state_out.json')}}
 
 
 def backend_project_input_contract(project: Path, step_id: str, *,
