@@ -875,7 +875,7 @@ def _default_step24_current_subject(project: Path, *,
 
 def backend_canonical_input_contract(project: Path, step_id: str, declarations,
                                      *, execution_mode: str = "ultra") -> tuple[object, ...]:
-    """Select Step 24's current native owner or attested self-tapeout subject.
+    """Select the current native owner for IR/PERC, or the legacy IR subject.
 
     A valid current STAPostPNR owner takes precedence and replaces both the
     obsolete routed-DEF and PDN-marker requirements with its exact final ODB
@@ -884,12 +884,12 @@ def backend_canonical_input_contract(project: Path, step_id: str, declarations,
     canonical declarations byte-for-byte; absence never selects either arm.
     """
     values = tuple(declarations or ())
-    if str(step_id) != "24":
+    if str(step_id) not in {"24", "28"}:
         return values
     current = _default_step24_current_subject(
         project, execution_mode=execution_mode)
-    subject = (None if current is not None else default_step24_physical_subject(
-        project, execution_mode=execution_mode))
+    subject = (None if current is not None or str(step_id) == "28" else
+               default_step24_physical_subject(project, execution_mode=execution_mode))
     if current is not None:
         selected: list[object] = []
         replacements = {

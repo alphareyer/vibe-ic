@@ -1798,7 +1798,19 @@ def produce_signoff(project, params):
         mcf.run(project, container=container, **mcf_inputs,
                 vdd_v=voltage, out_json=rpt / 'si_mcf_sta.json', timeout=int(params['timeout_s']))
     elif sid == '28':
-        if not R._emit_perc_equivalent(project, top, pdk, container, notes):
+        from librelane_ir_antenna import CURRENT_STA_RECORD
+        perc_inputs = {}
+        # The ordinary issuer binds this existing current-owner record. Explicit
+        # final-subject callers keep their separately issued legacy contract.
+        if (params.get('execution_mode') == 'default'
+                and CURRENT_STA_RECORD in
+                (params.get('resolved_input_manifest') or {}).get('files', {})):
+            from execution_adapters_backend import _default_step24_current_subject
+            current = _default_step24_current_subject(project, execution_mode='default')
+            if current is None:
+                raise em.Refusal('BACKEND_PERC_CURRENT_SUBJECT_ABSENT', sid)
+            perc_inputs['routed_def'] = current['views']['def']
+        if not R._emit_perc_equivalent(project, top, pdk, container, notes, **perc_inputs):
             raise em.Refusal('BACKEND_PERC_UNMEASURED', sid)
     elif sid == '29':
         sim = project / 'phase3/stage3/sim_postlayout'

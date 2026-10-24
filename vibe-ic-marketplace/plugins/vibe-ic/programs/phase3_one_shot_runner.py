@@ -77845,7 +77845,8 @@ def _emit_em_current_authority(project: Path, pdk: PdkConfig,
 
 
 def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
-                          container: str, notes: List[str]) -> bool:
+                          container: str, notes: List[str], *,
+                          routed_def: Optional[Path] = None) -> bool:
     """Aggregate the 7 Calibre-PERC categories into ONE honest open-source
     PERC-equivalent coverage report (v2.3 Step 28).
 
@@ -77856,7 +77857,7 @@ def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
     Writes reports/phase3/perc_equivalent.{rpt,json} + PERC_SIGNOFF_MEMO.md.
     chip-AGNOSTIC + deterministic. Best-effort; returns True if emitted."""
     pnr_out = _pl.pnr_dir(project)
-    def_file = pnr_out / f"{top}.def"
+    def_file = Path(routed_def) if routed_def is not None else pnr_out / f"{top}.def"
     if not def_file.is_file():
         notes.append("PERC-equiv skipped: routed DEF missing")
         return False
