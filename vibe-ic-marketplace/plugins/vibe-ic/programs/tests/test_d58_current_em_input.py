@@ -118,6 +118,30 @@ def test_default_step25_preserves_primary_measured_fail_after_current_selection(
     assert "current Step-24 IR measurement failed" in result["detail"]
 
 
+@pytest.mark.parametrize("case,ir_verdict", [
+    ("current", "PASS"), ("native_fail", "FAIL"),
+])
+def test_missing_em_source_model_does_not_revoke_d57_but_stops_d58(
+        tmp_path, monkeypatch, case, ir_verdict):
+    project, report, _, _, _ = _external_current_primary(
+        tmp_path, monkeypatch, case)
+    doc = json.loads(report.read_text())
+    doc["record"]["source_model"] = "PSM default supply BTerms"
+    doc["record"].pop("sources", None)
+    doc["record"]["cross_check"].pop("vsrc", None)
+    report.write_text(json.dumps(doc))
+    ir = E.validate_primary_ir(project)
+    assert ir["valid"] is True, ir
+    assert ir["verdict"] == ir_verdict
+    assert "supply_sources" not in ir["current_em_basis"]
+    calls = []
+    em = _run_step25(project, tmp_path, monkeypatch,
+                     _pdk(tmp_path, ring=None), calls)
+    assert em["verdict"] == "NOT_MEASURED"
+    assert "VSRC" in em["detail"]
+    assert calls == []
+
+
 @pytest.mark.parametrize("damage", [
     "missing", "changed", "symlink", "wrong_role", "wrong_model",
 ])
@@ -318,7 +342,7 @@ def test_current_vsrc_producer_validates_from_absolute_and_project_dot(
     (project / "phase3/librelane_switch.json").write_text(json.dumps(
         {"steps": {"24": "dual", "25": "direct"}}))
     calls = _install_two_rail_transport(project, monkeypatch)
-    primary = E.validate_primary_ir(project)
+    primary = E.validate_primary_ir(project, for_em=True)
     assert primary["valid"] is True, primary
     notes = []
     assert R._emit_ir_em_reports(

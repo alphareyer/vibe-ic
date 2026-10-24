@@ -74025,7 +74025,8 @@ catch {{set_wire_rc -clock -layer {mp}5}}
         _ll_primary = (json.loads(_ll_doc_path.read_text()) if em_only else
                        _step24_adopt_primary(project, _basis_record, notes))
         if em_only:
-            _native_density_record["step24_primary"] = _emcd.validate_primary_ir(project)
+            _native_density_record["step24_primary"] = _emcd.validate_primary_ir(
+                project, for_em=True)
         _native_density_record["librelane_ir"] = {
             "adopted": _ll_primary.get("adopted", False),
             "record": str(_ll_doc_path.relative_to(project)),

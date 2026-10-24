@@ -1226,7 +1226,7 @@ def native_project(em_path: Path) -> Optional[Path]:
     return None
 
 
-def validate_primary_ir(project: Path) -> Dict[str, Any]:
+def validate_primary_ir(project: Path, *, for_em: bool = False) -> Dict[str, Any]:
     """Step-24's existing gate consumes the adopted current tool result.
 
     This validates the IR producer's own state and publication, independently
@@ -1353,11 +1353,11 @@ def validate_primary_ir(project: Path) -> Dict[str, Any]:
                 {"path": str(path.absolute()), "sha256": row["sha256"]}
                 for path, row in zip(native_paths["liberties"],
                                      doc["native_basis"]["liberties"])]
+        if selected is not None and for_em:
             # The selected ODB is not the complete physical supply boundary.
-            # D57 may have replaced PSM's default BTerm sources with declared
-            # pad locations through VSRC_LOC_FILES. Carry that already-owned
-            # model forward instead of solving the same grid from new ideal
-            # source locations in Step 25.
+            # This is a Step-25 prerequisite, not part of D57's static-IR
+            # verdict: an otherwise valid BTerm/static primary stays measured
+            # for D57 while D58 refuses to acquire EM on a different boundary.
             model = record.get("source_model")
             source_record = record.get("sources")
             source_rows = (source_record or {}).get("sources")
@@ -1497,7 +1497,7 @@ def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN,
                 raise ValueError("power basis input digest disagrees")
         primary = doc.get("step24_primary")
         if primary is not None:
-            checked = validate_primary_ir(project)
+            checked = validate_primary_ir(project, for_em=True)
             if not checked["valid"] or checked != primary:
                 raise ValueError("current Step-24 primary binding changed")
             # This EM solve must carry its own complete basis. The primary

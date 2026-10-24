@@ -1724,7 +1724,7 @@ def produce_signoff(project, params):
         ordinary = params.get('execution_mode') == 'default'
         if ordinary:
             import em_current_density_check as density
-            primary = density.validate_primary_ir(project)
+            primary = density.validate_primary_ir(project, for_em=True)
             if not primary['valid']:
                 return {'verdict': 'NOT_MEASURED', 'detail': primary['reason']}
         ok = R._emit_ir_em_reports(
