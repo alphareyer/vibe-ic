@@ -2198,6 +2198,8 @@ def _recover_retained_finished_promotion(
     recovered.update(
         verdict="PASS", adopted=candidate, adopted_state=str(state_path),
         final=measurement, corners=list(ctx["corners"]),
+        candidates=[{"candidate": candidate, "repair_state": str(state_path),
+                     "repair_metrics": dict(route_metrics)}],
         final_antenna=measurement["antenna_nets"],
         final_supply_ownership=ownership, drv_signoff_verdict="PASS",
         drv_signoff={"verdict": "PASS", "violations": 0,

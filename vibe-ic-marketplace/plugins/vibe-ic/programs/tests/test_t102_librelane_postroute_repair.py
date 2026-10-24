@@ -2800,6 +2800,10 @@ def test_finished_candidate_readback_recovers_displaced_normal_metadata(
     assert report['adopted'] == '32-cand09'
     assert report['final']['drv_count'] == 0
     assert report['final']['unrouted_added'] == 0
+    runner = importlib.import_module('phase3_one_shot_runner')
+    owned = runner._step32_own_measurement(report)
+    assert owned['unrouted_added'] == 0
+    assert runner._promotion_unmeasured(owned) == ''
     assert report['candidate_finishing']['drc'] == 'PASS'
     assert report['candidate_finishing']['lvs'] == 'PASS'
     assert report['retained_promotion_readback']['ready_record_sha256']
