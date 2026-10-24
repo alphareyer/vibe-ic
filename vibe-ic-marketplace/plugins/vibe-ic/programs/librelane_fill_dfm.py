@@ -87,6 +87,18 @@ def _count(value: Any) -> Optional[int]:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
+def _finite_die_box(value: Any) -> Optional[tuple[float, float, float, float]]:
+    """Normalize JSON numeric coordinates while refusing invalid geometry."""
+    try:
+        box = tuple(float(item) for item in value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (len(box) != 4 or not all(math.isfinite(item) for item in box)
+            or box[2] <= box[0] or box[3] <= box[1]):
+        return None
+    return box
+
+
 def cell_patterns(config: Dict[str, Any]) -> Dict[str, List[str]]:
     """The decap and fill master patterns, exactly as `fill.tcl` strips them."""
     out = {}
@@ -145,11 +157,15 @@ def chain_folder(project: Path, lane: str, steps, step: str) -> Path:
 
 def run_density(project: Path, image: str, pdk_root: Path, pdk: str, *,
                 gds: Path, lane: str, configs: Optional[Dict[str, Path]] = None,
-                steps=DENSITY_STEPS) -> Dict[str, Any]:
+                steps=DENSITY_STEPS, placement: Optional[dict] = None,
+                bridge_root: Optional[Path] = None) -> Dict[str, Any]:
     """The PDK density deck on ``gds`` (`KLayout.Density`), then the tool's own
     checker.  The count is the measurement; a checker refusal (count > 0) is
     recorded beside it, never raised past it.  ``steps`` may lead with
-    `KLayout.Filler` (the tool arm fills first)."""
+    `KLayout.Filler` (the tool arm fills first). Candidate callers supply
+    ``placement`` and ``bridge_root``; the latter also selects run_chain's
+    existing nested namespace instead of its flat lane grammar.
+    """
     if not Path(gds).is_file():
         raise Refusal('LL_GDS_MISSING', f'no stream file at {Path(gds)}')
     configs = configs or resolve_step_configs(project, image, pdk, list(steps),
@@ -163,12 +179,14 @@ def run_density(project: Path, image: str, pdk_root: Path, pdk: str, *,
     mounts = _mounts(pdk_root, pdk)
     first = list(steps)[0]
     state = state_from_direct(project, image, configs[first], {'gds': gds},
-                              project / 'phase3/librelane' / CONFIG_FOLDER / f'bridge-{lane}',
+                              (bridge_root / Path(lane).name if bridge_root else
+                               project / 'phase3/librelane' / CONFIG_FOLDER / f'bridge-{lane}'),
                               chain=[configs[s] for s in list(steps)[1:]], mounts=mounts)
     checker_error = None
     try:
         run_chain(project, image, [(s, configs[s], state) for s in steps],
-                  mounts=mounts, lane=lane, pdk_root=PDK_GUEST_ROOT)
+                  mounts=mounts, pdk_root=PDK_GUEST_ROOT,
+                  **({'namespace': lane} if bridge_root is not None else {'lane': lane}))
     except Refusal as error:
         if not str(error).startswith('LL_STEP_FAILED: Checker.KLayoutDensity'):
             raise
@@ -203,10 +221,12 @@ def run_density(project: Path, image: str, pdk_root: Path, pdk: str, *,
         out['subject'], out['subject_sha256'] = str(filled), digest(Path(filled))
         if count:
             topup = top_up_density(project, image, pdk_root, pdk, Path(filled),
-                                   configs['KLayout.Density'], f'{lane}-topup')
+                                   configs['KLayout.Density'], f'{lane}-topup',
+                                   **({'placement': placement} if placement is not None else {}))
             again = run_density(project, image, pdk_root, pdk,
                                 gds=Path(topup['gds']), lane=f'{lane}-topped',
-                                configs=configs, steps=DENSITY_STEPS)
+                                configs=configs, steps=DENSITY_STEPS,
+                                placement=placement, bridge_root=bridge_root)
             again['filler'] = out['filler']
             again['density_topup'] = topup
             again['pdk_density_before_topup'] = count
@@ -215,6 +235,246 @@ def run_density(project: Path, image: str, pdk_root: Path, pdk: str, *,
         project, image, pdk_root, pdk, Path(out['subject']),
         configs['KLayout.Density'], f'{lane}-ratios')
     return out
+
+
+def finish_candidate_gds(project: Path, image: str, pdk_root: Path, pdk: str, *,
+                         gds: Path, state: Path, config: Path, lane: str) -> dict:
+    """Finish one retained candidate without publishing any adopted views.
+
+    ``state``/``config`` are the candidate repair producer's native packet,
+    not its later RCX/STA State. All new files stay under a fresh ``lane``.
+    A nonzero full PDK density count blocks the caller. The returned GDS must
+    still undergo full DRC/LVS; this is not final electrical qualification.
+    """
+    project, gds, state, config = (Path(p).resolve() for p in (project, gds, state, config))
+    lanes = project / 'phase3/librelane'
+    root = (lanes / lane).resolve()
+    if (not lane or Path(lane).is_absolute() or '..' in Path(lane).parts
+            or not root.is_relative_to(lanes) or root == lanes
+            or root.exists() or not state.is_relative_to(lanes)
+            or state.name != 'state_out.json' or gds.is_relative_to(root)):
+        raise Refusal('LL_CANDIDATE_FINISHING_LOCATION', lane)
+    cfg = _load(config)
+    step = cfg.get('meta', {}).get('step')
+    if not step or not cfg.get('DESIGN_NAME'):
+        raise Refusal('LL_CANDIDATE_FINISHING_CONFIG', str(config))
+    receipt = validate_step_receipt(state.parent, step)
+    if (receipt['input'].get('image') != image
+            or receipt['input'].get('config') != digest(config)
+            or receipt['input'].get('config_files') != config_file_hashes(cfg, _mounts(pdk_root, pdk))):
+        raise Refusal('LL_CANDIDATE_FINISHING_CONFIG', str(config))
+    current = _load(state)
+    placement = {'config': cfg}
+    for view in ('def', 'odb'):
+        path = Path(current.get(view) or '').resolve()
+        if (not path.is_relative_to(state.parent) or not path.is_file()
+                or receipt['sha256'].get(str(path.relative_to(state.parent))) != digest(path)):
+            raise Refusal('LL_CANDIDATE_FINISHING_VIEW', view)
+        placement[view] = path
+    if not gds.is_file():
+        raise Refusal('LL_GDS_MISSING', str(gds))
+    from librelane_contract import _def_die_area
+    die = _def_die_area(placement['def'])
+    if not die:
+        raise Refusal('LL_CANDIDATE_FINISHING_CONFIG', 'candidate DEF die area absent')
+    if _def_design_name(placement['def']) != cfg['DESIGN_NAME']:
+        raise Refusal('LL_CANDIDATE_FINISHING_CONFIG', 'candidate DEF design differs')
+    inputs = {str(p): digest(p) for p in (gds, state, config,
+              state.parent / 'vibeic_receipt.json', placement['def'], placement['odb'])}
+    root.mkdir(parents=True, exist_ok=False)
+    overlay = {key: (cfg[key], f'candidate native config {config}')
+               for key in ('DESIGN_NAME', 'TECH_LEFS') if key in cfg}
+    overlay['DIE_AREA'] = (die, f'candidate DEF {placement["def"]}')
+    configs = resolve_step_configs(project, image, pdk, list(GDS_FILL_STEPS),
+        pdk_root=pdk_root, folder=f'{lane}/config', overlay=overlay)
+    density = run_density(project, image, pdk_root, pdk, gds=gds,
+        lane=f'{lane}/density', configs=configs, steps=GDS_FILL_STEPS,
+        placement=placement, bridge_root=root / 'bridges')
+    if density.get(DENSITY_METRIC) != 0 or density.get('checker_error'):
+        raise Refusal('LL_CANDIDATE_FINISHING_DENSITY_FAILED', str(density))
+    finished = Path(density['subject']).resolve()
+    if (not finished.is_relative_to(root) or not finished.is_file()
+            or digest(finished) != density['subject_sha256']):
+        raise Refusal('LL_CANDIDATE_FINISHING_GDS_UNBOUND', str(finished))
+    native = {}
+    final_lane = str(Path(density['state']).parent.parent.relative_to(lanes))
+    final_steps = DENSITY_STEPS if 'density_topup' in density else GDS_FILL_STEPS
+    folders = [(Path(density['filler']['state']).parent, 'KLayout.Filler'),
+               (Path(density['state']).parent, 'KLayout.Density'),
+               (chain_folder(project, final_lane, final_steps, 'Checker.KLayoutDensity'),
+                'Checker.KLayoutDensity')]
+    for folder, producer in folders:
+        if not folder.resolve().is_relative_to(root):
+            raise Refusal('LL_CANDIDATE_FINISHING_GDS_UNBOUND', str(folder))
+        validate_step_receipt(folder, producer)
+        path = folder / 'vibeic_receipt.json'
+        native[producer] = {'path': str(path), 'sha256': digest(path)}
+    if any(not Path(p).is_file() or digest(Path(p)) != sha for p, sha in inputs.items()):
+        raise Refusal('LL_CANDIDATE_FINISHING_INPUT_CHANGED', str(state))
+    return {'gds': str(finished), 'gds_sha256': digest(finished),
+            'density': density, 'inputs': inputs, 'native_receipts': native,
+            'configs': {step: {'path': str(path), 'sha256': digest(path)}
+                        for step, path in configs.items()},
+            'scope': 'candidate-local finishing; full DRC/LVS still required; '
+                     'prefill PPA only, fill-aware final electrical unproven'}
+
+
+def resume_candidate_gds(project: Path, image: str, pdk_root: Path, pdk: str, *,
+                         gds: Path, state: Path, config: Path, lane: str,
+                         ratio_lane: str) -> dict:
+    """Resume only the ratio consumer of a retained candidate finish.
+
+    The finished GDS is derived from ``lane``, never supplied by the caller.
+    All retained native fill/density receipts, configs, bridge subjects and
+    placement-derived top-up provenance are validated before a new ratio
+    consumer is started. Full DRC/LVS remain mandatory for the caller.
+    """
+    project, gds, state, config = (Path(p).resolve()
+                                   for p in (project, gds, state, config))
+    lanes = project / 'phase3/librelane'
+    root = (lanes / lane).resolve()
+    ratio_root = (lanes / ratio_lane).resolve()
+    if (not lane or not ratio_lane or Path(lane).is_absolute()
+            or Path(ratio_lane).is_absolute() or '..' in Path(lane).parts
+            or '..' in Path(ratio_lane).parts or not root.is_relative_to(lanes)
+            or not ratio_root.is_relative_to(lanes) or root == lanes
+            or ratio_root == lanes or not root.is_dir() or ratio_root.exists()
+            or not state.is_relative_to(lanes) or state.name != 'state_out.json'):
+        raise Refusal('LL_CANDIDATE_FINISHING_LOCATION', f'{lane}: {ratio_lane}')
+
+    cfg = _load(config)
+    step = cfg.get('meta', {}).get('step')
+    receipt = validate_step_receipt(state.parent, step) if step else None
+    if (not receipt or not cfg.get('DESIGN_NAME')
+            or receipt['input'].get('image') != image
+            or receipt['input'].get('config') != digest(config)
+            or receipt['input'].get('config_files') !=
+               config_file_hashes(cfg, _mounts(pdk_root, pdk))):
+        raise Refusal('LL_CANDIDATE_FINISHING_CONFIG', str(config))
+    current = _load(state)
+    placement = {'config': cfg}
+    for view in ('def', 'odb'):
+        path = Path(current.get(view) or '').resolve()
+        if (not path.is_relative_to(state.parent) or not path.is_file()
+                or receipt['sha256'].get(str(path.relative_to(state.parent))) != digest(path)):
+            raise Refusal('LL_CANDIDATE_FINISHING_VIEW', view)
+        placement[view] = path
+    if not gds.is_file():
+        raise Refusal('LL_GDS_MISSING', str(gds))
+
+    from librelane_contract import _def_die_area
+    die = _def_die_area(placement['def'])
+    if not die or _def_design_name(placement['def']) != cfg['DESIGN_NAME']:
+        raise Refusal('LL_CANDIDATE_FINISHING_CONFIG', 'candidate DEF identity differs')
+    inputs = {str(p): digest(p) for p in (gds, state, config,
+              state.parent / 'vibeic_receipt.json', placement['def'], placement['odb'])}
+
+    configs = {name: root / 'config' / f'{name}.json' for name in GDS_FILL_STEPS}
+    density_cfg = _load(configs['KLayout.Density'])
+    if (density_cfg.get('DESIGN_NAME') != cfg['DESIGN_NAME']
+            or _finite_die_box(density_cfg.get('DIE_AREA')) != _finite_die_box(die)
+            or _finite_die_box(die) is None):
+        raise Refusal('LL_CANDIDATE_FINISHING_CONFIG', str(configs['KLayout.Density']))
+
+    def checked(folder: Path, producer: str) -> tuple[dict, dict]:
+        native_receipt = validate_step_receipt(folder, producer)
+        expected_cfg = configs[producer]
+        if (native_receipt['input'].get('image') != image
+                or native_receipt['input'].get('config') != digest(expected_cfg)
+                or native_receipt['input'].get('config_files') !=
+                   config_file_hashes(_load(expected_cfg), _mounts(pdk_root, pdk))):
+            raise Refusal('LL_CANDIDATE_FINISHING_CONFIG', str(expected_cfg))
+        return _load(folder / 'state_out.json'), native_receipt
+
+    filler_dir = root / 'density/01-klayout-filler'
+    density_dir = root / 'density/02-klayout-density'
+    topped_density_dir = root / 'density-topped/01-klayout-density'
+    topped_checker_dir = root / 'density-topped/02-checker-klayoutdensity'
+    filler_state, filler_receipt = checked(filler_dir, 'KLayout.Filler')
+    density_state, density_receipt = checked(density_dir, 'KLayout.Density')
+    topped_state, topped_density_receipt = checked(
+        topped_density_dir, 'KLayout.Density')
+    _topped_checker_state, topped_checker_receipt = checked(
+        topped_checker_dir, 'Checker.KLayoutDensity')
+
+    filled = Path(filler_state.get('gds') or '').resolve()
+    topped = Path(topped_state.get('gds') or '').resolve()
+    before_count = _count((density_state.get('metrics') or {}).get(DENSITY_METRIC))
+    after_count = _count((topped_state.get('metrics') or {}).get(DENSITY_METRIC))
+    if (not filled.is_relative_to(root) or not filled.is_file()
+            or not topped.is_relative_to(root) or not topped.is_file()
+            or Path(_load(filler_dir / 'state_in.json').get('gds') or '').resolve() != gds
+            or Path(density_state.get('gds') or '').resolve() != filled
+            or Path(_load(topped_density_dir / 'state_in.json').get('gds') or '').resolve() != topped
+            or before_count in (None, 0) or after_count != 0):
+        raise Refusal('LL_CANDIDATE_FINISHING_GDS_UNBOUND', str(root))
+
+    def bridge(name: str, producer: str, subject: Path, config_path: Path) -> None:
+        doc = _load(root / 'bridges' / name / 'bridge_receipt.json')
+        view = (doc.get('views') or {}).get('gds') or {}
+        if (doc.get('step') != producer or doc.get('image') != image
+                or doc.get('config_sha256') != digest(config_path)
+                or Path(view.get('source') or '').resolve() != subject
+                or view.get('sha256') != digest(subject)):
+            raise Refusal('LL_CANDIDATE_FINISHING_GDS_UNBOUND', f'bridge {name}')
+    bridge('density', 'KLayout.Filler', gds, configs['KLayout.Filler'])
+    bridge('density-topped', 'KLayout.Density', topped,
+           configs['KLayout.Density'])
+
+    topup_dir = root / 'density-topup'
+    topup_report = _load(topup_dir / 'fill_report.json')
+    topup_config = _load(topup_dir / 'pdk_fill_config.json')
+    derivation = topup_config.get('_derivation') or {}
+    keepout = derivation.get('placed_instance_keepout') or {}
+    if (topup_report.get('verdict') != 'PASS' or not topup_report.get('layers')
+            or not (topup_report.get('keepout') or {}).get('declared')
+            or Path(topup_report.get('gds_in') or '').resolve() != filled
+            or Path(topup_report.get('gds_out') or '').resolve() != topped
+            or Path(keepout.get('source') or '').resolve() != placement['odb']
+            or keepout.get('source_sha256') != digest(placement['odb'])
+            or digest(filled) == digest(topped)):
+        raise Refusal('LL_CANDIDATE_FINISHING_TOPUP_UNBOUND', str(topup_dir))
+
+    ratios = measure_density_ratios(project, image, pdk_root, pdk, topped,
+                                    configs['KLayout.Density'], ratio_lane)
+    if any(not Path(path).is_file() or digest(Path(path)) != sha
+           for path, sha in inputs.items()):
+        raise Refusal('LL_CANDIDATE_FINISHING_INPUT_CHANGED', str(state))
+    native_rows = {
+        'KLayout.Filler': (filler_dir, filler_receipt),
+        'KLayout.Density.before_topup': (density_dir, density_receipt),
+        'KLayout.Density': (topped_density_dir, topped_density_receipt),
+        'Checker.KLayoutDensity': (topped_checker_dir, topped_checker_receipt),
+    }
+    native = {name: {'path': str(folder / 'vibeic_receipt.json'),
+                     'sha256': digest(folder / 'vibeic_receipt.json')}
+              for name, (folder, _receipt) in native_rows.items()}
+    density_report = topped_density_dir / 'reports/density.klayout.json'
+    density = {
+        'step': 'KLayout.Density', 'state': str(topped_density_dir / 'state_out.json'),
+        'state_sha256': digest(topped_density_dir / 'state_out.json'),
+        'subject': str(topped), 'subject_sha256': digest(topped),
+        DENSITY_METRIC: 0, 'checker_error': None,
+        'report': str(density_report) if density_report.is_file() else None,
+        'rules': density_rules(density_report) if density_report.is_file() else None,
+        'pdk_density_before_topup': before_count,
+        'density_topup': {'gds': str(topped), 'gds_sha256': digest(topped),
+                          'input_sha256': digest(filled),
+                          'report': str(topup_dir / 'fill_report.json'),
+                          'report_sha256': digest(topup_dir / 'fill_report.json'),
+                          'config': str(topup_dir / 'pdk_fill_config.json'),
+                          'config_sha256': digest(topup_dir / 'pdk_fill_config.json'),
+                          'layers': topup_report['layers']},
+        'ratios': ratios,
+    }
+    return {'gds': str(topped), 'gds_sha256': digest(topped),
+            'density': density, 'inputs': inputs, 'native_receipts': native,
+            'configs': {name: {'path': str(path), 'sha256': digest(path)}
+                        for name, path in configs.items()},
+            'reuse': {'lane': lane, 'ratio_lane': ratio_lane,
+                      'scope': 'validated filler/top-up/density receipts; ratio replay only'},
+            'scope': 'candidate-local finishing; full DRC/LVS still required; '
+                     'prefill PPA only, fill-aware final electrical unproven'}
 
 
 def density_rules(report: Path) -> Optional[Dict[str, int]]:
@@ -340,14 +600,21 @@ def _run_logged(cmd: list, log: Path):
 
 
 def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
-                          cfg: dict, folder: Path) -> dict:
+                          cfg: dict, folder: Path, *, placement: Optional[dict] = None) -> dict:
     """Read every placed PAD/BLOCK footprint from OpenDB, never DEF text.
 
+    Explicit candidate placement reads its own ODB and native core area.
     The routed DEF and all physical LEFs are required even when the resulting
     protected-instance set is empty.  An unreadable source must not turn into
     an empty mask and permit GDS promotion.
     """
-    routed = project / 'phase3/stage3/pnr/routed.def'
+    routed = (Path(placement['def']) if placement is not None else
+              project / 'phase3/stage3/pnr/routed.def')
+    odb = Path(placement['odb']) if placement is not None else None
+    if odb is not None:
+        cfg = placement['config']
+        if not odb.is_file() or not odb.stat().st_size:
+            raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE', str(odb))
     if not routed.is_file() or not routed.stat().st_size:
         raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE', str(routed))
     tech = cfg.get('TECH_LEFS') or {}
@@ -432,7 +699,7 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
             '}']
     script.write_text('\n'.join([
         *reads,
-        f'read_def {word(routed.resolve())}',
+        (f'read_db {word(odb.resolve())}' if odb else f'read_def {word(routed.resolve())}'),
         'set _block [[[ord::get_db] getChip] getBlock]',
         'if {$_block eq "NULL"} { error "placed design has no OpenDB block" }',
         'set _dbu [$_block getDbUnitsPerMicron]',
@@ -440,6 +707,9 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
         f'set _out [open {word(partial.resolve())} w]',
         'puts $_out "DBU $_dbu"',
         'puts $_out "TOTAL [llength [$_block getInsts]]"',
+        *(['set _core [$_block getCoreArea]',
+           'puts $_out "CORE [$_core xMin] [$_core yMin] [$_core xMax] [$_core yMax]"']
+          if placement is not None else []),
         'set _protected 0',
         'foreach _inst [$_block getInsts] {',
         '  set _master [$_inst getMaster]',
@@ -477,7 +747,15 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
         if dbu <= 0 or total < 0 or protected < 0 or protected > total:
             raise ValueError('invalid OpenDB census')
         boxes = []
-        for line in lines[2:-1]:
+        core = None
+        if placement is not None:
+            fields = lines[2].split()
+            if len(fields) != 5 or fields[0] != 'CORE':
+                raise ValueError('candidate OpenDB core area absent')
+            core = [int(v) / dbu for v in fields[1:]]
+            if core[0] >= core[2] or core[1] >= core[3]:
+                raise ValueError('candidate OpenDB core area invalid')
+        for line in lines[3 if placement is not None else 2:-1]:
             fields = line.split()
             if len(fields) != 7 or fields[0] != 'BOX' or fields[1] not in ('PAD', 'BLOCK'):
                 raise ValueError(f'invalid OpenDB box: {line}')
@@ -490,11 +768,15 @@ def _placed_keepout_boxes(project: Path, image: str, pdk_root: Path, pdk: str,
     except (OSError, ValueError, IndexError) as exc:
         raise Refusal('LL_DENSITY_FILL_PLACEMENT_UNREADABLE',
                       f'{output}: {exc}') from exc
-    return {'dbu': dbu, 'total': total, 'boxes': boxes, 'source': str(routed)}
+    result = {'dbu': dbu, 'total': total, 'boxes': boxes, 'source': str(odb or routed)}
+    if placement is not None:
+        result['core_um'] = core
+    return result
 
 
 def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
-                   gds: Path, density_config: Path, lane: str) -> Dict[str, Any]:
+                   gds: Path, density_config: Path, lane: str, *,
+                   placement: Optional[dict] = None) -> Dict[str, Any]:
     """Use the PDK-derived dummy-metal engine after the PDK's own filler."""
     cfg, map_text, lef_text, deck_text = _density_source(pdk_root, pdk,
                                                          density_config)
@@ -520,7 +802,8 @@ def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
                 'basis': 'selected wafer.space ReadLayout dummy-to-active layer map',
                 'changes': changes}
     root = project / 'phase3/librelane' / lane
-    placed = _placed_keepout_boxes(project, image, pdk_root, pdk, cfg, root)
+    placed = _placed_keepout_boxes(project, image, pdk_root, pdk, cfg, root,
+        **({'placement': placement} if placement is not None else {}))
     try:
         spacing = max(float(row['space_to_metal']) for row in fill_cfg['layers'])
         if not math.isfinite(spacing) or spacing <= 0:
@@ -546,7 +829,11 @@ def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
         # its own code.
         declaration = project / DECLARATION_REL
         try:
-            declared, sources = declaration_config(project)
+            if placement is not None:
+                declared = {'CORE_AREA': placed['core_um']}
+                sources = {'CORE_AREA': 'candidate OpenDB getCoreArea: ' + placed['source']}
+            else:
+                declared, sources = declaration_config(project)
         except (OSError, ValueError) as exc:
             raise Refusal('LL_DENSITY_FILL_CORE_UNDECLARED',
                           f'{declaration}: {type(exc).__name__}: {exc}') from exc
@@ -554,7 +841,7 @@ def top_up_density(project: Path, image: str, pdk_root: Path, pdk: str,
         core_source = sources.get('CORE_AREA')
         record = project / 'reports/phase3/floorplan_rectangles.json'
         derived_die = derived_core = derived_source = None
-        if record.is_file():
+        if placement is None and record.is_file():
             derived_die, derived_core, derived_source = settled_floorplan_geometry(project)
         if not core:
             if derived_core is not None:
