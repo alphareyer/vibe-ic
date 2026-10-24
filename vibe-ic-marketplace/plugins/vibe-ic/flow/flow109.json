@@ -14587,14 +14587,20 @@
             "producer": "flow109_package_electrical.py:execute",
             "consumer": "flow109_package_electrical.py:consume",
             "engine_families": [
-              "ngspice"
+              "ngspice",
+              "python3"
             ],
             "engine_executables": {
-              "ngspice": "ngspice"
+              "ngspice": "ngspice",
+              "python3": "python3"
             },
             "engine_steps": {
               "ngspice": [
                 "Ngspice.PackageRLCTransient"
+              ],
+              "python3": [
+                "Vibeic.PackageModelPortsIdentity",
+                "Vibeic.PackageElectricalBounds"
               ]
             },
             "admission_policy": "source_owned_existing_native",
