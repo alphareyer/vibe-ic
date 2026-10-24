@@ -232,18 +232,28 @@ def _consume(project: Path, folders: list[Path], configs: dict[str, Path],
     wire_config = _read(configs["Checker.WireLength"])
     threshold_raw = wire_config.get("WIRE_LENGTH_THRESHOLD")
     if threshold_raw is None:
-        raise AdmissionRefusal("D42_WIRE_THRESHOLD_UNSTATED", "selected native checker")
-    threshold = _decimal(threshold_raw, "WIRE_LENGTH_THRESHOLD")
+        invocation = folders[4] / "invocation.log"
+        invocation_text = " ".join(invocation.read_text(errors="replace").split())
+        if ("Threshold for Threshold-surpassing long wires" not in invocation_text
+                or "is not set. The checker will be skipped." not in invocation_text):
+            raise AdmissionRefusal("D42_WIRE_CHECK_STATUS_UNBOUND", str(invocation))
+        threshold = None
+        wire_check = {"status": "NOT_APPLICABLE",
+                      "reason": "PDK-resolved WIRE_LENGTH_THRESHOLD is unset; native checker skipped"}
+    else:
+        threshold = _decimal(threshold_raw, "WIRE_LENGTH_THRESHOLD")
+        wire_check = {"status": "FAIL" if wire_max > threshold else "PASS",
+                      "threshold_um": str(threshold)}
     measurements = {"route_short_overlap_errors": route,
                     "disconnected_required_pins": disconnected,
                     "wire_length_max_um": str(wire_max),
-                    "wire_length_threshold_um": str(threshold)}
+                    "wire_length_threshold_um": str(threshold) if threshold is not None else None}
     failed = []
     if route:
         failed.append("route_check.route_short_overlap_errors")
     if disconnected:
         failed.append("route_check.disconnected_required_pins")
-    if wire_max > threshold:
+    if threshold is not None and wire_max > threshold:
         failed.append("route_check.wire_length_threshold")
     outputs = {}
     for step, folder in zip(STEPS, folders):
@@ -263,7 +273,34 @@ def _consume(project: Path, folders: list[Path], configs: dict[str, Path],
     return {"status": "FAIL" if failed else "PASS",
             "reason": "D42_NATIVE_CHECK_FAILED" if failed else "D42_NATIVE_CHECKS_PASS",
             "failed_obligations": failed, "measurements": measurements,
-            "identity": identity, "outputs": outputs}
+            "wire_length_check": wire_check, "identity": identity, "outputs": outputs}
+
+
+def _retained_native(project: Path, prepared: dict) -> tuple[list[Path], dict[str, Path], dict] | None:
+    """Reuse one completed checker chain after a consumer-only source repair."""
+    root = project / "reports/flow109/D42"
+    for receipt_path in sorted(root.glob("*/receipt.json"), reverse=True):
+        prior = _read(receipt_path)
+        if (prior.get("schema") != SCHEMA or prior.get("reason") != "D42_WIRE_THRESHOLD_UNSTATED"
+                or prior.get("native_started") is not True or prior.get("inputs") != prepared["inputs"]
+                or prior.get("image") != prepared["image"]
+                or prior.get("adopted_candidate") != prepared["candidate"]):
+            continue
+        lane = project / "phase3/librelane" / ("D42-route-check-" + receipt_path.parent.name[:12])
+        folders = [lane / f"{index:02d}-{step.lower().replace('.', '-')}"
+                   for index, step in enumerate(STEPS, 1)]
+        for step, folder in zip(STEPS, folders):
+            contract.validate_step_receipt(folder, step)
+        fingerprint = _read(folders[0] / "input_fingerprint.json")
+        actual = {_project_path(project, raw, "retained D42 input"): sha
+                  for raw, sha in fingerprint.get("state_files", {}).items()}
+        expected = {path: prepared["inputs"]["view_" + name]["sha256"]
+                    for name, path in prepared["views"].items()}
+        if fingerprint.get("image") != prepared["image"] or actual != expected:
+            raise AdmissionRefusal("D42_RETAINED_NATIVE_STALE", str(lane))
+        configs = {step: folder / "config.json" for step, folder in zip(STEPS, folders)}
+        return folders, configs, _ref(project, receipt_path)
+    return None
 
 
 def execute(project, context):
@@ -280,29 +317,35 @@ def execute(project, context):
         result.update(inputs=prepared["inputs"], operation_sources=prepared["sources"],
                       adopted_candidate=prepared["candidate"], image=prepared["image"])
         _before(project, context, prepared)
-        overlay = {"ERROR_ON_TR_DRC": (False, "D42 consumer records native metric"),
-                   "ERROR_ON_DISCONNECTED_PINS": (False, "D42 consumer records native metric"),
-                   "ERROR_ON_LONG_WIRE": (False, "D42 consumer records native metric")}
-        configs = contract.resolve_step_configs(
-            project, prepared["image"], "gf180mcuD", STEPS,
-            pdk_root=prepared["pdk_root"], folder="D42-config-" + attempt.name[:12],
-            overlay=overlay)
-        bridge = attempt / "adopted_state.json"
-        state = dict(prepared["state"])
-        state.update({name: str(path) for name, path in prepared["views"].items()})
-        write_json(bridge, state)
-        _before(project, context, prepared)
-        result["native_started"] = True
-        lane = "D42-route-check-" + attempt.name[:12]
-        folders = contract.run_chain(
-            project, prepared["image"], [(step, configs[step], bridge) for step in STEPS],
-            mounts=[(prepared["pdk_root"], "/pdk")], lane=lane, pdk_root="/pdk")
+        retained = _retained_native(project, prepared)
+        if retained is not None:
+            folders, configs, retained_receipt = retained
+            result.update(native_reused=True, retained_native_receipt=retained_receipt)
+        else:
+            overlay = {"ERROR_ON_TR_DRC": (False, "D42 consumer records native metric"),
+                       "ERROR_ON_DISCONNECTED_PINS": (False, "D42 consumer records native metric"),
+                       "ERROR_ON_LONG_WIRE": (False, "D42 consumer records native metric")}
+            configs = contract.resolve_step_configs(
+                project, prepared["image"], "gf180mcuD", STEPS,
+                pdk_root=prepared["pdk_root"], folder="D42-config-" + attempt.name[:12],
+                overlay=overlay)
+            bridge = attempt / "adopted_state.json"
+            state = dict(prepared["state"])
+            state.update({name: str(path) for name, path in prepared["views"].items()})
+            write_json(bridge, state)
+            _before(project, context, prepared)
+            result["native_started"] = True
+            lane = "D42-route-check-" + attempt.name[:12]
+            folders = contract.run_chain(
+                project, prepared["image"], [(step, configs[step], bridge) for step in STEPS],
+                mounts=[(prepared["pdk_root"], "/pdk")], lane=lane, pdk_root="/pdk")
         consumed = _consume(project, folders, configs, prepared)
         result.update(component_status=consumed["status"],
                       metric_acceptance_status=consumed["status"],
                       reason=consumed["reason"],
                       failed_obligations=consumed["failed_obligations"],
                       measurements=consumed["measurements"],
+                      wire_length_check=consumed["wire_length_check"],
                       identity=consumed["identity"], outputs=consumed["outputs"])
     except AdmissionRefusal as exc:
         result.update(component_status="FAIL" if exc.status == "FAIL" else "NOT_MEASURED",

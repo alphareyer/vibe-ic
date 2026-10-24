@@ -30,13 +30,13 @@ def _json(path, value):
     return path
 
 
-def _receipt(folder, step, state, *, reports=()):
+def _receipt(folder, step, state, *, reports=(), invocation="actual native fixture output\n"):
     folder.mkdir(parents=True, exist_ok=True)
     state_path = _json(folder / "state_out.json", state)
     fingerprint = {"step": step}
     _json(folder / "input_fingerprint.json", fingerprint)
     _json(folder / "pdk_root.json", {"cli_pdk_root": "/pdk"})
-    (folder / "invocation.log").write_text("actual native fixture output\n")
+    (folder / "invocation.log").write_text(invocation)
     hashes = {name: _sha(folder / name) for name in
               ("state_out.json", "input_fingerprint.json", "pdk_root.json", "invocation.log")}
     for name, content in reports:
@@ -103,7 +103,7 @@ def _d41(project, monkeypatch):
 
 
 def _native_folders(project, lane, *, route_errors=0, disconnected=0,
-                    wire_max=25, omit_report=None):
+                    wire_max=25, wire_threshold="100", omit_report=None):
     values = {
         "Checker.TrDRC": {"route__drc_errors": route_errors},
         "Odb.ReportDisconnectedPins": {"design__critical_disconnected_pin__count": disconnected},
@@ -119,7 +119,14 @@ def _native_folders(project, lane, *, route_errors=0, disconnected=0,
             reports.append(("full_disconnected_pins_table.txt", "Pin,Reason\n"))
         if step == "Odb.ReportWireLength" and omit_report != "wire":
             reports.append(("wire_lengths.csv", "net,length_um\n"))
-        _receipt(folder, step, {"metrics": values[step]}, reports=reports)
+        invocation = ("Threshold for Threshold-surpassing long wires is not set. "
+                      "The checker will be skipped.\n"
+                      if step == "Checker.WireLength" and wire_threshold is None
+                      else "actual native fixture output\n")
+        _receipt(folder, step, {"metrics": values[step]}, reports=reports,
+                 invocation=invocation)
+        _json(folder / "config.json", {"meta": {"step": step},
+                                       "WIRE_LENGTH_THRESHOLD": wire_threshold})
         folders.append(folder)
     return folders
 
@@ -152,6 +159,52 @@ def test_whole_d42_adapter_positive_uses_native_consumer(tmp_path, monkeypatch):
     assert result["measurements"]["route_short_overlap_errors"] == 0
     assert result["measurements"]["disconnected_required_pins"] == 0
     assert result["flow109_acceptance"] == result["whole_flow_acceptance"] == "NOT_MEASURED"
+
+
+def test_unset_pdk_wire_threshold_is_disclosed_not_an_invented_requirement(
+        tmp_path, monkeypatch):
+    _d41(tmp_path, monkeypatch)
+    configs = {step: _json(tmp_path / "configs" / f"{step}.json", {
+        "meta": {"step": step}, "WIRE_LENGTH_THRESHOLD": None}) for step in route.STEPS}
+    monkeypatch.setattr(route.contract, "resolve_step_configs", lambda *a, **k: configs)
+    monkeypatch.setattr(route, "require_launch_admission", lambda *a, **k: {"status": "PASS"})
+    monkeypatch.setattr(route.contract, "run_chain", lambda project, image, steps, **kw:
+        _native_folders(project, kw["lane"], wire_threshold=None))
+    result = route.execute(tmp_path, _context())
+    assert result["component_status"] == "PASS"
+    assert result["wire_length_check"]["status"] == "NOT_APPLICABLE"
+    assert result["measurements"]["wire_length_threshold_um"] is None
+
+
+def test_consumer_only_reentry_reuses_exact_native_chain(tmp_path, monkeypatch):
+    _d41(tmp_path, monkeypatch)
+    prepared = route.prepare(tmp_path, _context())
+    old_id = "e9c551fef2c94712987378e4b70cd4c1"
+    folders = _native_folders(tmp_path, "D42-route-check-" + old_id[:12], disconnected=21,
+                              wire_max=2051.8, wire_threshold=None)
+    fingerprint_path = folders[0] / "input_fingerprint.json"
+    fingerprint = json.loads(fingerprint_path.read_text())
+    fingerprint.update(image=prepared["image"], state_files={
+        str(path): prepared["inputs"]["view_" + name]["sha256"]
+        for name, path in prepared["views"].items()})
+    _json(fingerprint_path, fingerprint)
+    native_receipt_path = folders[0] / "vibeic_receipt.json"
+    native_receipt = json.loads(native_receipt_path.read_text())
+    native_receipt["input"] = fingerprint
+    native_receipt["sha256"]["input_fingerprint.json"] = _sha(fingerprint_path)
+    _json(native_receipt_path, native_receipt)
+    _json(tmp_path / "reports/flow109/D42" / old_id / "receipt.json", {
+        "schema": route.SCHEMA, "reason": "D42_WIRE_THRESHOLD_UNSTATED",
+        "native_started": True, "inputs": prepared["inputs"], "image": prepared["image"],
+        "adopted_candidate": prepared["candidate"]})
+    monkeypatch.setattr(route, "require_launch_admission", lambda *a, **k: {"status": "PASS"})
+    monkeypatch.setattr(route.contract, "run_chain",
+                        lambda *a, **k: pytest.fail("retained native chain must not replay"))
+    result = route.execute(tmp_path, _context())
+    assert result["component_status"] == "FAIL"
+    assert result["failed_obligations"] == ["route_check.disconnected_required_pins"]
+    assert result["native_started"] is False and result["native_reused"] is True
+    assert result["wire_length_check"]["status"] == "NOT_APPLICABLE"
 
 
 @pytest.mark.parametrize("which", ["def", "odb", "nl", "sdc"])
