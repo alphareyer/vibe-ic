@@ -80,12 +80,128 @@ def operation_sources():
              HERE / "mixed_signal_cosim_check.py", HERE / "mixed_signal_interface_si_check.py",
              HERE / "mixed_signal_top_lvs_run.py", HERE / "mixed_signal_merge_check.py",
              HERE / "mixed_signal_signoff_run.py", HERE / "mixed_signal_signoff_check.py",
-             HERE / "_mixed_signal_top_pv.py"}
+             HERE / "_mixed_signal_top_pv.py", HERE / "flow109_final_extract.py",
+             HERE / "analog_native_flow.py", HERE / "analog_hardmacro_check.py"}
     return {str(path.relative_to(HERE.parent)): _sha(path)
             for path in sorted(source_closure(roots))}
 
 
-def _current_inputs(project, step, top):
+def _bound_ref(project, value, label):
+    """Reopen one existing receipt/view reference inside this project."""
+    ref = value if isinstance(value, dict) else {"path": value}
+    path = _local(project, ref.get("path") if isinstance(ref, dict) else "")
+    if not path.is_file() or (ref.get("sha256") and ref["sha256"] != _sha(path)):
+        raise Refusal("MIXED_ROW_REQUIRED_INPUT_ABSENT", label)
+    return path
+
+
+def _final_parasitic_binding(project, manifest):
+    """Bind M08 to D69's validated final geometry and selected RC scene."""
+    import _mixed_signal_native as native
+    import flow109_final_extract as final_extract
+
+    ref = manifest.get("d69_receipt")
+    if not isinstance(ref, dict):
+        raise Refusal("MIXED_ROW_FINAL_PARASITICS_ABSENT", "M08 d69_receipt")
+    try:
+        final = final_extract.validate_final_parasitics(project, ref)
+        contract = native.contract(project, manifest["top"])
+    except Exception as exc:
+        raise Refusal("MIXED_ROW_FINAL_PARASITICS_INVALID", str(exc)) from exc
+    selected_spef = _local(project, (contract.get("si") or {}).get("spef", ""))
+    selected_netlist = _local(project, (contract.get("digital") or {}).get("netlist", ""))
+    final_spefs = final.get("final_spefs") or {}
+    matched = [corner for corner, candidate in final_spefs.items()
+               if _bound_ref(project, candidate, "D69 final SPEF").resolve() == selected_spef.resolve()
+               and candidate.get("sha256") == _sha(selected_spef)]
+    adopted = final.get("adopted_views") or {}
+    if (len(matched) != 1
+            or _bound_ref(project, adopted.get("netlist"), "D69 adopted netlist").resolve()
+            != selected_netlist.resolve()
+            or not final.get("component_parasitics_current")):
+        raise Refusal("MIXED_ROW_FINAL_PARASITICS_NOT_CONSUMED",
+                      "M3 must consume one current D69 final SPEF and adopted netlist")
+    refs = {"d69_receipt": ref, "final_geometry": final.get("final_geometry"),
+            "filled_def": final.get("filled_def"),
+            **{"final_spef:" + corner: value for corner, value in final_spefs.items()},
+            **{"adopted_" + role: value for role, value in adopted.items()}}
+    inputs = {}
+    for label, item in refs.items():
+        path = _bound_ref(project, item, label)
+        inputs[str(path.relative_to(project))] = _sha(path)
+    return {"d69_receipt": ref, "selected_corner": matched[0],
+            "final_geometry": final["final_geometry"],
+            "final_spefs": final_spefs,
+            "fill_sensitive_parasitics": final.get("fill_sensitive_parasitics"),
+            "inputs": inputs}
+
+
+def _m09_prerequisites(project, manifest):
+    """Re-open the current M08 completion and every declared A19 block."""
+    import analog_hardmacro_check as hardmacro
+    import analog_native_flow as analog
+    import flow109
+
+    m08_path = _bound_ref(project, manifest.get("m08_receipt"), "M08 component receipt")
+    m08 = _read(m08_path)
+    request_path = project / "reports/flow109/requests" / (str(m08.get("context_sha256")) + ".json")
+    request = _read(request_path)
+    try:
+        request = flow109.validate_execution_context(request)
+    except Exception as exc:
+        raise Refusal("MIXED_ROW_FINAL_AMS_RECEIPT_INVALID", str(exc)) from exc
+    if request.get("requested_step") != "M08":
+        raise Refusal("MIXED_ROW_FINAL_AMS_RECEIPT_INVALID", "receipt is not M08")
+    completion = consume_default_row_completion(project, request, m08)
+    if completion.get("default_row_status") != "PASS" or completion.get("completed") is not True:
+        raise Refusal("MIXED_ROW_FINAL_AMS_NOT_COMPLETE", str(completion.get("reason")))
+
+    status_path = project / "reports/analog_native/status.json"
+    status = _read(status_path)
+    blocks = hardmacro._load_block_list(project)
+    rows = [row for row in status.get("steps", ())
+            if isinstance(row, dict) and row.get("step") == "A19"]
+    if (not blocks or sorted(row.get("block") for row in rows) != sorted(blocks)
+            or status.get("source_sha256") != _sha(Path(analog.__file__))):
+        raise Refusal("MIXED_ROW_A19_POPULATION_INVALID", str(blocks))
+    inputs = {str(m08_path.relative_to(project)): _sha(m08_path),
+              str(request_path.relative_to(project)): _sha(request_path),
+              str(status_path.relative_to(project)): _sha(status_path)}
+    packages = {}
+    for row in rows:
+        block = row["block"]
+        producer = row.get("producer_context") or {}
+        in_views, out_views = row.get("input_views"), row.get("output_views")
+        if (row.get("status") != "PASS" or producer.get("image") != PINNED_IMAGE
+                or producer.get("driver_sha256") != status.get("source_sha256")
+                or not isinstance(in_views, dict) or not in_views
+                or not isinstance(out_views, dict) or not out_views):
+            raise Refusal("MIXED_ROW_A19_CURRENT_RESULT_INVALID", block)
+        for views, outputs in ((in_views, False), (out_views, True)):
+            for name, expected in views.items():
+                path = Path(name).resolve()
+                if (outputs and not path.is_relative_to(project)) or not path.is_file() \
+                        or _sha(path) != expected:
+                    raise Refusal("MIXED_ROW_A19_VIEW_STALE", str(name))
+                inputs[str(path.relative_to(project)) if path.is_relative_to(project) else str(path)] = expected
+        signoff_path = project / "phase3/analog" / block / "signoff.json"
+        signoff = _read(signoff_path)
+        summary = signoff.get("native_package_summary") or {}
+        if (signoff.get("block") != block or signoff.get("status") != "PASS"
+                or block not in summary.get("design_bound_blocks", ())
+                or len(signoff.get("steps") or ()) != 18
+                or len(signoff.get("deliverables") or {}) != 4
+                or str(signoff_path) not in out_views):
+            raise Refusal("MIXED_ROW_A19_PACKAGE_INVALID", block)
+        packages[block] = {"signoff_sha256": _sha(signoff_path),
+                           "deliverables": signoff["deliverables"]}
+    audit = hardmacro.run_audit(project)
+    if not audit.passed or sorted(audit.summary.get("design_bound_blocks", ())) != sorted(blocks):
+        raise Refusal("MIXED_ROW_A19_PACKAGE_INVALID", "current hardmacro audit")
+    return {"m08_completion": completion, "a19_packages": packages, "inputs": inputs}
+
+
+def _current_inputs(project, step, top, manifest=None):
     if step in ("M06", "M08"):
         import mixed_signal_m3_run as m3
         values = m3.inputs(project, top)
@@ -107,6 +223,10 @@ def _current_inputs(project, step, top):
         raise Refusal("MIXED_ROW_CONTEXT_MISMATCH", step)
     if not isinstance(values, dict) or not values or any(value is None for value in values.values()):
         raise Refusal("MIXED_ROW_REQUIRED_INPUT_ABSENT", step)
+    if step == "M08":
+        values.update(_final_parasitic_binding(project, manifest or {})["inputs"])
+    elif step == "M09":
+        values.update(_m09_prerequisites(project, manifest or {})["inputs"])
     return dict(sorted(values.items()))
 
 
@@ -157,8 +277,12 @@ def _semantic_pass(project, step, manifest):
             raise Refusal("MIXED_ROW_SCENARIO_POPULATION_MISMATCH", str((required, scenarios)))
         if cosim.get("verdict") != "PASS" or si.get("verdict") != "PASS":
             raise Refusal("MIXED_ROW_CURRENT_CONSUMER_REFUSED", str((cosim, si)), status="FAIL")
-        return {"cosim": cosim, "si": si, "scenario_ids": scenarios,
-                "geometry_sha256": _sha(project / "phase3/mixed_signal/top_merged.gds")}
+        evidence = {"cosim": cosim, "si": si, "scenario_ids": scenarios,
+                    "geometry_sha256": _sha(project / "phase3/mixed_signal/top_merged.gds")}
+        if step == "M08":
+            evidence["final_parasitics"] = _final_parasitic_binding(project, manifest)
+            evidence["final_parasitics"].pop("inputs", None)
+        return evidence
     if step == "M07":
         import mixed_signal_top_lvs_run as m1
         top_lvs = _read(project / "reports/analog/mixed_signal/top_lvs.json")
@@ -178,7 +302,9 @@ def _semantic_pass(project, step, manifest):
     current = signoff.verify(project)
     if audit.get("verdict") != "PASS" or audit.get("ready_for_tapeout") is not True:
         raise Refusal("MIXED_ROW_CURRENT_SIGNOFF_REFUSED", str(audit), status="FAIL")
-    return {"signoff": current,
+    prerequisites = _m09_prerequisites(project, manifest)
+    prerequisites.pop("inputs", None)
+    return {"signoff": current, "prerequisites": prerequisites,
             "final_geometry_sha256": _sha(project / "phase3/mixed_signal/top_merged.gds")}
 
 
@@ -198,10 +324,13 @@ def _prepare(project, context):
             or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", str(manifest.get("top") or ""))
             or not isinstance(manifest.get("pdk"), str) or not manifest["pdk"]):
         raise Refusal("MIXED_ROW_INPUT_INVALID", str(manifest_path))
-    current = _current_inputs(project, step, manifest["top"])
+    if step == "M07" and manifest.get("geometry_sha256") is not None:
+        raise Refusal("MIXED_ROW_INPUT_INVALID", "M07 output cannot be a launch prerequisite")
+    current = _current_inputs(project, step, manifest["top"], manifest)
     if manifest.get("input_sha256") != current:
         raise Refusal("MIXED_ROW_INPUT_STALE_OR_INCOMPLETE", step)
-    if manifest.get("geometry_sha256") != _sha(project / "phase3/mixed_signal/top_merged.gds"):
+    if step != "M07" and manifest.get("geometry_sha256") != _sha(
+            project / "phase3/mixed_signal/top_merged.gds"):
         raise Refusal("MIXED_ROW_GEOMETRY_IDENTITY_MISMATCH", step)
     return manifest, current, operation_sources()
 
@@ -225,7 +354,7 @@ def execute(project, context):
             if record["returncode"] != 0:
                 status = "FAIL" if record["returncode"] == 1 else "NOT_MEASURED"
                 raise Refusal("MIXED_ROW_NATIVE_COMMAND_FAILED", str(argv), status=status)
-        if _current_inputs(project, step, manifest["top"]) != inputs:
+        if _current_inputs(project, step, manifest["top"], manifest) != inputs:
             raise Refusal("MIXED_ROW_INPUT_CHANGED_DURING_EXECUTION", step)
         evidence = _semantic_pass(project, step, manifest)
         outputs = {str(path.relative_to(project)): _sha(path)
@@ -293,6 +422,10 @@ def consume_default_row_completion(project, context, component):
         evidence = _semantic_pass(project, step, manifest)
         if evidence != raw.get("evidence"):
             raise Refusal("MIXED_ROW_COMPLETION_DERIVATION_CHANGED", step)
+        if (step == "M08"
+                and (evidence.get("final_parasitics", {}).get("fill_sensitive_parasitics") or {}).get("status") != "PASS"):
+            raise Refusal("MIXED_ROW_FINAL_PARASITICS_NOT_QUALIFIED",
+                          "D69 fill-sensitive final parasitics remain unmeasured")
         return {**base, "default_row_status": "PASS", "completed": True,
                 "reason": "MIXED_ROW_SUPPORTED_SCOPE_COMPLETE", "detail": ROWS[step]["scope"],
                 "component_receipt": {"path": str(path.relative_to(project)), "sha256": _sha(path)},
