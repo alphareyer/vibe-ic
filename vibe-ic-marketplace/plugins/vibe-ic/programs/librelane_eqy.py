@@ -22,6 +22,9 @@ The generated script differs from LibreLane's generic one in four measured ways:
   produce a counterexample at time zero even for two identical resettable
   registers. Amendment retains every match point and output obligation; it
   adds the producer logic behind cutpoints rather than dropping comparisons.
+* Collect all matched points into one fragment before partitioning.  This does
+  not remove an output or match obligation; it prevents EQY from materializing
+  one nearly-whole-design copy per internal match point on mapped netlists.
 
 EQY's top-level status folds "could not decide" into FAIL. The reader therefore
 reads every partition's strategy status files: a partition is PROVEN when a
@@ -64,6 +67,7 @@ def eqy_script(top: str, rtl: list[Path], netlist: Path, liberty: str) -> str:
         "[script]", f"hierarchy -top {top}", "proc", f"prep -top {top} -flatten",
         "memory -nomap", "async2sync", "setundef -init -zero", "splitnets",
         observable_matchpoint_names(top).rstrip(), "",
+        "[collect *]", "group *", "",
         "[partition *]", "amend *", "",
         "[strategy sat]", "use sat", "depth 5", "",
         "[strategy pdr]", "use sby", "engine abc pdr -rfi", ""])

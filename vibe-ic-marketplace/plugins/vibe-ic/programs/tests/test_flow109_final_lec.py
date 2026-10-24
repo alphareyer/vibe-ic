@@ -128,6 +128,7 @@ def test_actual_general_entry_proves_final_mapped_netlist_and_publishes_common_s
     assert record['flow109_acceptance'] == record['baseline_adoption'] == 'NOT_MEASURED'
     assert record['proof']['verdict'] == 'PASS'
     assert record['proof']['compared_points'] > 0
+    assert len(record['proof']['declared_partitions']) == 1
     assert set(record['proof']['declared_partitions']) == set(record['proof']['partitions'])
     metrics = record['metric_bindings']
     assert metrics['status'] == 'PASS'
