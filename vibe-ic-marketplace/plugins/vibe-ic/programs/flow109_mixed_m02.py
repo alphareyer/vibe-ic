@@ -150,6 +150,34 @@ def _before(project, context, prepared):
             raise AdmissionRefusal("M02_STALE_OR_MISSING_INPUT", name)
 
 
+def _literal_measured_failures(project):
+    """Return simulation error counters that cannot be a successful M02 result.
+
+    Scenario-specific voltage limits remain owned by L22.  In contrast, a
+    sampled wrapper with response errors or unknown observations did not
+    successfully correlate, even if an incomplete criteria list allowed the
+    scenario's self-verdict to say PASS.
+    """
+    try:
+        body = m3.read(project / m3.COSIM)
+    except m3.Refusal:
+        return []
+    failures = []
+    for row in body.get("scenarios", []) if isinstance(body.get("scenarios"), list) else []:
+        if not isinstance(row, dict):
+            continue
+        metrics = row.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        for name in ("response_mismatches", "response_errors", "unknown_samples"):
+            value = metrics.get(name)
+            if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and value > 0):
+                failures.append({"scenario": row.get("id"), "metric": name,
+                                 "measured": value, "required": 0})
+    return failures
+
+
 def execute(project, context):
     project = Path(project).resolve()
     prepared = prepare(project, context)
@@ -157,6 +185,7 @@ def execute(project, context):
     parent.mkdir(parents=True, exist_ok=True)
     attempt = Path(tempfile.mkdtemp(prefix="M02-", dir=parent))
     status, reason, producer, audit = "NOT_MEASURED", "M02_NOT_MEASURED", None, None
+    literal_failures = []
     reused = False
     try:
         _before(project, context, prepared)
@@ -173,8 +202,10 @@ def execute(project, context):
         gate_rc = cosim_check.main([str(project), "--require-current-production",
                                     "--json", str(gate_path)])
         gate = _read(gate_path, "M02_CONSUMER_RECEIPT_INVALID")
+        literal_failures = _literal_measured_failures(project)
         measured_fail = (producer.get("cosim_verdict") == "FAIL"
-                         or audit.get("verdict") == "FAIL" or gate_rc == 1)
+                         or audit.get("verdict") == "FAIL" or gate_rc == 1
+                         or bool(literal_failures))
         if measured_fail:
             status, reason = "FAIL", "M02_MEASURED_FAIL"
         elif (producer.get("cosim_verdict") == "PASS" and audit.get("verdict") == "PASS"
@@ -194,6 +225,7 @@ def execute(project, context):
               "predecessors": prepared["predecessors"], "operation_sources": prepared["sources"],
               "producer_receipt": producer, "cosim_audit": audit,
               "reused_current_native": reused,
+              "literal_measured_failures": literal_failures,
               "metric_acceptance_status": "UNIMPLEMENTED",
               "unimplemented_obligations": [x["id"] for x in context["resolved_row"]["obligations"]],
               "gate_layers": {f"G{i}": "NOT_MEASURED" for i in range(1, 10)},

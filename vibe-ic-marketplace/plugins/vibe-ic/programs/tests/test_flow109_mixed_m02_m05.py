@@ -13,9 +13,11 @@ import flow109
 import flow109_admission as admission
 import flow109_mixed_m02 as m02
 import flow109_mixed_m05 as m05
+from _hostpaths import require_repo
 
 
-FIXTURE = Path(__file__).parent / "fixtures/m3_native"
+FIXTURE = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+                       "tests", "fixtures", "m3_native")
 
 
 def _put(project, name, value):
@@ -109,6 +111,49 @@ def test_m02_measured_fail_has_precedence(tmp_path, monkeypatch):
         return 0
     monkeypatch.setattr(m02.cosim_check, "main", gate)
     assert m02.execute(tmp_path, context)["component_status"] == "FAIL"
+
+
+@pytest.mark.parametrize("metric", ["response_mismatches", "unknown_samples"])
+def test_m02_rejects_literal_error_even_when_incomplete_criteria_self_passes(
+        tmp_path, monkeypatch, metric):
+    context = _m02_case(tmp_path)
+    _put(tmp_path, m02.m3.COSIM, {
+        "verdict": "PASS", "all_scenarios_passed": True,
+        "scenarios": [{"id": "enable_receiver", "status": "PASS",
+                       "criteria": [{"native_metric": "drive_transitions", "min": 1,
+                                     "measured": 1, "verdict": "PASS"}],
+                       "metrics": {"drive_transitions": 1, metric: 1}}]})
+    monkeypatch.setattr(m02.m3, "produce", lambda *_args: {"cosim_verdict": "PASS"})
+    monkeypatch.setattr(m02.m3, "audit", lambda *_args: {"verdict": "PASS", "passed": True})
+    def gate(argv):
+        _put(Path("/"), argv[argv.index("--json") + 1], {"passed": True, "verdict": "PASS"})
+        return 0
+    monkeypatch.setattr(m02.cosim_check, "main", gate)
+    report = m02.execute(tmp_path, context)
+    assert report["component_status"] == "FAIL"
+    assert report["reason"] == "M02_MEASURED_FAIL"
+    assert report["literal_measured_failures"] == [{
+        "scenario": "enable_receiver", "metric": metric, "measured": 1, "required": 0}]
+
+
+def test_m02_literal_zero_error_control_remains_component_pass(tmp_path, monkeypatch):
+    context = _m02_case(tmp_path)
+    _put(tmp_path, m02.m3.COSIM, {
+        "verdict": "PASS", "all_scenarios_passed": True,
+        "scenarios": [{"id": "enable_receiver", "status": "PASS",
+                       "criteria": [{"native_metric": "drive_transitions", "min": 1,
+                                     "measured": 1, "verdict": "PASS"}],
+                       "metrics": {"drive_transitions": 1, "response_mismatches": 0,
+                                   "unknown_samples": 0}}]})
+    monkeypatch.setattr(m02.m3, "produce", lambda *_args: {"cosim_verdict": "PASS"})
+    monkeypatch.setattr(m02.m3, "audit", lambda *_args: {"verdict": "PASS", "passed": True})
+    def gate(argv):
+        _put(Path("/"), argv[argv.index("--json") + 1], {"passed": True, "verdict": "PASS"})
+        return 0
+    monkeypatch.setattr(m02.cosim_check, "main", gate)
+    report = m02.execute(tmp_path, context)
+    assert report["component_status"] == "PASS"
+    assert report["literal_measured_failures"] == []
 
 
 def test_m02_reuses_only_reverified_current_native_receipt(tmp_path, monkeypatch):
