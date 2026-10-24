@@ -182,7 +182,7 @@ def test_frontend_rows_route_stable_ids_to_existing_default_owner_sites():
         "D02": ("0.5ic", "phase1_one_shot_runner", "D1", "D1"),
         "D09": ("1", "design_one_shot_runner", "1", "1"),
         "D10": ("P0", "design_one_shot_runner", "1", "1"),
-        "D11": ("2", "design_one_shot_runner", "2", "3"),
+        "D11": ("2", "design_one_shot_runner", "2", "2"),
         "D12": ("3", "design_one_shot_runner", "2", "3"),
         "D13": ("4", "design_one_shot_runner", "4", "4"),
         "D14": ("5", "design_one_shot_runner", "4", "5"),
@@ -573,3 +573,87 @@ def test_frontend_owner_window_preserves_existing_indivisible_spans():
     assert [row["id"] for row in window["resolved_rows"]] == [
         "D09", "D10", "D11", "D12", "D13", "D14"]
     assert (window["native_entry_step"], window["native_exit_step"]) == ("1", "5")
+
+# Native completion is an owner answer, separate from whole-flow acceptance.
+@pytest.mark.parametrize('component,status,completed,expected', [
+    ('PASS','PASS',True,'PASS'), ('PASS','PASS',False,'NOT_MEASURED'),
+    ('PASS',None,True,'NOT_MEASURED'), ('FAIL','PASS',True,'FAIL'),
+    ('NOT_MEASURED','PASS',True,'NOT_MEASURED'), ('PASS','FAIL',False,'FAIL')])
+def test_selected_native_completion_is_not_blanket_component_pass(
+        tmp_path, component, status, completed, expected):
+    context = flow109.execution_context(flow109.resolve_plan(profile()), 'D11', 'D11')
+    result = {'step_id':'D11','context_sha256':context['context_sha256'],
+              'component_status':component,'completed':completed}
+    if status is not None: result['default_row_status'] = status
+    answer = flow109._selected_step_result(tmp_path, context, result)
+    assert answer['default_row_status'] == expected
+    assert answer['whole_flow_acceptance'] == 'NOT_MEASURED'
+    assert answer['delivery_accepted'] is False
+
+
+@pytest.mark.parametrize('field,value', [
+    ('step_id','foreign'), ('context_sha256','foreign'),
+    ('whole_flow_acceptance','PASS'), ('delivery_accepted',True)])
+def test_selected_native_completion_rejects_foreign_identity_and_whole_claims(tmp_path,field,value):
+    context = flow109.execution_context(flow109.resolve_plan(profile()), 'D11', 'D11')
+    result = {'step_id':'D11','context_sha256':context['context_sha256'],
+              'component_status':'PASS','default_row_status':'PASS','completed':True}
+    result[field] = value
+    with pytest.raises(flow109.Flow109Error, match='FLOW109_COMPONENT_RESULT_INVALID'):
+        flow109._selected_step_result(tmp_path, context, result)
+    assert not (tmp_path/'reports/flow109/default_rows/D11.json').exists()
+
+
+def test_selected_native_completion_empty_is_not_a_result(tmp_path):
+    context = flow109.execution_context(flow109.resolve_plan(profile()), 'D11', 'D11')
+    with pytest.raises(flow109.Flow109Error, match='FLOW109_COMPONENT_RESULT_INVALID'):
+        flow109._selected_step_result(tmp_path, context, {})
+
+
+def test_selected_completion_consumer_is_not_limited_to_a_row_allowlist(tmp_path):
+    context = flow109.execution_context(flow109.resolve_plan(profile()), 'D11', 'D11')
+    calls=[]
+    def consume(project, request, component):
+        calls.append(request['requested_step'])
+        return {'step_id':'D11','context_sha256':request['context_sha256'],
+                'default_row_status':'PASS','completed':True}
+    answer=flow109._selected_step_result(tmp_path,context,
+        {'step_id':'D11','context_sha256':context['context_sha256'],
+         'component_status':'PASS','flow109_acceptance':'NOT_MEASURED'},
+        SimpleNamespace(consume_default_row_completion=consume))
+    assert calls==['D11'] and answer['default_row_status']=='PASS'
+
+
+@pytest.mark.parametrize('native,status,completed,expected', [
+    ('2','PASS',True,'PASS'), ('2','PASS',False,'NOT_MEASURED'),
+    ('2','FAIL',False,'FAIL'), ('foreign','PASS',True,'NOT_MEASURED')])
+def test_owner_finish_uses_only_selected_completed_native_result(
+        tmp_path, monkeypatch, native,status,completed,expected):
+    context=flow109.execution_context(flow109.resolve_plan(profile()),'D11','D11')
+    request=tmp_path/'request.json';request.write_text(json.dumps(context))
+    monkeypatch.setenv(flow109.CONTEXT_ENV,str(request))
+    report={'steps':[{'status':status,'extras':{'step_id':native,
+        'context_sha256':context['context_sha256'],
+        'default_row_status':status,'completed':completed}}]}
+    result=flow109.finish_native_window(tmp_path,report)
+    assert result['default_row_status']==expected
+    assert result['whole_flow_acceptance']=='NOT_MEASURED'
+    assert result['delivery_accepted'] is False
+
+
+def test_owner_finish_rejects_stale_context_and_empty_report(tmp_path,monkeypatch):
+    context=flow109.execution_context(flow109.resolve_plan(profile()),'D11','D11')
+    request=tmp_path/'request.json';request.write_text(json.dumps(context))
+    monkeypatch.setenv(flow109.CONTEXT_ENV,str(request))
+    report={'steps':[{'status':'PASS','extras':{'step_id':'2',
+        'context_sha256':'foreign','default_row_status':'PASS','completed':True}}]}
+    with pytest.raises(flow109.Flow109Error,match='FLOW109_CONTEXT_STALE'):
+        flow109.finish_native_window(tmp_path,report)
+    assert flow109.finish_native_window(tmp_path,{'steps':[]})['default_row_status']=='NOT_MEASURED'
+    context['context_sha256']='stale';request.write_text(json.dumps(context))
+    assert flow109.finish_native_window(tmp_path,report) is None
+
+
+def test_selected_lint_window_stops_at_its_own_step():
+    window=flow109.resolve_execution_window(flow109.resolve_plan(profile()),'D11','D11')
+    assert window['resolved_row']['profile']['dispatch']['owner_exit_step']=='2'

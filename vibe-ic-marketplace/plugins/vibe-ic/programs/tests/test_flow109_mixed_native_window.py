@@ -54,6 +54,8 @@ def _component(step, status, context):
         "step_id": step,
         "native_step_id": "16",
         "component_status": status,
+        "default_row_status": status,
+        "completed": status == "PASS",
         "reason": "controlled-" + status.lower(),
         "native_started": status == "PASS",
         "context_sha256": context["context_sha256"],
@@ -162,3 +164,35 @@ def test_explicit_qualification_claim_stays_on_strict_inventory_path(
     with pytest.raises(flow109.Flow109Error, match="FLOW109_WINDOW_USE_MISMATCH"):
         flow109.prepare_front_door(args, tmp_path)
     assert not (tmp_path / "reports/flow109/attempts").exists()
+
+
+@pytest.mark.parametrize('layout', ['mixed','ordered'])
+@pytest.mark.parametrize('completion,expected_rc', [('FAIL',1),('NOT_MEASURED',2)])
+def test_incomplete_selected_completion_stops_window_despite_component_pass(
+        tmp_path,monkeypatch,layout,completion,expected_rc):
+    import importlib
+    calls=[]
+    args=_request(tmp_path)
+    if layout=='mixed':
+        first,last='D34','D35'
+        modules=[clock]
+    else:
+        first,last='D69','D70';args.entry_step=first;args.exit_step=last
+        plan=flow109.resolve_plan(_profile())
+        modules=[importlib.import_module(flow109.resolve_step(plan,s)['profile']['dispatch']['adapter'])
+                 for s in (first,last)]
+    def owner(project,context):
+        calls.append(context['requested_step'])
+        return {**_component(context['requested_step'],'PASS',context),
+                'default_row_status':completion,'completed':False}
+    monkeypatch.setattr(modules[0],'execute',owner)
+    if layout=='ordered':
+        monkeypatch.setattr(modules[1],'execute',lambda *a:pytest.fail('later owner launched'))
+    assert flow109.prepare_front_door(args,tmp_path)==expected_rc
+    assert calls==[first]
+    assert (args.entry_step,args.exit_step)==(first,last)
+    result=json.loads((Path(os.environ[flow109.ATTEMPT_ENV])/'result.json').read_text())
+    assert result['default_row_status']==completion
+    assert result['components'][0]['component_status']=='PASS'
+    assert result['whole_flow_acceptance']=='NOT_MEASURED'
+    assert result['delivery_accepted'] is False

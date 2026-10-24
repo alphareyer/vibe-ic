@@ -568,9 +568,10 @@ def _new_attempt(project: Path, context: Mapping) -> Path:
     attempt.mkdir()
     request = {"schema": "vibeic.flow109.window-attempt-request.v1",
                "context_sha256": context["context_sha256"],
-               "entry": context["requested_entry"], "exit": context["requested_exit"],
-               "dispatch_kind": context["dispatch_kind"],
-               "component_ids": [row["id"] for row in context["resolved_rows"]],
+               "entry": context.get("requested_entry", context.get("requested_step")),
+               "exit": context.get("requested_exit", context.get("requested_step")),
+               "dispatch_kind": context.get("dispatch_kind", "canonical_owner_window"),
+               "component_ids": [row["id"] for row in (context.get("resolved_rows") or [context["resolved_row"]])],
                "flow109_acceptance": "NOT_MEASURED"}
     with (attempt / "request.json").open("x", encoding="utf-8") as handle:
         json.dump(request, handle, sort_keys=True, indent=2)
@@ -603,14 +604,73 @@ def _not_executed_component(context: Mapping, row: Mapping, reason: str) -> dict
     }
 
 
+def _selected_step_result(project: Path, context: Mapping, result: Mapping,
+                          adapter=None) -> dict:
+    """Propagate an owner's completed step, never promote component success.
+
+    Owners judge their required native checks. This boundary only preserves
+    that answer and its identity; whole-flow and delivery are separate claims.
+    Legacy row consumers remain callable without a list of privileged row IDs.
+    """
+    row = context["resolved_row"]
+    if (not isinstance(result, Mapping)
+            or result.get("component_status") not in ("PASS", "FAIL", "NOT_MEASURED")
+            or result.get("step_id", row["id"]) != row["id"]
+            or result.get("context_sha256", context["context_sha256"]) != context["context_sha256"]
+            or result.get("whole_flow_acceptance", "NOT_MEASURED") != "NOT_MEASURED"
+            or result.get("delivery_accepted", False) is not False):
+        raise Flow109Error("FLOW109_COMPONENT_RESULT_INVALID", row["id"])
+    completion = dict(result)
+    consume = getattr(adapter, "consume_default_row_completion", None)
+    if callable(consume) and not (result.get("completed") is True
+                                  and result.get("default_row_status") in ("PASS", "FAIL", "NOT_MEASURED")):
+        completion = dict(consume(project, context, result))
+        if (completion.get("step_id") != row["id"]
+                or completion.get("context_sha256") != context["context_sha256"]):
+            raise Flow109Error("FLOW109_COMPONENT_RESULT_INVALID", row["id"])
+    status = completion.get("default_row_status", "NOT_MEASURED")
+    if (status not in ("PASS", "FAIL", "NOT_MEASURED")
+            or completion.get("whole_flow_acceptance", "NOT_MEASURED") != "NOT_MEASURED"
+            or completion.get("delivery_accepted", False) is not False):
+        raise Flow109Error("FLOW109_COMPONENT_RESULT_INVALID", row["id"])
+    if result["component_status"] == "FAIL":
+        status = "FAIL"
+    elif status == "PASS" and (result["component_status"] != "PASS"
+                                or completion.get("completed") is not True):
+        status = "NOT_MEASURED"
+    if status == "PASS" and (completion.get("step_id") != row["id"]
+                              or completion.get("context_sha256") != context["context_sha256"]):
+        raise Flow109Error("FLOW109_COMPONENT_RESULT_INVALID", row["id"])
+    # A legacy partial result may report native PASS but owes no row verdict.
+    # An explicit step PASS is accepted only through completed owner work.
+    if result.get("flow109_acceptance", "NOT_MEASURED") not in ("PASS", "FAIL", "NOT_MEASURED"):
+        raise Flow109Error("FLOW109_COMPONENT_RESULT_INVALID", row["id"])
+    answer = {**result, **completion, "step_id": row["id"],
+              "context_sha256": context["context_sha256"],
+              "component_status": result["component_status"],
+              "default_row_status": status,
+              "completed": status == "PASS" and completion.get("completed") is True,
+              "flow109_acceptance": status,
+              "whole_flow_acceptance": "NOT_MEASURED", "delivery_accepted": False}
+    from _atomic_artefact import write_json
+    write_json(project / "reports/flow109/default_rows" / (row["id"] + ".json"), answer)
+    return answer
+
+
 def _attempt_result(context: Mapping, components: list[dict]) -> dict:
     aggregate = ("FAIL" if any(item["component_status"] == "FAIL" for item in components)
                  else "PASS" if len(components) == len(context["resolved_rows"])
                  and all(item["component_status"] == "PASS" for item in components)
                  else "NOT_MEASURED")
+    selected = [item.get("default_row_status", "FAIL" if item["component_status"] == "FAIL"
+                         else "NOT_MEASURED") for item in components]
+    step_status = ("FAIL" if "FAIL" in selected else "PASS"
+                   if len(components) == len(context["resolved_rows"])
+                   and all(status == "PASS" for status in selected) else "NOT_MEASURED")
     return {"schema": "vibeic.flow109.window-attempt-result.v1",
             "context_sha256": context["context_sha256"],
             "component_status": aggregate, "components": components,
+            "default_row_status": step_status,
             "flow109_acceptance": "NOT_MEASURED", "whole_flow_acceptance": "NOT_MEASURED",
             "bounded": True, "delivery_accepted": False}
 
@@ -625,6 +685,34 @@ def finish_native_window(project: Path, report: Mapping, report_path: Path | Non
         context = validate_execution_context(json.loads(Path(path).read_text(encoding="utf-8")))
     except (OSError, ValueError, Flow109Error):
         return None
+    owner_rows = context.get("resolved_rows") or [context.get("resolved_row", {})]
+    if owner_rows and all((row.get("profile", {}).get("dispatch") or {}).get("kind")
+                          == "canonical_owner_window" for row in owner_rows):
+        # The existing owner report carries the native step's completed answer.
+        # No backend alias, extra row consumer or second native judgment.
+        components = []
+        for row in owner_rows:
+            native = str(row["profile"]["dispatch"]["native_step_id"])
+            matches = [item for item in report.get("steps", [])
+                       if str((item.get("extras") or {}).get("step_id")) == native]
+            current = component_context(context, requested_step=row["id"])
+            item = matches[0] if len(matches) == 1 else {}
+            extras = item.get("extras") or {}
+            if extras.get("context_sha256", context["context_sha256"]) not in (
+                    context["context_sha256"], current["context_sha256"]):
+                raise Flow109Error("FLOW109_CONTEXT_STALE", "native owner result")
+            result = {**extras, "step_id": row["id"],
+                      "context_sha256": current["context_sha256"],
+                      "component_status": item.get("status", "NOT_MEASURED")}
+            components.append(_selected_step_result(project, current, result))
+        result = _attempt_result({**context, "resolved_rows": owner_rows}, components)
+        result["default_row_status"] = (
+            "FAIL" if any(c["default_row_status"] == "FAIL" for c in components)
+            else "PASS" if all(c["default_row_status"] == "PASS" for c in components)
+            else "NOT_MEASURED")
+        attempt = _new_attempt(project, context)
+        _finish_attempt(attempt, result)
+        return result
     if context["schema"] == "vibeic.flow109.execution-context.v1":
         dispatch = context["resolved_row"]["profile"].get("dispatch") or {}
         if dispatch.get("kind") != "canonical_backend_window":
@@ -661,7 +749,9 @@ def finish_native_window(project: Path, report: Mapping, report_path: Path | Non
                     or component.get("context_sha256") != context["context_sha256"]
                     or component.get("component_status") not in (
                         "PASS", "FAIL", "NOT_MEASURED")
-                    or component.get("flow109_acceptance") != "NOT_MEASURED"):
+                    or component.get("flow109_acceptance") not in ("PASS", "FAIL", "NOT_MEASURED")
+                    or (component.get("flow109_acceptance") == "PASS" and not (
+                        component.get("completed") is True and component.get("default_row_status") == "PASS"))):
                 component = _not_executed_component(
                     context, row, "selected adapter component receipt absent or invalid")
             components.append(component)
@@ -850,18 +940,13 @@ def prepare_front_door(args, project: Path) -> int | None:
                               "context_sha256": current["context_sha256"],
                               "flow109_acceptance": "NOT_MEASURED",
                               "whole_flow_acceptance": "NOT_MEASURED"}
-                if (not isinstance(result, dict)
-                        or result.get("step_id") != row["id"]
-                        or result.get("component_status") not in (
-                            "PASS", "FAIL", "NOT_MEASURED")
-                        or result.get("flow109_acceptance") != "NOT_MEASURED"):
-                    raise Flow109Error("FLOW109_COMPONENT_RESULT_INVALID", adapter)
+                result = _selected_step_result(project, current, result, import_module(adapter))
                 # The window identity, rather than a one-row derived identity,
                 # binds this retained component into the later aggregate.
                 result = dict(result, context_sha256=context["context_sha256"])
                 components.append(result)
                 write_json(destination / "components" / (row["id"] + ".json"), result)
-                if result["component_status"] != "PASS":
+                if result["default_row_status"] != "PASS":
                     for later in context["resolved_rows"][len(components):]:
                         missing = _not_executed_component(
                             context, later, "not executed: an earlier row stopped")
@@ -870,7 +955,7 @@ def prepare_front_door(args, project: Path) -> int | None:
                     finished = _attempt_result(context, components)
                     _finish_attempt(attempt, finished)
                     return {"PASS": 0, "FAIL": 1, "NOT_MEASURED": 2}[
-                        finished["component_status"]]
+                        finished["default_row_status"]]
             args.entry_step = layout["backend_entry_step"]
             args.exit_step = layout["backend_exit_step"]
             return None
@@ -917,25 +1002,14 @@ def prepare_front_door(args, project: Path) -> int | None:
                               "reason": exc.code, "detail": exc.detail,
                               "native_started": False,
                               "flow109_acceptance": "NOT_MEASURED"}
-                if (not isinstance(result, dict)
-                        or result.get("component_status") not in ("PASS", "FAIL", "NOT_MEASURED")
-                        or result.get("flow109_acceptance") != "NOT_MEASURED"):
-                    raise Flow109Error("FLOW109_COMPONENT_RESULT_INVALID", adapter)
+                result = _selected_step_result(project, current, result, import_module(adapter))
                 components.append(result)
                 write_json(destination / "components" / (row["id"] + ".json"), result)
-                if result["component_status"] != "PASS":
+                if result["default_row_status"] != "PASS":
                     break
-            aggregate = ("FAIL" if any(x["component_status"] == "FAIL" for x in components)
-                         else "PASS" if len(components) == len(context["resolved_rows"])
-                         and all(x["component_status"] == "PASS" for x in components)
-                         else "NOT_MEASURED")
-            _finish_attempt(attempt, {
-                "schema": "vibeic.flow109.window-attempt-result.v1",
-                "context_sha256": context["context_sha256"],
-                "component_status": aggregate, "components": components,
-                "flow109_acceptance": "NOT_MEASURED", "whole_flow_acceptance": "NOT_MEASURED",
-                "bounded": True, "delivery_accepted": False})
-            return {"PASS": 0, "FAIL": 1, "NOT_MEASURED": 2}[aggregate]
+            finished = _attempt_result(context, components)
+            _finish_attempt(attempt, finished)
+            return {"PASS": 0, "FAIL": 1, "NOT_MEASURED": 2}[finished["default_row_status"]]
         write_json(destination / "admission.json", window_admission or {
             "status": "NOT_MEASURED", "reason": "PER_LAUNCH_REVALIDATION_REQUIRED",
             "context_sha256": context["context_sha256"], "native_started": False})
@@ -984,21 +1058,9 @@ def prepare_front_door(args, project: Path) -> int | None:
         # calls existing producers/consumers and retains their actual receipts.
         from importlib import import_module
         result = import_module(adapter).execute(project, context)
-        if (not isinstance(result, dict)
-                or result.get('component_status') not in ('PASS', 'FAIL', 'NOT_MEASURED')
-                or result.get('flow109_acceptance') != 'NOT_MEASURED'):
-            raise Flow109Error('FLOW109_COMPONENT_RESULT_INVALID', adapter)
+        result = _selected_step_result(project, context, result, import_module(adapter))
         write_json(destination / 'components' / (context['requested_step'] + '.json'), result)
-        row_status = result['component_status']
-        if context['requested_step'] in ('D45', 'M06', 'M07', 'M08', 'M09'):
-            # These narrowly registered Default rows have row-local consumers
-            # that re-open current native receipts.  Component success alone
-            # still cannot establish a row, Flow109, or whole-IC verdict.
-            completion = import_module(adapter).consume_default_row_completion(
-                project, context, result)
-            write_json(destination / 'default_rows' /
-                       (context['requested_step'] + '.json'), completion)
-            row_status = completion['default_row_status']
+        row_status = result['default_row_status']
         print(f"FLOW109 {context['requested_step']}: component {result['component_status']}; "
               f"Default row {row_status}; flow acceptance NOT_MEASURED")
         return {'PASS': 0, 'FAIL': 1, 'NOT_MEASURED': 2}[row_status]

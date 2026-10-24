@@ -1858,6 +1858,8 @@ def _detailed_route_drc_output(folder: Path, state: dict) -> Path:
 # One table for the run_chain floor and the bridge's chain requirements.
 _EARLY_STEP_INPUTS: dict[str, tuple[str, ...]] = {
     'Verilator.Lint': (), 'Yosys.JsonHeader': (), 'Yosys.Synthesis': ('json_h',),
+    'Checker.LintErrors': (), 'Checker.LintTimingConstructs': (),
+    'Checker.LintWarnings': (),
     'OpenROAD.CheckSDCFiles': ('nl',), 'OpenROAD.STAPrePNR': ('nl',),
     'OpenROAD.Floorplan': ('nl',), 'Yosys.EQY': ('nl',),
     'Vibeic.PostMapRepair': ('nl',),

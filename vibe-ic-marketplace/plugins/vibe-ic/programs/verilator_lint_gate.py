@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """verilator_lint_gate.py — the step-2 judge of LibreLane Verilator.Lint.
 
+Default consumes the completed native Checker.LintErrors,
+Checker.LintTimingConstructs and Checker.LintWarnings states. The transcript
+arm below is retained for existing standalone/explicit dual callers.
+
 LibreLane's `Verilator.Lint` runs `verilator --lint-only --Wall` with LATCH as
 an error and COUNTS what it prints (`design__lint_error__count`,
 `design__lint_warning__count`). It gates nothing on warnings: on the t78 spm
@@ -106,7 +110,7 @@ def _judge_calibration(text: str) -> Optional[str]:
     return "BLOCKING" if blocking(parsed["diagnostics"], files) else None
 
 
-def judge(step_dir: Path, expected: list[Path]) -> dict:
+def judge(step_dir: Path, expected: list[Path], *, checker_dirs=None) -> dict:
     report: dict = {"gate": GATE, "tool": "LibreLane Verilator.Lint",
                     "step_dir": str(step_dir), "blocking_warning_codes":
                     sorted(BLOCKING_WARNINGS)}
@@ -136,6 +140,60 @@ def judge(step_dir: Path, expected: list[Path]) -> dict:
                       reason=f"lint file set is empty (linted {len(linted)}, "
                              f"expected {len(want)}); a lint of nothing states "
                              f"nothing about the design")
+        return report
+    if checker_dirs is not None:
+        # Default consumes LibreLane's native checks. Re-parsing warning text
+        # and calibrating a second verdict must not overrule completed native
+        # checkers. The legacy transcript arm remains for explicit dual use.
+        report.pop("blocking_warning_codes", None)
+        report["authority"] = "LibreLane native lint checkers"
+        report["tool_metrics"] = metrics
+        report["counts"] = {"errors": metrics.get("design__lint_error__count"),
+                            "warnings": metrics.get("design__lint_warning__count")}
+        report["native_checks"] = {}
+        if report["file_set"]["missing"] or report["file_set"]["extra"]:
+            report.update(verdict="FAIL", reason_class="LINT_FILE_SET_MISMATCH",
+                          reason="the linted files are not the files synthesis reads")
+            return report
+        required = {"Checker.LintErrors": "design__lint_error__count",
+                    "Checker.LintTimingConstructs": "design__lint_timing_construct__count",
+                    "Checker.LintWarnings": "design__lint_warning__count"}
+        for sid, metric in required.items():
+            folder = Path(checker_dirs[sid]) if sid in checker_dirs else None
+            try:
+                cfg = json.loads((folder / "config.json").read_text())
+                checked = json.loads((folder / "state_out.json").read_text())["metrics"]
+                value = checked[metric]
+                if (cfg.get("meta", {}).get("step") != sid
+                        or type(value) is not int or value < 0
+                        or value != metrics.get(metric)):
+                    raise ValueError("native checker identity or metrics disagree")
+                flag = {"Checker.LintErrors": "ERROR_ON_LINTER_ERRORS",
+                        "Checker.LintTimingConstructs": "ERROR_ON_LINTER_TIMING_CONSTRUCTS",
+                        "Checker.LintWarnings": "ERROR_ON_LINTER_WARNINGS"}[sid]
+                enabled = cfg.get(flag, sid != "Checker.LintWarnings")
+                if sid != "Checker.LintWarnings" and enabled is not True:
+                    raise ValueError("required native checker disabled")
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                report.update(verdict="NOT_MEASURED", reason_class="NATIVE_CHECK_ABSENT_OR_MISMATCH",
+                              reason=f"{sid}: {exc}")
+                return report
+            report["native_checks"][sid] = {
+                "state_out": str(folder / "state_out.json"), "value": value,
+                "sha256": _sha(folder / "state_out.json"), "blocking": enabled}
+        values = [metrics.get(name) for name in (
+            "design__lint_error__count", "design__lint_timing_construct__count",
+            "design__inferred_latch__count", "design__lint_warning__count")]
+        if any(type(value) is not int or value < 0 for value in values):
+            report.update(verdict="NOT_MEASURED", reason_class="NATIVE_METRIC_ABSENT",
+                          reason="native lint counters are absent or malformed")
+        elif any(values[:3]) or (values[3] and report["native_checks"]["Checker.LintWarnings"]["blocking"]):
+            report.update(verdict="FAIL", reason_class="LINT_BLOCKING",
+                          reason="native lint error, timing construct or inferred latch")
+        else:
+            report.update(verdict="PASS", reason=(
+                f"{len(linted)} file(s); native errors/timing constructs/latches=0; "
+                f"warnings={values[3]} (native warning policy retained)"))
         return report
     try:
         parsed = parse_transcript(log.read_text(errors="replace"))
