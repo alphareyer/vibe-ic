@@ -990,13 +990,14 @@ def prepare_front_door(args, project: Path) -> int | None:
             raise Flow109Error('FLOW109_COMPONENT_RESULT_INVALID', adapter)
         write_json(destination / 'components' / (context['requested_step'] + '.json'), result)
         row_status = result['component_status']
-        if context['requested_step'] == 'D45':
-            # D45 is the first explicitly supported bounded Default-row result.
-            # Its row-local consumer re-opens and validates the native receipt;
-            # this does not change Flow109 or whole-IC acceptance.
+        if context['requested_step'] in ('D45', 'M06', 'M07', 'M08', 'M09'):
+            # These narrowly registered Default rows have row-local consumers
+            # that re-open current native receipts.  Component success alone
+            # still cannot establish a row, Flow109, or whole-IC verdict.
             completion = import_module(adapter).consume_default_row_completion(
                 project, context, result)
-            write_json(destination / 'default_rows' / 'D45.json', completion)
+            write_json(destination / 'default_rows' /
+                       (context['requested_step'] + '.json'), completion)
             row_status = completion['default_row_status']
         print(f"FLOW109 {context['requested_step']}: component {result['component_status']}; "
               f"Default row {row_status}; flow acceptance NOT_MEASURED")
