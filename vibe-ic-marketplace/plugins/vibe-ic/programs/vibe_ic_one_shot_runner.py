@@ -1054,6 +1054,19 @@ def _complete_step10_prelayout(project: Path, top: str, pdk_name: str,
                       or result.detail}
 
 
+def _finish_selected_native_owner(project: Path, native_step: str,
+                                  acceptance: dict) -> dict | None:
+    """Forward the completed owner's verdict through the shared Flow109 exit."""
+    import flow109
+
+    status = acceptance['verdict']
+    return flow109.finish_native_window(project, {'steps': [{
+        'status': status,
+        'extras': {'step_id': native_step, 'default_row_status': status,
+                   'completed': status == 'PASS'},
+    }]})
+
+
 def _complete_step11_dft(project: Path, top: str, container: str) -> dict:
     """Run the existing Step-11 producer on the current Step-9 subject."""
     import design_one_shot_runner as design
@@ -3597,6 +3610,7 @@ def _main() -> int:
         if _dft_entry:
             step11_acceptance = _complete_step11_dft(
                 project, args.top_name, args.container)
+            _finish_selected_native_owner(project, '11', step11_acceptance)
             status = step11_acceptance['verdict']
             rc = 0 if status == 'PASS' else 1 if status == 'FAIL' else 2
             out = _pl.report_path(project, 'vibe_ic_one_shot.json')
@@ -3614,6 +3628,7 @@ def _main() -> int:
             return rc
         if _post_dft_entry:
             step12_acceptance = _complete_step12_post_dft(project, args.container)
+            _finish_selected_native_owner(project, '12', step12_acceptance)
             status = step12_acceptance['verdict']
             rc = 0 if status == 'PASS' else 1 if status == 'FAIL' else 2
             out = _pl.report_path(project, 'vibe_ic_one_shot.json')

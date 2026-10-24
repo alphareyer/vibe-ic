@@ -344,6 +344,45 @@ def test_d23_rejects_wrong_l20_before_scan_or_atpg_launch(tmp_path, monkeypatch)
     assert "length=63" in result["detail"]
 
 
+@pytest.mark.parametrize("step,native", [("D23", "11"), ("D24", "12")])
+@pytest.mark.parametrize("status", ["PASS", "FAIL", "NOT_MEASURED"])
+def test_bounded_dft_owner_publishes_its_actual_selected_step_verdict(
+        tmp_path, monkeypatch, step, native, status):
+    import _delivery_route
+    import vibe_ic_one_shot_runner as runner
+
+    features = profile("Mapped soft-IP with prestitched scan")
+    assert _delivery_route.admit(tmp_path, "ip") is None
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"features": features}))
+    monkeypatch.setenv(flow109.CONTEXT_ENV, "")
+    monkeypatch.setenv(flow109.ATTEMPT_ENV, "")
+    args = SimpleNamespace(flow="109", flow109_manifest=manifest,
+                           flow109_plan_only=False, execution_mode="default",
+                           entry_step=step, exit_step=step, container="")
+    assert flow109.prepare_front_door(args, tmp_path) is None
+
+    result = runner._finish_selected_native_owner(
+        tmp_path, native, {"verdict": status})
+
+    published = json.loads((tmp_path / "reports/flow109/default_rows" /
+                            f"{step}.json").read_text())
+    assert result["default_row_status"] == published["default_row_status"] == status
+    assert published["step_id"] == step
+    assert published["completed"] is (status == "PASS")
+    assert published["whole_flow_acceptance"] == "NOT_MEASURED"
+    assert published["delivery_accepted"] is False
+
+
+def test_bounded_owner_finish_does_not_change_legacy_execution(tmp_path, monkeypatch):
+    import vibe_ic_one_shot_runner as runner
+
+    monkeypatch.delenv(flow109.CONTEXT_ENV, raising=False)
+    assert runner._finish_selected_native_owner(
+        tmp_path, "11", {"verdict": "PASS"}) is None
+    assert not (tmp_path / "reports/flow109/default_rows").exists()
+
+
 def test_owner_route_uses_native_span_without_generic_qualification_registry(
         tmp_path, monkeypatch):
     # prepare_front_door intentionally installs the active request; restore
