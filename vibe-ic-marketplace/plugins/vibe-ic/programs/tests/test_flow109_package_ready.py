@@ -15,8 +15,10 @@ PLUGIN = PROGRAMS.parent
 sys.path.insert(0, str(PROGRAMS))
 
 import _tapeout_declaration as TD  # noqa: E402
+import _submission_template as ST  # noqa: E402
 import flow109  # noqa: E402
 import flow109_package_ready as D75  # noqa: E402
+import submission_template_ingest as ING  # noqa: E402
 
 
 def test_d75_adapter_loads_by_path_with_existing_consumers():
@@ -79,7 +81,9 @@ def _project(root: Path) -> Path:
         "absent_reason": "Owner selected independent bare-die tapeout.",
     }
     _write(project / "input/submission_template/operator_answers.json", own)
-    _write(project / TD.SELF_TAPEOUT_REL, "owner-selected independent tapeout\n")
+    _write(project / ST.DESIGN_ANSWERS_REL, own)
+    _write(project / TD.SELF_TAPEOUT_REL,
+           TD.SELF_TAPEOUT_MARKER + "\nowner-selected independent tapeout\n")
     _write(project / "input/docs/L3_interfaces.md", """\
 ## Physical Pad Placement
 
@@ -132,6 +136,7 @@ END LIBRARY
         "technical_target": {"dimensions_um": [1000, 1000],
                              "origin_um": [0, 0], "packaging": "bare_die"},
         "bond_pad_edge_distance": {
+            "max_distance_um": 900,
             "opening_layer": {"name": "OPEN",
                               "layer_properties": "input/pdk/layers.lyp"},
             "io_lefs": ["input/pdk/io.lef"],
@@ -202,6 +207,91 @@ def test_bare_die_positive_runs_actual_consumers_but_not_whole_flow(tmp_path):
     assert result["delivery_accepted"] is False
     assert result["inputs"] and all(item["sha256"] for item in result["inputs"])
     D75.validate(project, result)
+
+
+def test_validated_self_tapeout_does_not_require_a_provider(tmp_path):
+    project = _project(tmp_path)
+    (project / D75.PROVIDER_TARGET).unlink()
+    result = D75.execute(project, _context(project))
+    assert result["component_status"] == "PASS", result
+    provider = _by_name(result, "provider_bond_pad_edge")
+    assert provider["status"] == "NOT_APPLICABLE", result
+    assert provider["detail"]["route"] == TD.ROUTE_SELF_TAPEOUT
+    assert provider["detail"]["owner_self_tapeout"] is True
+    assert result["provider_identity"] is None
+    for name in ("pad_side_constraint_check", "pad_bterm_coincidence_check"):
+        assert _by_name(result, name)["status"] == "PASS", result
+    D75.validate(project, result)
+    owner = project / ST.DESIGN_ANSWERS_REL
+    owner.write_text(owner.read_text() + "\n")
+    with pytest.raises(D75.D75Refusal, match="D75_INPUT_STALE"):
+        D75.validate(project, result)
+
+
+def _retained_catalogue(project: Path, tmp_path: Path) -> Path:
+    catalogue = project / ST.STAGED_TEMPLATE_REL
+    catalogue.mkdir(parents=True, exist_ok=True)
+    source = catalogue / "neutral.json"
+    source.write_text(json.dumps({
+        "DIE_AREA": [0, 0, 1000, 1000], "SEAL_RING_WIDTH": 10}))
+    reason = json.loads((project / ST.DESIGN_ANSWERS_REL).read_text())[
+        "operator_template"]["absent_reason"]
+    assert ING.main([str(project), "--template", str(catalogue),
+                     "--no-template-reason", reason]) == 0
+    return source
+
+
+def test_self_tapeout_catalogue_hash_and_selection_still_require_provider(tmp_path):
+    project = _project(tmp_path / "stale")
+    source = _retained_catalogue(project, tmp_path)
+    (project / D75.PROVIDER_TARGET).unlink()
+    source.write_text("{}")
+    stale = D75.execute(project, _context(project))
+    assert stale["component_status"] == "FAIL", stale
+    assert stale["reason"] == "D75_DECLARATION_CONSUMER_FAILED"
+    assert [r["rule"] for r in _by_name(
+        stale, "tapeout_declaration_check")["detail"]["refusals"]] == [
+            "ROUTER_CONTRADICTION"]
+
+    project = _project(tmp_path / "missing")
+    source = _retained_catalogue(project, tmp_path)
+    (project / D75.PROVIDER_TARGET).unlink()
+    source.unlink()
+    missing = D75.execute(project, _context(project))
+    assert missing["component_status"] == "FAIL", missing
+    assert missing["reason"] == "D75_DECLARATION_CONSUMER_FAILED"
+
+    project = _project(tmp_path / "selected")
+    _retained_catalogue(project, tmp_path)
+    (project / D75.PROVIDER_TARGET).unlink()
+    own = json.loads((project / ST.DESIGN_ANSWERS_REL).read_text())
+    own["operator_template"]["slot"] = "neutral"
+    _write(project / ST.DESIGN_ANSWERS_REL, own)
+    selected = D75.execute(project, _context(project))
+    assert selected["component_status"] == "FAIL", selected
+    assert selected["reason"] == "D75_DECLARATION_CONSUMER_FAILED"
+
+
+def test_missing_owner_scope_does_not_make_missing_provider_not_applicable(tmp_path):
+    project = _project(tmp_path)
+    (project / D75.PROVIDER_TARGET).unlink()
+    (project / ST.DESIGN_ANSWERS_REL).unlink()
+    result = D75.execute(project, _context(project))
+    assert result["component_status"] == "NOT_MEASURED", result
+    assert result["reason"] == "D75_REQUIRED_INPUT_ABSENT_OR_INVALID"
+
+
+def test_provider_manual_review_is_not_upgraded_to_pass(tmp_path):
+    project = _project(tmp_path)
+    profile = project / D75.PROVIDER_TARGET
+    doc = json.loads(profile.read_text())
+    doc["bond_pad_edge_distance"].pop("max_distance_um")
+    _write(profile, doc)
+    result = D75.execute(project, _context(project))
+    assert result["component_status"] == "NOT_MEASURED", result
+    provider = _by_name(result, "provider_bond_pad_edge")
+    assert provider["detail"]["verdict"] == "MANUAL_REVIEW"
+    assert provider["status"] == "NOT_MEASURED"
 
 
 def test_wrong_domain_pad_pin_geometry_fails(tmp_path):

@@ -27,6 +27,7 @@ import pad_bterm_coincidence_check
 import pad_side_constraint_check
 import perc_signoff_check
 import provider_bond_pad_edge
+import submission_template_check
 import tapeout_declaration_check
 import tapeout_readiness_check
 from _staged_pdk_tech_lef import (TechLefResolutionError,
@@ -127,6 +128,47 @@ def _provider_identity(project: Path, edge: Mapping) -> dict:
             or Path(str(release.get("path", ""))).resolve() != target_path.resolve()):
         raise D75Refusal("D75_PROVIDER_IDENTITY_MISMATCH", str(PROVIDER_TARGET))
     return {"provider": provider, "source": source}
+
+
+def _provider_scope(project: Path, doc: Mapping,
+                    slots: list[Path]) -> tuple[bool, dict]:
+    """Whether an operator/provider bond-edge rule is owed by this route.
+
+    Absence of ``provider_target.json`` never decides this.  Only the existing
+    owner-attested SELF_TAPEOUT contract can make a provider-specific rule not
+    applicable, and a retained catalogue must first pass its existing source
+    and hash validation.  Any missing, stale, selected, or contradictory fact
+    degrades toward requiring provider authority.
+    """
+    route, route_error = declaration.declared_route_on_disk(
+        project, bool(slots))
+    owner_self = declaration.owner_self_tapeout(project, dict(doc))
+    catalogue_ok, catalogue_reason = (True, "no retained operator catalogue")
+    if slots:
+        catalogue_ok, catalogue_reason = \
+            submission_template_check.catalogue_selects_self_tapeout(project)
+    marker = project / declaration.SELF_TAPEOUT_REL
+    try:
+        marker_valid = (marker.read_text(errors="replace").splitlines()[0].strip()
+                        == declaration.SELF_TAPEOUT_MARKER)
+    except (OSError, IndexError):
+        marker_valid = False
+    provider_declared = (project / PROVIDER_TARGET).is_file()
+    not_owed = (route_error is None
+                and route == declaration.ROUTE_SELF_TAPEOUT
+                and owner_self and catalogue_ok and marker_valid
+                and not provider_declared)
+    return not not_owed, {
+        "route": route,
+        "route_error": route_error,
+        "owner_self_tapeout": owner_self,
+        "self_tapeout_marker_valid": marker_valid,
+        "catalogue_validated": catalogue_ok,
+        "catalogue_reason": catalogue_reason,
+        "provider_target_declared": provider_declared,
+        "declaration": str(DECLARATION),
+        "owner_answers": str(DESIGN_ANSWERS),
+    }
 
 
 def _context(context: Mapping) -> None:
@@ -238,7 +280,25 @@ def validate(project: Path, receipt: Mapping) -> None:
         provider_ran = any(isinstance(item, Mapping)
                            and item.get("check") == "provider_bond_pad_edge"
                            for item in receipt.get("checks", []))
-        if provider is not None or provider_ran or receipt.get("component_status") == "PASS":
+        decl = _read(project / DECLARATION)
+        slots = sorted((project / submission.SLOTS_DIR_REL).glob("*.yaml"))
+        provider_owed, provider_scope = _provider_scope(project, decl, slots)
+        provider_check = next((item for item in receipt.get("checks", [])
+                               if isinstance(item, Mapping)
+                               and item.get("check") == "provider_bond_pad_edge"), None)
+        if not provider_owed:
+            if provider is not None:
+                raise D75Refusal("D75_PROVIDER_SCOPE_MISMATCH",
+                                 "validated self-tapeout provider scope")
+            if provider_check is not None and (
+                    provider_check.get("status") != "NOT_APPLICABLE"
+                    or provider_check.get("detail") != provider_scope):
+                raise D75Refusal("D75_PROVIDER_SCOPE_MISMATCH",
+                                 "validated self-tapeout provider scope")
+            if provider_check is None and receipt.get("component_status") == "PASS":
+                raise D75Refusal("D75_PROVIDER_SCOPE_MISMATCH",
+                                 "PASS omitted self-tapeout provider disposition")
+        elif provider is not None or provider_ran or receipt.get("component_status") == "PASS":
             target_path = project / PROVIDER_TARGET
             current_provider = _provider_identity(project, {"profile": {
                 "path": str(target_path.resolve()), "sha256": _sha(target_path)}})
@@ -260,14 +320,15 @@ def execute(project: Path, context: Mapping) -> dict:
         inputs.extend(_tree_records(project, Path("input/docs")))
         inputs.extend((_record(project, decl_path), _record(project, own_path)))
         slots = sorted((project / submission.SLOTS_DIR_REL).glob("*.yaml"))
-        if slots and (project / declaration.SELF_TAPEOUT_REL).is_file():
+        if (project / declaration.SELF_TAPEOUT_REL).is_file():
             # The declaration consumer distinguishes a retained catalogue from
             # a selected shuttle route by reading these producer-owned facts.
             # Bind every one into the D75 receipt; otherwise a copied report or
             # an unrecorded owner answer could silently change that decision.
-            inputs.extend((_record(project, DESIGN_ANSWERS),
-                           _record(project, CATALOGUE_REPORT)))
-            inputs.extend(_tree_records(project, CATALOGUE_SOURCE))
+            inputs.append(_record(project, DESIGN_ANSWERS))
+            if slots:
+                inputs.append(_record(project, CATALOGUE_REPORT))
+                inputs.extend(_tree_records(project, CATALOGUE_SOURCE))
         declaration_result = tapeout_declaration_check.evaluate(project)
         if declaration_result.get("verdict") != "PASS":
             checks.append(_check("tapeout_declaration_check", "FAIL",
@@ -328,21 +389,27 @@ def execute(project: Path, context: Mapping) -> dict:
                              f"expected one finished layout, found {len(layouts)}")
         gds = layouts[0]
         inputs.append(_record(project, gds))
-        edge = provider_bond_pad_edge.measure(
-            project, gds, top=str(io.get("chip_top_module") or ""))
-        provider_identity = _provider_identity(project, edge)
-        inputs.extend(_release_records(project, edge.get("profile")))
-        inputs.extend(_release_records(project, edge.get("opening_layer", {}).get("source")))
-        inputs.extend(_release_records(project, edge.get("master_sources")))
-        if edge.get("verdict") == "FAIL":
-            edge_status = "FAIL"
-        elif edge.get("verdict") == "PASS" or (
-                edge.get("verdict") == "MANUAL_REVIEW"
-                and edge.get("required_for_readiness") is False):
-            edge_status = "PASS"
+        provider_owed, provider_scope = _provider_scope(project, doc, slots)
+        if not provider_owed:
+            checks.append(_check("provider_bond_pad_edge", "NOT_APPLICABLE",
+                                 provider_scope))
         else:
-            edge_status = "NOT_MEASURED"
-        checks.append(_check("provider_bond_pad_edge", edge_status, edge))
+            edge = provider_bond_pad_edge.measure(
+                project, gds, top=str(io.get("chip_top_module") or ""))
+            provider_identity = _provider_identity(project, edge)
+            inputs.extend(_release_records(project, edge.get("profile")))
+            inputs.extend(_release_records(
+                project, edge.get("opening_layer", {}).get("source")))
+            inputs.extend(_release_records(project, edge.get("master_sources")))
+            if edge.get("verdict") == "FAIL":
+                edge_status = "FAIL"
+            elif edge.get("verdict") == "PASS":
+                edge_status = "PASS"
+            else:
+                # MANUAL_REVIEW is a measured value without an authoritative
+                # bound. It remains NOT_MEASURED and is never upgraded to PASS.
+                edge_status = "NOT_MEASURED"
+            checks.append(_check("provider_bond_pad_edge", edge_status, edge))
 
         l20_path = project / "phase1/generated_docs/L20_DFT_SCAN_TOPOLOGY.json"
         inputs.append(_record(project, l20_path))
