@@ -20,6 +20,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import _pad_ring
+import _submission_template as submission
 import _tapeout_declaration as declaration
 import dft_atpg_coverage_check
 import pad_bterm_coincidence_check
@@ -37,6 +38,9 @@ STEP = "D75"
 NATIVE_STEP = "flow109.D75"
 DECLARATION = Path(declaration.DECLARATION_REL)
 OPERATOR_ANSWERS = Path("input/submission_template/operator_answers.json")
+DESIGN_ANSWERS = Path(submission.DESIGN_ANSWERS_REL)
+CATALOGUE_REPORT = Path(submission.REPORT_REL)
+CATALOGUE_SOURCE = Path(submission.STAGED_TEMPLATE_REL)
 IO_REPORT = Path("reports/phase3/io_pad_chip_top.json")
 PAD_DEF = Path(_pad_ring.PADRING_DEF_REL)
 PDK_DIR = Path("input/pdk")
@@ -58,6 +62,7 @@ def operation_sources() -> dict[str, str]:
     """Bind the exact adapter and existing consumers loaded for D75."""
     names = (
         "flow109_package_ready.py",
+        "submission_template_check.py",
         "tapeout_declaration_check.py",
         "pad_side_constraint_check.py",
         "pad_bterm_coincidence_check.py",
@@ -254,6 +259,15 @@ def execute(project: Path, context: Mapping) -> dict:
         inputs.extend(_tree_records(project, Path("input/submission_template")))
         inputs.extend(_tree_records(project, Path("input/docs")))
         inputs.extend((_record(project, decl_path), _record(project, own_path)))
+        slots = sorted((project / submission.SLOTS_DIR_REL).glob("*.yaml"))
+        if slots and (project / declaration.SELF_TAPEOUT_REL).is_file():
+            # The declaration consumer distinguishes a retained catalogue from
+            # a selected shuttle route by reading these producer-owned facts.
+            # Bind every one into the D75 receipt; otherwise a copied report or
+            # an unrecorded owner answer could silently change that decision.
+            inputs.extend((_record(project, DESIGN_ANSWERS),
+                           _record(project, CATALOGUE_REPORT)))
+            inputs.extend(_tree_records(project, CATALOGUE_SOURCE))
         declaration_result = tapeout_declaration_check.evaluate(project)
         if declaration_result.get("verdict") != "PASS":
             checks.append(_check("tapeout_declaration_check", "FAIL",

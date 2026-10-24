@@ -432,6 +432,52 @@ def catalogue_selects_self_tapeout(project: Path) -> Tuple[bool, str]:
     return True, "validated informational catalogue; owner DIE has no operator purchase"
 
 
+def _slot_source_on_this_tree(project: Path, slot: dict) -> Tuple[Path, bool]:
+    """Resolve an ingested source after a project checkpoint is relocated.
+
+    Older ingest records carry an absolute ``source_file`` and, independently,
+    the path relative to the template root. A checkpoint copies the canonical
+    staged template with the project, but cannot keep its old absolute root.
+    Use that producer-owned relative identity only inside the canonical staged
+    directory; the caller still verifies the recorded SHA256 before trusting
+    any content. Invalid, escaping, or missing alternatives deliberately fall
+    back to the recorded path so the existing refusal remains intact.
+    """
+    raw = slot.get("source_file")
+    recorded = Path(raw) if isinstance(raw, str) and raw else Path()
+    if recorded.is_absolute() and recorded.is_file():
+        return recorded, False
+    if raw and not recorded.is_absolute():
+        candidate = project / recorded
+        try:
+            root = project.resolve()
+            resolved = candidate.resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            pass
+        else:
+            if resolved.is_file():
+                return resolved, False
+
+    rel = slot.get("source_relpath")
+    if not isinstance(rel, str) or not rel.strip():
+        return recorded, False
+    relpath = Path(rel)
+    if relpath.is_absolute() or any(part == ".." for part in relpath.parts):
+        return recorded, False
+    try:
+        project_root = project.resolve()
+        staged = (project / ST.STAGED_TEMPLATE_REL).resolve()
+        staged.relative_to(project_root)
+        candidate = (staged / relpath).resolve()
+        candidate.relative_to(staged)
+    except (OSError, ValueError):
+        return recorded, False
+    if not candidate.is_file():
+        return recorded, False
+    return candidate, True
+
+
 def _geometry_key(slot: dict) -> tuple:
     die, core = slot.get("die_area") or {}, slot.get("core_area") or {}
     ring = slot.get("ring") or {}
@@ -456,6 +502,7 @@ def evaluate(project: Path, doc: Optional[dict],
     examined: Dict[str, Any] = {
         "slots_in_record": 0, "slot_files_on_disk": 0,
         "fixtures_in_record": 0, "template_files_rehashed": 0,
+        "template_files_relocated": 0,
         "path_router_on_disk": False,
     }
     na_reason: Optional[str] = None
@@ -661,7 +708,11 @@ def evaluate(project: Path, doc: Optional[dict],
 
     # ---- a template was read ---------------------------------------------- #
     root = lookup.get("template_root")
-    if not root or not Path(root).is_dir():
+    relocated_sources = [_slot_source_on_this_tree(project, s)
+                         for s in slots]
+    relocated_root_ok = bool(slots) and all(
+        path.is_file() and relocated for path, relocated in relocated_sources)
+    if not root or (not Path(root).is_dir() and not relocated_root_ok):
         refusals.append(_refusal(
             "TEMPLATE_NOT_ON_DISK",
             f"the record claims a template ingested from {root!r}, and no "
@@ -701,9 +752,9 @@ def evaluate(project: Path, doc: Optional[dict],
         na_reason = not_owed_why
 
     # every slot: on disk, unchanged, and self-consistent
-    for s in slots:
+    for s, (resolved_source, relocated) in zip(slots, relocated_sources):
         src = s.get("source_file")
-        p = Path(src) if src else None
+        p = resolved_source if src else None
         if p is None or not p.is_file():
             refusals.append(_refusal(
                 "TEMPLATE_NOT_ON_DISK",
@@ -711,6 +762,8 @@ def evaluate(project: Path, doc: Optional[dict],
                 f"is there now.",
                 slot=s.get("slot"), source_file=src))
         else:
+            if relocated:
+                examined["template_files_relocated"] += 1
             recorded = s.get("source_sha256")
             now = ST.sha256_file(p)
             examined["template_files_rehashed"] += 1
