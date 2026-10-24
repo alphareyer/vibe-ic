@@ -4830,8 +4830,28 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "ngspice shared-library + Icarus/cocotb co-simulation",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "mixed_signal_m3_run",
+            "mixed_signal_cosim_check"
+          ],
+          "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
+          "dispatch": {
+            "adapter": "flow109_mixed_m02",
+            "native_step_id": "flow109.M02",
+            "engine_families": [
+              "python3"
+            ],
+            "engine_executables": {
+              "python3": "python3"
+            },
+            "engine_steps": {
+              "python3": [
+                "mixed_signal_m3_run",
+                "mixed_signal_cosim_check"
+              ]
+            },
+            "operation_scope": "current_pre_layout_mixed_partition"
+          }
         }
       ],
       "complementary_tools": [],
@@ -12969,9 +12989,27 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "UNSUPPORTED in open-source Default: no qualified substrate extraction/model; ngspice consumer only",
-          "native_steps": [],
+          "native_steps": [
+            "mixed_signal_interface_si_check"
+          ],
           "capability_status": "UNSUPPORTED_OPEN_DEFAULT",
-          "execution_status": "UNIMPLEMENTED"
+          "execution_status": "EXISTING_CONSUMER_DISPATCH_UNSUPPORTED_PRODUCER",
+          "dispatch": {
+            "adapter": "flow109_mixed_m05",
+            "native_step_id": "flow109.M05",
+            "engine_families": [
+              "python3"
+            ],
+            "engine_executables": {
+              "python3": "python3"
+            },
+            "engine_steps": {
+              "python3": [
+                "mixed_signal_interface_si_check"
+              ]
+            },
+            "operation_scope": "read_only_substrate_supply_capability_refusal"
+          }
         }
       ],
       "complementary_tools": [],
