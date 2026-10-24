@@ -2929,6 +2929,34 @@ def test_recovered_promotion_crosses_full_existing_step32_consumer_chain(
     assert reread['adopted'] == '32-cand09'
     assert runner._promotion_unmeasured(
         runner._step32_own_measurement(reread)) == ''
+    second_result = runner._postroute_repair_librelane_result(
+        project, project / 'phase3/stage3/pnr', reread, 0.0,
+        handed=True, top='neutral')
+    assert second_result.status == 'PASS'
+    second_producer = runner._step32_producer_receipt(project, out)
+    assert second_producer is not None
+    second_decision = runner._repair_dec.decide(
+        None, True, project=project, producer_receipt=second_producer,
+        timing_basis='current Step-32 STAPostPNR per-corner census',
+        decision_scope='step32_native')
+    second_written, second_notes = [], []
+    assert runner._publish_step32_decision(
+        project, second_decision, source, source, out, second_producer,
+        second_written, second_notes) == 0
+    assert not second_notes
+    second_findings, second_stats = audit.audit(project)
+    assert second_stats['re_verified'] is True
+    assert not [row for row in second_findings if row.severity == 'ERROR']
+    archived_bytes = archived.read_bytes()
+    assert contract.digest(archived) == displaced
+
+    archived.write_bytes(archived_bytes + b'\n')
+    with pytest.raises(contract.Refusal,
+                       match='FINISHED_RECOVERY_HISTORY_CHANGED'):
+        runner._postroute_repair_librelane_result(
+            project, project / 'phase3/stage3/pnr', reread, 0.0,
+            handed=True, top='neutral')
+    archived.write_bytes(archived_bytes)
     current_def.write_text(current_def.read_text() + '# damaged after handoff\n')
     with pytest.raises(contract.Refusal, match='input route changed'):
         prr.retained_finished_candidate_readback(project)

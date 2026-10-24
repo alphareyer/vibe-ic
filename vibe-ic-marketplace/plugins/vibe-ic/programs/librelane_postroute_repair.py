@@ -2298,21 +2298,36 @@ def publish_retained_finished_readback(project: Path,
         "repair_log.failed.json": project / DECLARED_REPAIR_REL / "repair_log.json",
     }
     archived = {}
-    for name, source in sources.items():
-        if not source.is_file():
-            continue
-        target = history / name
-        if target.exists():
-            if _ll.digest(target) != _ll.digest(source):
-                raise _ll.Refusal("LL_PRR_FINISHED_RECOVERY_HISTORY_CHANGED", name)
-        else:
-            shutil.copy2(source, target)
-        archived[name] = _ll.digest(target)
+    if current_sha == displaced:
+        for name, source in sources.items():
+            if not source.is_file():
+                continue
+            target = history / name
+            if target.exists():
+                if _ll.digest(target) != _ll.digest(source):
+                    raise _ll.Refusal("LL_PRR_FINISHED_RECOVERY_HISTORY_CHANGED", name)
+            else:
+                shutil.copy2(source, target)
+            archived[name] = _ll.digest(target)
+    else:
+        archived_claim = ((already_marker.get("displaced_history") or {})
+                          .get("sha256"))
+        if not isinstance(archived_claim, dict) or not archived_claim:
+            raise _ll.Refusal("LL_PRR_FINISHED_RECOVERY_HISTORY_CHANGED",
+                              "published report has no displaced history")
+        for name, expected in archived_claim.items():
+            target = history / name
+            if (not isinstance(name, str) or Path(name).name != name
+                    or not isinstance(expected, str)
+                    or not target.is_file() or _ll.digest(target) != expected):
+                raise _ll.Refusal("LL_PRR_FINISHED_RECOVERY_HISTORY_CHANGED",
+                                  str(name))
+            archived[name] = expected
     report["retained_promotion_readback"]["displaced_history"] = {
         "folder": str(history), "sha256": archived}
     if current_sha == displaced:
         write_json(current, report)
-        _publish_declared_repair(project, report, current)
+    _publish_declared_repair(project, report, current)
     return report["retained_promotion_readback"]["displaced_history"]
 
 
