@@ -31,6 +31,11 @@ SECURITY_IDS = (
     "opentitan_aes.sparse_fsm_alert",
     "opentitan_aes.lifecycle_escalation",
 )
+SECURITY_TASKS = {
+    SECURITY_IDS[0]: "shadowed_controls",
+    SECURITY_IDS[1]: "sparse_fsm_alert",
+    SECURITY_IDS[2]: "lifecycle_escalation",
+}
 
 
 class Refusal(RuntimeError):
@@ -174,16 +179,34 @@ def _d16(project: Path, manifest: dict, inputs: dict[str, str]) -> dict:
             "producer": "full_stack_functional_tb"}
 
 
-def _formal_result(project: Path, ref: object, obligation: str,
+def _formal_result(project: Path, binding: object, obligation: str,
                    inputs: dict[str, str]) -> dict:
-    _path, result = _current_ref(project, ref, obligation, inputs)
+    if not isinstance(binding, dict) or set(binding) != {"result", "task"}:
+        raise Refusal("D17_FORMAL_BINDING_INVALID", obligation)
+    task = binding.get("task")
+    if task != SECURITY_TASKS[obligation]:
+        raise Refusal("D17_FORMAL_REQUIREMENT_MISMATCH", obligation)
+    result_path, result = _current_ref(project, binding.get("result"), obligation, inputs)
     if result.get("program") != "formal_property_run":
         raise Refusal("D17_FORMAL_PRODUCER_MISMATCH", obligation)
-    if result.get("verdict") == "FAIL" or int(result.get("failed", 0) or 0) > 0:
-        raise Refusal("D17_SECURITY_COUNTEREXAMPLE", obligation, status="FAIL")
-    if result.get("verdict") != "PASS" or result.get("all_proved") is not True:
+    properties = result.get("properties")
+    failed_tasks = ([str(row.get("task")) for row in properties
+                     if isinstance(row, dict) and row.get("status") == "FAIL"]
+                    if isinstance(properties, list) else [])
+    if (result.get("verdict") == "FAIL" or int(result.get("failed", 0) or 0) > 0
+            or failed_tasks):
+        raise Refusal("D17_SECURITY_COUNTEREXAMPLE",
+                      ",".join(failed_tasks) or obligation, status="FAIL")
+    selected = ([row for row in properties
+                 if isinstance(row, dict) and row.get("task") == task]
+                if isinstance(properties, list) else [])
+    if len(selected) != 1:
+        raise Refusal("D17_FORMAL_REQUIREMENT_MISMATCH", obligation)
+    selected = selected[0]
+    if (result.get("verdict") != "PASS" or result.get("all_proved") is not True
+            or selected.get("status") != "PASS"):
         raise Refusal("D17_SECURITY_PROOF_INCOMPLETE", obligation)
-    if not result.get("unbounded_proved"):
+    if not result.get("unbounded_proved") or selected.get("bound") != "unbounded":
         raise Refusal("D17_SECURITY_PROOF_BOUNDED_ONLY", obligation)
     for key in ("sby", "evidence"):
         rel = result.get(key)
@@ -193,11 +216,19 @@ def _formal_result(project: Path, ref: object, obligation: str,
         if path.is_symlink() or not path.is_file():
             raise Refusal("D17_FORMAL_EVIDENCE_STALE", f"{obligation}.{key}")
         inputs[str(path.resolve())] = _sha(path)
-    tags = result.get("flow109_requirement_ids")
-    if tags != [obligation]:
-        raise Refusal("D17_FORMAL_REQUIREMENT_MISMATCH", obligation)
+    proof_files = (result.get("proof_inputs") or {}).get("files")
+    if not isinstance(proof_files, dict) or not proof_files:
+        raise Refusal("D17_FORMAL_INPUTS_UNBOUND", obligation)
+    for name, digest in proof_files.items():
+        if (not isinstance(name, str) or Path(name).is_absolute() or Path(name).name != name
+                or not re.fullmatch(r"[0-9a-f]{64}", str(digest))):
+            raise Refusal("D17_FORMAL_INPUTS_UNBOUND", f"{obligation}.{name}")
+        path = result_path.parent / name
+        if path.is_symlink() or not path.is_file() or _sha(path) != digest:
+            raise Refusal("D17_FORMAL_INPUTS_STALE", f"{obligation}.{name}")
+        inputs[str(path.resolve())] = digest
     return {"id": obligation, "proof_strength": result.get("proof_strength"),
-            "properties": result.get("properties")}
+            "task": task, "property": selected}
 
 
 def _d17(project: Path, manifest: dict, inputs: dict[str, str]) -> dict:

@@ -65,13 +65,16 @@ def _formal(project: Path, obligation: str) -> dict:
     safe = obligation.replace(".", "_")
     sby = _put(project, f"formal/{safe}.sby", "[options]\nmode prove\n")
     log = _put(project, f"formal/{safe}.log", "SBY DONE (PASS, rc=0)\n")
-    return _put(project, f"formal/{safe}.json", {
+    proof = _put(project, f"formal/{safe}.sv", "module proof; endmodule\n")
+    task = S.SECURITY_TASKS[obligation]
+    result = _put(project, f"formal/{safe}.json", {
         "program": "formal_property_run", "verdict": "PASS", "all_proved": True,
         "unbounded_proved": True, "proof_strength": "unbounded", "failed": 0,
-        "properties": [{"task": "safety", "mode": "prove", "status": "PASS",
+        "properties": [{"task": task, "mode": "prove", "status": "PASS",
                          "bound": "unbounded"}],
         "sby": sby["path"], "evidence": log["path"],
-        "flow109_requirement_ids": [obligation]})
+        "proof_inputs": {"files": {Path(proof["path"]).name: proof["sha256"]}}})
+    return {"result": result, "task": task}
 
 
 def _d17_case(project: Path):
@@ -111,12 +114,8 @@ def test_d17_requires_all_three_current_unbounded_formal_results(tmp_path):
     result = S.execute(tmp_path, _context("D17"))
     assert result["component_status"] == "PASS", result
     assert result["metrics"]["security_counterexample_failures"] == 0
-    first = tmp_path / "formal/opentitan_aes_shadowed_controls.json"
-    body = json.loads(first.read_text())
-    body["flow109_requirement_ids"] = [S.SECURITY_IDS[1]]
-    first.write_text(json.dumps(body))
     manifest = json.loads((tmp_path / S.MANIFESTS["D17"]).read_text())
-    manifest["formal_results"][S.SECURITY_IDS[0]]["sha256"] = hashlib.sha256(first.read_bytes()).hexdigest()
+    manifest["formal_results"][S.SECURITY_IDS[0]]["task"] = S.SECURITY_TASKS[S.SECURITY_IDS[1]]
     (tmp_path / S.MANIFESTS["D17"]).write_text(json.dumps(manifest))
     refused = S.execute(tmp_path, _context("D17"))
     assert refused["component_status"] == "NOT_MEASURED"
@@ -128,13 +127,27 @@ def test_d17_counterexample_is_fail_not_not_measured(tmp_path):
     path = tmp_path / "formal/opentitan_aes_sparse_fsm_alert.json"
     body = json.loads(path.read_text())
     body.update(verdict="FAIL", all_proved=False, failed=1)
+    body["properties"][0].update(status="FAIL", bound="cex")
     path.write_text(json.dumps(body))
     manifest = json.loads((tmp_path / S.MANIFESTS["D17"]).read_text())
-    manifest["formal_results"][S.SECURITY_IDS[1]]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest["formal_results"][S.SECURITY_IDS[1]]["result"]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     (tmp_path / S.MANIFESTS["D17"]).write_text(json.dumps(manifest))
     result = S.execute(tmp_path, _context("D17"))
     assert result["component_status"] == "FAIL"
     assert result["reason"] == "D17_SECURITY_COUNTEREXAMPLE"
+
+
+def test_d17_stale_proof_input_refuses_and_restored_bytes_pass(tmp_path):
+    _d17_case(tmp_path)
+    proof = tmp_path / "formal/opentitan_aes_shadowed_controls.sv"
+    original = proof.read_bytes()
+    proof.write_text("module changed; endmodule\n")
+    refused = S.execute(tmp_path, _context("D17"))
+    assert refused["component_status"] == "NOT_MEASURED"
+    assert refused["reason"] == "D17_FORMAL_INPUTS_STALE"
+    proof.write_bytes(original)
+    restored = S.execute(tmp_path, _context("D17"))
+    assert restored["component_status"] == "PASS", restored
 
 
 def _d73_case(project: Path):
