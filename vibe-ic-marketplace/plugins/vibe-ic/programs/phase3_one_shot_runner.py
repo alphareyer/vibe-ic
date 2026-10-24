@@ -73291,9 +73291,10 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     are discovered from the DEF SPECIALNETS."""
     pnr_out = _pl.pnr_dir(project)
     current_paths = None
+    current_vsrc = None
     if layout_basis is not None:
         required = {"odb", "def", "netlist", "sdc", "spef", "tech_lef",
-                    "liberties"}
+                    "liberties", "supply_sources"}
         if not em_only or set(layout_basis) != required or not layout_basis["liberties"]:
             notes.append("EM skipped: current layout basis is malformed")
             return False, False
@@ -73316,6 +73317,34 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
                 notes.append("EM skipped: current liberty basis changed")
                 return False, False
             current_paths["liberties"].append(path)
+        supply_sources = layout_basis["supply_sources"]
+        if (not isinstance(supply_sources, dict)
+                or set(supply_sources) != {"model", "vsrc"}
+                or not isinstance(supply_sources["model"], str)
+                or "through VSRC_LOC_FILES" not in supply_sources["model"]
+                or not isinstance(supply_sources["vsrc"], dict)
+                or not supply_sources["vsrc"]):
+            notes.append("EM skipped: current VSRC basis is malformed")
+            return False, False
+        current_vsrc = {}
+        for net, row in supply_sources["vsrc"].items():
+            if (not isinstance(net, str) or not net or not isinstance(row, dict)
+                    or set(row) != {"path", "voltage_v", "sha256"}
+                    or not isinstance(row["path"], str) or not row["path"]
+                    or not isinstance(row["voltage_v"], (int, float))
+                    or isinstance(row["voltage_v"], bool)
+                    or not math.isfinite(row["voltage_v"])
+                    or row["voltage_v"] < 0
+                    or not isinstance(row["sha256"], str)
+                    or re.fullmatch(r"[a-f0-9]{64}", row["sha256"]) is None):
+                notes.append("EM skipped: current VSRC basis is malformed")
+                return False, False
+            path = Path(row["path"])
+            if (path.is_symlink() or not path.is_file()
+                    or _sha256_file(path) != row["sha256"]):
+                notes.append(f"EM skipped: current VSRC basis changed: {net}")
+                return False, False
+            current_vsrc[net] = dict(row)
         def_file = current_paths["def"]
     else:
         def_file = pnr_out / f"{top}.def"
@@ -73352,6 +73381,12 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     out_dir.mkdir(parents=True, exist_ok=True)
     out_dir_c = _to_container_path(str(out_dir), container)
     psm_nets = list(dict.fromkeys([*power_nets, *ground_nets]))
+    vsrc_files = {}
+    if current_vsrc is not None:
+        if set(current_vsrc) != set(psm_nets):
+            notes.append("EM skipped: current VSRC rails differ from the selected layout")
+            return False, False
+        vsrc_files = {net: Path(row["path"]) for net, row in current_vsrc.items()}
     from librelane_contract import Refusal as _LLRefusal, selected_mode
     _em_mode = selected_mode(project, "25")
     if _em_mode == "librelane":
@@ -73412,6 +73447,8 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     for net in psm_nets:
         _net_csv = f"{out_dir_c}/em_segments_{net}.csv"
         _density_csv = f"{out_dir_c}/em_openroad_density_{net}.csv"
+        _vsrc_tcl = (f" -vsrc {{{_to_container_path(str(vsrc_files[net]), container)}}}"
+                     if net in vsrc_files else "")
         _density_tcl = (
             f'if {{[catch {{check_current_density -net {net} '
             f'-em_limits_file {out_dir_c}/{_em_limits.name} '
@@ -73424,7 +73461,7 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
             f'}}\n' if _audit_tool and _limit_rows else '')
         psm_blocks.append(
             f'puts "=== PSM_NET {net} ==="\n'
-            f'if {{[catch {{analyze_power_grid -net {net} -enable_em '
+            f'if {{[catch {{analyze_power_grid -net {net}{_vsrc_tcl} -enable_em '
             f'-em_outfile {_net_csv}}} _psm_err]}} {{\n'
             f'  puts "PSM_NONFATAL {net}: $_psm_err"\n'
             f'}} else {{\n{_density_tcl}}}\n')
@@ -73482,6 +73519,8 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
                     "cell_lef": str(pdk.cell_lef), "liberty0": _basis["liberty"]}
     if current_paths is not None:
         _input_paths["netlist"] = str(current_paths["netlist"])
+        for net, path in vsrc_files.items():
+            _input_paths[f"vsrc_{net}"] = str(path)
     if _per_cut_authority is not None:
         _input_paths["per_cut_authority"] = str(_per_cut_snapshot)
     for role in ("sdc", "spef"):
@@ -73636,6 +73675,16 @@ catch {{set_wire_rc -clock -layer {mp}5}}
         _counts["psm_segments"] = _psm_segment_counts.get(_net, 0)
         _density_rows[_net] = _counts
     _psm_model = _psm_sm.describe(log)
+    if current_vsrc is not None:
+        # `_psm_source_model` probes only PSM's no-`-vsrc` fallback. This
+        # session supplied the validated D57 files explicitly, so retain the
+        # probe as diagnostic detail but name the effective physical boundary
+        # from the bound invocation instead of mislabelling it as BTerms.
+        _psm_model = dict(_psm_model)
+        _psm_model["default_source_probe"] = _psm_model["model"]
+        _psm_model["model"] = layout_basis["supply_sources"]["model"]
+        _psm_model["vsrc_sha256"] = {
+            net: row["sha256"] for net, row in current_vsrc.items()}
     _native_density_record = {
         "schema": "em_native_density/1",
         "tool": "OpenROAD.check_current_density",
@@ -73659,6 +73708,14 @@ catch {{set_wire_rc -clock -layer {mp}5}}
         "inputs": _native_inputs, "power_basis": _basis_record,
         "execution": {"argv": ["bash", "-c", cmd], "native_rc": rc},
     }
+    if current_vsrc is not None:
+        _native_density_record["supply_source_basis"] = {
+            "model": layout_basis["supply_sources"]["model"],
+            "vsrc": {net: {"input_role": f"vsrc_{net}",
+                            "sha256": row["sha256"],
+                            "voltage_v": row["voltage_v"]}
+                      for net, row in current_vsrc.items()},
+        }
     if _per_cut_authority is not None:
         _native_density_record["authority"].update(
             per_cut=_per_cut_authority,

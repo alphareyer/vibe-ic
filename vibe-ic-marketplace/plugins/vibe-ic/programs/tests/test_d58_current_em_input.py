@@ -1,19 +1,42 @@
 """D58 consumes the already-validated current D57/STA physical subject."""
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
 
+import em_current_density_check as E
 import execution_backend_producers as B
 import phase3_one_shot_runner as R
 from test_default_step24_current_adoption import _external_current_primary
-from test_default_step25_em_owner import _ready, _transport_fixture
+from test_default_step25_em_owner import (DHEADER, HEADER, TECH, _ready,
+                                          _transport_fixture)
 from test_pad_connected_pdn_ring import _pdk
 
 
 def _sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _supply_basis(folder):
+    rows = {
+        "PWR": [{"pad": "power_pad", "bterm": "PWR", "layer": "met5",
+                 "x": 10.0, "y": 20.0, "size": 4.0}],
+    }
+    volts = {"PWR": 5.0}
+    result = {}
+    folder.mkdir(parents=True, exist_ok=True)
+    for net, values in rows.items():
+        content = "".join(
+            f"{r['x']:.4f},{r['y']:.4f},{r['size']:.4f},{volts[net]:g}\n"
+            for r in values)
+        path = folder / f"{net}.vsrc"
+        path.write_text(content)
+        result[net] = {"path": str(path), "voltage_v": volts[net],
+                       "sha256": _sha(path)}
+    return {"model": "declared supply pads through VSRC_LOC_FILES; source control",
+            "vsrc": result}
 
 
 def _run_step25(project, tmp_path, monkeypatch, pdk, calls):
@@ -53,6 +76,9 @@ def test_default_step25_hands_exact_current_owner_views_to_native_em(
     assert all(basis[role]["sha256"] == selected["records"][role]["sha256"]
                for role in ("odb", "def", "sdc", "spef"))
     assert basis["netlist"]["sha256"] == selected["records"]["netlist"]["sha256"]
+    assert set(basis["supply_sources"]["vsrc"]) == {"VDD", "VSS"}
+    assert basis["supply_sources"]["vsrc"]["VDD"]["voltage_v"] == 5.0
+    assert basis["supply_sources"]["vsrc"]["VSS"]["voltage_v"] == 0.0
     assert not legacy.exists()
 
 
@@ -92,6 +118,40 @@ def test_default_step25_preserves_primary_measured_fail_after_current_selection(
     assert "current Step-24 IR measurement failed" in result["detail"]
 
 
+@pytest.mark.parametrize("damage", [
+    "missing", "changed", "symlink", "wrong_role", "wrong_model",
+])
+def test_default_step25_refuses_changed_current_vsrc_without_bterm_fallback(
+        tmp_path, monkeypatch, damage):
+    project, report, _, _, _ = _external_current_primary(tmp_path, monkeypatch)
+    doc = json.loads(report.read_text())
+    paths = {net: Path(path) for net, path in
+             doc["record"]["cross_check"]["vsrc"].items()}
+    if damage == "missing":
+        paths["VDD"].unlink()
+    elif damage == "changed":
+        paths["VDD"].write_text(paths["VDD"].read_text() + "1,1,1,5\n")
+    elif damage == "symlink":
+        contents = paths["VDD"].read_text()
+        paths["VDD"].unlink()
+        foreign = tmp_path / "foreign-vdd.vsrc"
+        foreign.write_text(contents)
+        paths["VDD"].symlink_to(foreign)
+    elif damage == "wrong_role":
+        doc["record"]["cross_check"]["vsrc"] = {
+            "VDD": str(paths["VSS"]), "VSS": str(paths["VDD"])}
+        report.write_text(json.dumps(doc))
+    else:
+        doc["record"]["source_model"] = "PSM default promoted BTerms"
+        report.write_text(json.dumps(doc))
+    calls = []
+    result = _run_step25(project, tmp_path, monkeypatch,
+                         _pdk(tmp_path, ring=None), calls)
+    assert result["verdict"] == "NOT_MEASURED"
+    assert calls == []
+    assert "VSRC" in result["detail"] or "native basis changed" in result["detail"]
+
+
 def test_default_step25_without_current_owner_keeps_legacy_em_basis(
         tmp_path, monkeypatch):
     project, pdk, _, _ = _ready(tmp_path, monkeypatch)
@@ -127,6 +187,7 @@ def test_native_em_current_basis_refuses_before_tool(tmp_path, monkeypatch, dama
              for role, path in paths.items()}
     basis["tech_lef"] = {"path": str(pdk.tech_lef), "sha256": _sha(pdk.tech_lef)}
     basis["liberties"] = [{"path": str(pdk.liberty), "sha256": _sha(pdk.liberty)}]
+    basis["supply_sources"] = _supply_basis(current / "vsrc")
     target = {"changed_tech": Path(pdk.tech_lef),
               "changed_model": Path(pdk.liberty)}.get(damage, paths["def"])
     if damage == "changed":
@@ -172,6 +233,7 @@ def test_native_em_command_reads_exact_current_odb_without_legacy_def(
              for role, path in paths.items()}
     basis["tech_lef"] = {"path": str(pdk.tech_lef), "sha256": _sha(pdk.tech_lef)}
     basis["liberties"] = [{"path": str(pdk.liberty), "sha256": _sha(pdk.liberty)}]
+    basis["supply_sources"] = _supply_basis(current / "vsrc")
     notes = []
     assert R._emit_ir_em_reports(
         project, "unit", pdk, "offline",
@@ -181,8 +243,114 @@ def test_native_em_command_reads_exact_current_odb_without_legacy_def(
     command = next(call for call in calls if "check_current_density -net PWR" in call)
     assert f"read_db {paths['odb']}" in command
     assert "read_def" not in command
+    assert "analyze_power_grid -net PWR -vsrc " in command
+    assert str(current / "vsrc/PWR.vsrc") in command
     density = json.loads((project / "reports/phase3/em_openroad_density.json").read_text())
     assert density["inputs"]["layout"]["sha256"] == _sha(paths["def"])
     assert density["inputs"]["librelane_odb"]["sha256"] == _sha(paths["odb"])
     assert density["inputs"]["netlist"]["sha256"] == _sha(paths["netlist"])
+    for net in ("PWR",):
+        assert density["inputs"][f"vsrc_{net}"]["sha256"] == basis["supply_sources"]["vsrc"][net]["sha256"]
+        assert f"EM_BOUND_BEFORE vsrc_{net} " in command
+        assert f"EM_BOUND_AFTER vsrc_{net} " in command
+    assert density["source_model"] == basis["supply_sources"]["model"]
+    assert E.validate_native_density(project)["valid"] is True
     assert not (pnr / "unit.def").exists()
+
+
+def _install_two_rail_transport(project, monkeypatch):
+    rpt = project / "reports/phase3"
+    calls = []
+    monkeypatch.setattr(R, "_to_container_path", lambda path, _container: path)
+    monkeypatch.setattr(R, "_sta_extra_liberties", lambda *_args: [])
+    monkeypatch.setattr(R._ppa_presweep, "finalize", lambda *_args: None)
+    monkeypatch.setattr(R, "_discover_power_nets",
+                        lambda _path: (["VDD"], ["VSS"]))
+
+    def transport(_container, _cmd, **_kwargs):
+        tcl = (rpt / "ir_em_neutral.tcl").read_text()
+        calls.append(tcl)
+        markers = []
+        for stage, role, path in re.findall(
+                r'EM_BOUND_(BEFORE|AFTER) (\w+) \[lindex \[exec sha256sum (.*?)\] 0\]',
+                tcl):
+            markers.append(f"EM_BOUND_{stage} {role} {_sha(Path(path.strip('{}')))}")
+        geometry = ["net\tlayer\tx0_um\ty0_um\tx1_um\ty1_um\tsource"]
+        log_rows = []
+        for index, net in enumerate(("VDD", "VSS")):
+            current = 0.000001 + index * 0.0000001
+            (rpt / f"em_segments_{net}.csv").write_text(
+                HEADER + f"wireA,0,0,wireA,1,0,{current}\n")
+            density = rpt / f"em_openroad_density_{net}.csv"
+            density.write_text(DHEADER +
+                f"wireA,0,0,1,0,{current},1,{current},0.0009,{current / 0.0009:.3f},OK,0,AREAL\n")
+            markers += [f"EM_DENSITY_DONE {net}",
+                        f"EM_BOUND_OUTPUT {density.name} {_sha(density)}"]
+            geometry.append(f"{net}\twireA\t0\t-0.5\t2\t0.5\tspecial_wire")
+            log_rows += [f"=== PSM_NET {net} ===",
+                         f"[INFO PSM-0040] All shapes on net {net} are connected.",
+                         f"Net : {net}", "Total power : 2 W", "Supply voltage : 5 V",
+                         "Worstcase IR drop: 0.00001 V",
+                         f"Maximum current : {current} A"]
+        (rpt / "em_pg_geometry.tsv").write_text("\n".join(geometry) + "\n")
+        log = "\n".join([*markers, *log_rows,
+            "=== EM_POWER_BASIS ===", "Total 0 0 0 2 100%",
+            "=== EM_POWER_BASIS_END ===",
+            "PSM_SOURCE_MODEL: promoted_supply_pins_excluded=0 placed_pads=727"]) + "\n"
+        (rpt / "ir_em.log").write_text(log)
+        return 0, log, ""
+
+    monkeypatch.setattr(R, "_docker_exec", transport)
+    return calls
+
+
+def test_current_vsrc_producer_validates_from_absolute_and_project_dot(
+        tmp_path, monkeypatch):
+    project, report, _, _, _ = _external_current_primary(tmp_path, monkeypatch)
+    pdk = _pdk(tmp_path, ring=None)
+    doc = json.loads(report.read_text())
+    doc["record"]["def_sha256"] = doc["inputs"]["def"]["sha256"]
+    tech = Path(doc["native_basis"]["tech_lef"]["path"])
+    tech.write_text(TECH)
+    doc["native_basis"]["tech_lef"]["sha256"] = _sha(tech)
+    doc["artifacts"][str(tech.relative_to(project))] = _sha(tech)
+    report.write_text(json.dumps(doc))
+    (project / "phase3/librelane_switch.json").write_text(json.dumps(
+        {"steps": {"24": "dual", "25": "direct"}}))
+    calls = _install_two_rail_transport(project, monkeypatch)
+    primary = E.validate_primary_ir(project)
+    assert primary["valid"] is True, primary
+    notes = []
+    assert R._emit_ir_em_reports(
+        project, "neutral", pdk, "offline",
+        project / "reports/phase3/ir_drop_psm_cross_check.rpt",
+        project / "reports/phase3/em.rpt", notes,
+        em_only=True, layout_basis=primary["current_em_basis"]) == (True, True)
+    assert len(calls) == 1
+    absolute = E.validate_native_density(project)
+    assert absolute["valid"] is True, absolute
+    monkeypatch.chdir(project)
+    lexical_dot = E.validate_native_density(Path("."))
+    assert lexical_dot["valid"] is True, lexical_dot
+    assert lexical_dot["verdict"] == absolute["verdict"]
+
+
+def test_current_external_subject_same_bytes_wrong_owner_refuses(
+        tmp_path, monkeypatch):
+    test_current_vsrc_producer_validates_from_absolute_and_project_dot(
+        tmp_path, monkeypatch)
+    project = Path.cwd()
+    rpt = project / "reports/phase3"
+    density_path = rpt / "em_openroad_density.json"
+    density = json.loads(density_path.read_text())
+    subject_path = rpt / "em.json"
+    subject = json.loads(subject_path.read_text())
+    foreign = tmp_path / "foreign-final.def"
+    foreign.write_bytes(Path(subject["subject_def"]).read_bytes())
+    subject["subject_def"] = str(foreign)
+    subject_path.write_text(json.dumps(subject))
+    density["outputs"]["reports/phase3/em.json"] = _sha(subject_path)
+    density_path.write_text(json.dumps(density))
+    result = E.validate_native_density(Path("."))
+    assert result["valid"] is False
+    assert result["reason"] == "DEF or power basis disagrees with the measurement"

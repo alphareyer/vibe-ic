@@ -311,7 +311,22 @@ def _external_current_primary(tmp_path, monkeypatch, case="current"):
         "selected_inputs": selected["records"],
         "input_source_chain": {key: selected[key] for key in
                                ("source", "image", "pdk_root", "pdk")},
+        "source_model": "declared supply pads through VSRC_LOC_FILES; source control",
+        "sources": {"sources": {
+            "VDD": [{"pad": "vdd_pad", "bterm": "VDD", "layer": "Metal5",
+                     "x": 10.0, "y": 20.0, "size": 4.0}],
+            "VSS": [{"pad": "vss_pad", "bterm": "VSS", "layer": "Metal5",
+                     "x": 30.0, "y": 40.0, "size": 4.0}],
+        }, "bterms_outside_declared_pads": ["VDD:VDD", "VSS:VSS"],
+            "coincident": False},
     })
+    vsrc_dir = project / "phase3/librelane/24-config/vsrc"
+    vsrc = {
+        "VDD": _write(vsrc_dir, "VDD.vsrc", "10.0000,20.0000,4.0000,5\n"),
+        "VSS": _write(vsrc_dir, "VSS.vsrc", "30.0000,40.0000,4.0000,0\n"),
+    }
+    doc["record"]["cross_check"]["vsrc"] = {
+        net: str(path) for net, path in vsrc.items()}
     for role in ("odb", "sdc", "spef"):
         row = selected["records"][role]
         path = Path(row["path"])

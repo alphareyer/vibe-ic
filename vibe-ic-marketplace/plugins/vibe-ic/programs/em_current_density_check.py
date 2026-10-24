@@ -1149,6 +1149,12 @@ def _native_sha(path: Path) -> Optional[str]:
         return None
 
 
+def _lexical_absolute(project: Path, raw: str) -> Path:
+    """Normalize spelling without following links or changing file identity."""
+    path = Path(raw)
+    return path.absolute() if path.is_absolute() else (project / path).absolute()
+
+
 def _retained_project_root(project: Path, doc: Dict[str, Any],
                            recorded: Path, expected: str) -> tuple[Optional[Path], Path]:
     """Bind a recorded absolute state to its identical relocated project file.
@@ -1337,16 +1343,74 @@ def validate_primary_ir(project: Path) -> Dict[str, Any]:
             # retained receipt is never rewritten and a malformed current
             # owner never degrades to the legacy routed-DEF path.
             result["current_em_basis"] = {
-                role: {"path": str(selected_paths[role]),
+                role: {"path": str(selected_paths[role].absolute()),
                        "sha256": selected[role]["sha256"]}
                 for role in ("odb", "def", "netlist", "sdc", "spef")}
             result["current_em_basis"]["tech_lef"] = {
-                "path": str(native_paths["tech_lef"]),
+                "path": str(native_paths["tech_lef"].absolute()),
                 "sha256": doc["native_basis"]["tech_lef"]["sha256"]}
             result["current_em_basis"]["liberties"] = [
-                {"path": str(path), "sha256": row["sha256"]}
+                {"path": str(path.absolute()), "sha256": row["sha256"]}
                 for path, row in zip(native_paths["liberties"],
                                      doc["native_basis"]["liberties"])]
+            # The selected ODB is not the complete physical supply boundary.
+            # D57 may have replaced PSM's default BTerm sources with declared
+            # pad locations through VSRC_LOC_FILES. Carry that already-owned
+            # model forward instead of solving the same grid from new ideal
+            # source locations in Step 25.
+            model = record.get("source_model")
+            source_record = record.get("sources")
+            source_rows = (source_record or {}).get("sources")
+            supply = record.get("lib_voltage_v")
+            rails = [*record.get("vdd_nets", []), *record.get("gnd_nets", [])]
+            vsrc_paths = (record.get("cross_check") or {}).get("vsrc")
+            if (not isinstance(model, str)
+                    or "through VSRC_LOC_FILES" not in model
+                    or not isinstance(source_record, dict)
+                    or source_record.get("coincident") is not False
+                    or not isinstance(source_rows, dict)
+                    or not rails or len(set(rails)) != len(rails)
+                    or set(source_rows) != set(rails)
+                    or not isinstance(vsrc_paths, dict)
+                    or set(vsrc_paths) != set(rails)
+                    or not isinstance(supply, (int, float))
+                    or isinstance(supply, bool) or not math.isfinite(supply)
+                    or supply <= 0):
+                raise ValueError("LibreLane IR declared VSRC model unavailable")
+            vsrc = {}
+            vdd = set(record["vdd_nets"])
+            for net in rails:
+                rows = source_rows[net]
+                if not isinstance(net, str) or not net or not isinstance(rows, list) or not rows:
+                    raise ValueError("LibreLane IR declared VSRC population malformed")
+                normalized = []
+                for row in rows:
+                    if not isinstance(row, dict) or set(row) != {
+                            "pad", "bterm", "layer", "x", "y", "size"}:
+                        raise ValueError("LibreLane IR declared VSRC row malformed")
+                    if (not all(isinstance(row[key], str) and row[key]
+                                for key in ("pad", "bterm", "layer"))
+                            or not all(isinstance(row[key], (int, float))
+                                       and not isinstance(row[key], bool)
+                                       and math.isfinite(row[key])
+                                       for key in ("x", "y", "size"))
+                            or row["size"] <= 0):
+                        raise ValueError("LibreLane IR declared VSRC row invalid")
+                    normalized.append(dict(row))
+                voltage = float(supply) if net in vdd else 0.0
+                content = "".join(
+                    f"{row['x']:.4f},{row['y']:.4f},{row['size']:.4f},{voltage:g}\n"
+                    for row in normalized)
+                expected = hashlib.sha256(content.encode()).hexdigest()
+                source_path = _retained_native_path(
+                    project, vsrc_paths[net], expected, old_root)
+                vsrc[net] = {
+                    "path": str(source_path.absolute()), "voltage_v": voltage,
+                    "sha256": expected,
+                }
+            result["current_em_basis"]["supply_sources"] = {
+                "model": model, "vsrc": vsrc,
+            }
         return result
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         return {"valid": False, "verdict": "NOT_MEASURED",
@@ -1442,10 +1506,30 @@ def validate_native_density(project: Path, margin: float = _DEFAULT_MARGIN,
             # that earlier step's published dictionary.
             if not (doc.get("librelane_ir") or {}).get("adopted"):
                 raise ValueError("current Step-24 primary reference absent")
+            source_basis = primary["current_em_basis"]["supply_sources"]
+            recorded_sources = doc.get("supply_source_basis")
+            if (not isinstance(recorded_sources, dict)
+                    or recorded_sources.get("model") != source_basis["model"]
+                    or set(recorded_sources.get("vsrc") or {})
+                    != set(source_basis["vsrc"])):
+                raise ValueError("current D57 VSRC model was not consumed")
+            for net, expected in source_basis["vsrc"].items():
+                actual = recorded_sources["vsrc"][net]
+                role = f"vsrc_{net}"
+                if (actual != {"input_role": role,
+                               "sha256": expected["sha256"],
+                               "voltage_v": expected["voltage_v"]}
+                        or role not in doc["inputs"]
+                        or doc["inputs"][role]["sha256"] != expected["sha256"]):
+                    raise ValueError(f"current D57 VSRC input differs: {net}")
+        layout_row = doc["inputs"]["layout"]
+        subject_layout = _lexical_absolute(project, subject["subject_def"])
+        owned_layout = _lexical_absolute(
+            project, layout_row.get("project_path") or layout_row["declared_path"])
         if ((primary is None and basis != static["power_basis"])
                 or subject["power_basis"]["basis_id"] != basis["id"]
                 or subject["subject_def_sha256"] != doc["inputs"]["layout"]["sha256"]
-                or subject["subject_def"] != doc["inputs"]["layout"]["project_path"]):
+                or subject_layout != owned_layout):
             raise ValueError("DEF or power basis disagrees with the measurement")
         ll = doc.get("librelane_ir")
         if ll and ll.get("adopted"):
