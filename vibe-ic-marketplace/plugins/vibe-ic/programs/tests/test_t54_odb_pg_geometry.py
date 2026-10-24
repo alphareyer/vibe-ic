@@ -103,8 +103,9 @@ def test_psm_keeps_both_rails_and_audits_tool_density_on_the_same_def(
     assert tool["verdict"] == "MEASURED"
     assert set(tool["nets"]) == {"VPWR", "VGND"}
     assert all(row["psm_segments"] == 1 for row in tool["nets"].values())
-    assert tool["scope"] == "routing wires only"
-    assert tool["via_cut_status"].startswith("NOT_MEASURED")
+    assert tool["scope"] == "power-grid routing and cut layers on the recorded power basis"
+    assert tool["via_cut_status"] == "LEF-native literal areal authority"
+    assert all(row["no_limit"] == 0 for row in tool["nets"].values())
     assert tool["def_sha256"] == hashlib.sha256(
         (R._pl.pnr_dir(project) / "chip_top.def").read_bytes()).hexdigest()
 
