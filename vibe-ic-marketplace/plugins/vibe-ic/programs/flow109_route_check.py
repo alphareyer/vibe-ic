@@ -23,7 +23,6 @@ from pathlib import Path
 import re
 import sys
 import uuid
-from typing import Iterable
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -32,13 +31,8 @@ if str(HERE) not in sys.path:
 from _atomic_artefact import write_json
 from flow109_admission import AdmissionRefusal, require_launch_admission
 import librelane_contract as contract
-import _pad_ring as pad_ring
-import _hdl_code_text as hdl_text
-import lec_post_layout_check as structural_netlist
 
 SCHEMA = "vibeic.flow109.route-check.v1"
-EDA_IMAGE = ("ghcr.io/vibeic/vibeic-eda@sha256:"
-             "0fc30ecd1307a11bd7757d1c5710127cd88e245059f29eab8b52e38ba4d60406")
 STEPS = ["Checker.TrDRC", "Odb.ReportDisconnectedPins",
          "Checker.DisconnectedPins", "Odb.ReportWireLength",
          "Checker.WireLength"]
@@ -47,17 +41,11 @@ METRICS = {"route_short_overlap_errors": "route__drc_errors",
 CAPABILITY_LIMITS = {
     "route_short_overlap_errors": "LibreLane exposes total routed DRC; zero is conservative",
     "disconnected_required_pins": (
-        "LibreLane critical disconnected pins; an output disabled by the "
-        "current netlist's Liberty-proven constant control may be classified "
-        "inactive only when the native table, LEF, Liberty and pad-producer "
-        "record all agree"),
+        "LibreLane critical disconnected pins; the native checker owns inactive-cell "
+        "classification and D42 does not waive its result"),
     "wire_length": "PDK threshold checker; not foundry signoff DRC",
 }
 _HEX = re.compile(r"[0-9a-f]{64}")
-_PORT_DECL = re.compile(
-    r"\b(?P<direction>input|output|inout)\b(?P<body>.*?)"
-    r"(?=\b(?:input|output|inout)\b|[;)])", re.S)
-_ASSIGN_LHS = re.compile(r"\bassign\b(?P<lhs>.*?)=", re.S)
 
 
 def _sha(path: Path) -> str:
@@ -112,8 +100,7 @@ def _ref(project: Path, path: Path) -> dict[str, str]:
 
 def operation_sources() -> dict[str, str]:
     paths = [Path(__file__), HERE / "flow109.py", HERE / "flow109_admission.py",
-             HERE / "librelane_contract.py", HERE / "_pad_ring.py",
-             HERE / "_hdl_code_text.py", HERE / "lec_post_layout_check.py"]
+             HERE / "librelane_contract.py"]
     result = {str(path.relative_to(HERE.parent)): _sha(path) for path in paths}
     # Bind the installed implementations that interpret the metrics and write
     # the disconnected/wire reports, not merely the Python executable.
@@ -122,280 +109,6 @@ def operation_sources() -> dict[str, str]:
     for key, cls in (("checker", TrDRC), ("odb", ReportDisconnectedPins)):
         native = Path(inspect.getsourcefile(cls))
         result[f"native/librelane/steps/{key}.py"] = _sha(native)
-    return result
-
-
-def _netlist_instances(text: str) -> dict[str, tuple[str, dict[str, str]]]:
-    """Reuse the existing structural LEC grammar, excluding commented text."""
-    code = hdl_text.strip_hdl_comments_and_strings(text or "")
-    names = [structural_netlist._vid(match.group("inst"))
-             for match in structural_netlist._INST_RE.finditer(code)
-             if match.group("cell") not in structural_netlist._VERILOG_KEYWORDS]
-    if len(names) != len(set(names)):
-        raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                               "duplicate netlist instance")
-    return structural_netlist._parse_netlist_instances(code)
-
-
-def _config_paths(config: dict, key: str) -> list[str]:
-    raw = config.get(key)
-    values: Iterable[object]
-    if isinstance(raw, dict):
-        values = [item for group in raw.values()
-                  for item in (group if isinstance(group, list) else [group])]
-    elif isinstance(raw, list):
-        values = raw
-    else:
-        values = []
-    return sorted(set(str(item) for item in values if isinstance(item, str) and item))
-
-
-def _pdk_file(pdk_root: Path, raw: str, pdk: str) -> Path:
-    """Map a resolved config path back into the admitted PDK root."""
-    parts = Path(raw).parts
-    try:
-        suffix = parts[parts.index(pdk):]
-    except ValueError as exc:
-        raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                               f"PDK path does not name {pdk}: {raw}") from exc
-    lexical = pdk_root.joinpath(*suffix)
-    current = lexical
-    while True:
-        if current.is_symlink():
-            raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                                   f"symlinked PDK authority: {lexical}")
-        if current == pdk_root or current.parent == current:
-            break
-        current = current.parent
-    path = lexical.resolve()
-    if not path.is_relative_to(pdk_root) or not path.is_file():
-        raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                               f"missing PDK authority: {path}")
-    return path
-
-
-def _merge_pin_views(paths: list[Path], parser, label: str) -> tuple[dict, dict[str, str]]:
-    """Every corner/view must agree; a first-file-wins merge is not authority."""
-    merged = {}
-    hashes = {}
-    for path in paths:
-        hashes[str(path)] = _sha(path)
-        for master, pins in parser(path.read_text(errors="replace")).items():
-            if master in merged and merged[master] != pins:
-                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                                       f"{label} views disagree for {master}")
-            merged[master] = pins
-    return merged, hashes
-
-
-def _disconnected_endpoints(table: Path) -> list[tuple[str, str]]:
-    endpoints = []
-    for line in table.read_text(errors="replace").splitlines():
-        if not line.startswith("│"):
-            continue
-        columns = [part.strip() for part in line.split("│")[1:-1]]
-        if len(columns) != 5 or not columns[4]:
-            continue
-        endpoint = columns[4]
-        if "/" not in endpoint:
-            raise AdmissionRefusal("D42_DISCONNECTED_REPORT_INVALID", endpoint)
-        instance, pin = endpoint.rsplit("/", 1)
-        endpoints.append((instance, pin))
-    if len(endpoints) != len(set(endpoints)):
-        raise AdmissionRefusal("D42_DISCONNECTED_REPORT_INVALID",
-                               "duplicate disconnected endpoint")
-    return endpoints
-
-
-def _noninstance_driver_nets(text: str) -> set[str]:
-    """Nets that may be driven outside a modelled named cell output.
-
-    D42 deliberately does not solve Verilog.  A top input/inout or a net on
-    the left of a continuous assignment is enough to make constant-driver
-    proof ambiguous, even when a tie-cell output is also attached.
-    """
-    import _hdl_code_text as hct
-    code = hct.strip_hdl_comments_and_strings(text or "")
-    nets = set()
-    for match in _PORT_DECL.finditer(code):
-        if match.group("direction") in ("input", "inout"):
-            nets.update(re.findall(r"[A-Za-z_][\w$]*", match.group("body")))
-    for match in _ASSIGN_LHS.finditer(code):
-        nets.update(re.findall(r"[A-Za-z_][\w$]*", match.group("lhs")))
-    return nets
-
-
-def _constant_driver(net: str, instances: dict, liberty: dict) -> dict | None:
-    """Return one sound constant driver, never one constant among drivers."""
-    drivers = []
-    for instance, (master, pins) in instances.items():
-        model = liberty.get(master, {})
-        for pin, connected in pins.items():
-            if connected != net:
-                continue
-            rec = model.get(pin, {})
-            function = str(rec.get("function") or "").strip()
-            direction = str(rec.get("direction") or "").lower()
-            if direction == "input":
-                continue
-            driver = {"instance": instance, "master": master, "pin": pin}
-            if direction == "output" and function in ("0", "1"):
-                driver["level"] = int(function)
-            # output/inout and unknown roles are all possible drivers.  An
-            # unmodelled pin must make proof fail rather than disappear.
-            drivers.append(driver)
-    return drivers[0] if len(drivers) == 1 and "level" in drivers[0] else None
-
-
-def _producer_snapshot(project: Path, record_path: Path) -> dict:
-    """Bind the live producer report to its newest immutable step capture."""
-    captures = sorted((project / "steps/phase3/stage3").glob(
-        "155ic_pad_ring_chip_ic_path_only_*/outputs.json"), reverse=True)
-    if not captures:
-        raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                               "IO-pad producer capture is absent")
-    manifest_path = _inside(project, str(captures[0]), "IO-pad producer capture")
-    manifest = _read(manifest_path)
-    rows = [row for row in manifest.get("outputs", []) if isinstance(row, dict)
-            and row.get("rel") == "reports/phase3/io_pad_chip_top.json"]
-    if len(rows) != 1 or not _HEX.fullmatch(str(rows[0].get("sha256") or "")):
-        raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                               "newest IO-pad capture does not bind the producer report")
-    snapshot = _inside(project, str(manifest_path.parent / str(rows[0].get("snapshot") or "")),
-                       "IO-pad producer snapshot")
-    digest = _sha(record_path)
-    if rows[0]["sha256"] != digest or _sha(snapshot) != digest:
-        raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                               "live IO-pad report differs from newest captured producer output")
-    return {"manifest": _ref(project, manifest_path),
-            "snapshot": _ref(project, snapshot)}
-
-
-def _qualify_inactive_outputs(project: Path, table: Path, prepared: dict,
-                              native_disconnected: int,
-                              native_critical: int) -> dict:
-    """Prove that every native disconnect is a disabled receiver output.
-
-    This does not alter the native metric.  It produces a second, explicitly
-    qualified requirement count, and only when all current authorities agree.
-    Mixed or incomplete populations retain the full native critical count.
-    """
-    result = {"status": "UNQUALIFIED", "native_disconnected": native_disconnected,
-              "native_critical": native_critical, "qualified": [],
-              "required_disconnected_pins": native_critical}
-    if native_critical == 0:
-        result.update(status="NOT_NEEDED", required_disconnected_pins=0)
-        return result
-    try:
-        endpoints = _disconnected_endpoints(table)
-        if native_disconnected != native_critical or len(endpoints) != native_disconnected:
-            raise AdmissionRefusal(
-                "D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                "qualification requires the native full and critical populations to match")
-        record_path = _inside(project, "reports/phase3/io_pad_chip_top.json",
-                              "current IO-pad producer record")
-        record = _read(record_path)
-        producer_capture = _producer_snapshot(project, record_path)
-        generated = _inside(project, record.get("chip_top_verilog"),
-                            "current IO-pad producer output")
-        if record.get("program") != "io_pad_chip_top_gen" or record.get("verdict") != "WROTE":
-            raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                                   "IO-pad producer record is not WROTE")
-        pad_instances = record.get("pad_instances")
-        aux = record.get("aux_pin_signal_connections")
-        if not isinstance(pad_instances, dict) or not isinstance(aux, list):
-            raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                                   "IO-pad producer authority is incomplete")
-        aux_by_endpoint = {(item.get("instance"), item.get("pin")): item
-                           for item in aux if isinstance(item, dict)}
-        instances = _netlist_instances(prepared["views"]["nl"].read_text(errors="replace"))
-        pdk = str(prepared["config"].get("PDK") or "")
-        pdk_root = prepared["pdk_root"]
-        pad_lib_paths = [_pdk_file(pdk_root, raw, pdk)
-                         for raw in _config_paths(prepared["config"], "PAD_LIBS")]
-        cell_lib_paths = [_pdk_file(pdk_root, raw, pdk)
-                          for raw in _config_paths(prepared["config"], "CELL_LIBS")]
-        lef_paths = [_pdk_file(pdk_root, raw, pdk)
-                     for raw in _config_paths(prepared["config"], "PAD_LEFS")]
-        if not pad_lib_paths or not cell_lib_paths or not lef_paths:
-            raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                                   "PAD_LIBS, CELL_LIBS and PAD_LEFS are required")
-        pad_lib, pad_hashes = _merge_pin_views(
-            pad_lib_paths, pad_ring.parse_liberty_pad_cells, "pad Liberty")
-        cell_lib, cell_hashes = _merge_pin_views(
-            cell_lib_paths, pad_ring.parse_liberty_pad_cells, "cell Liberty")
-        lef, lef_hashes = _merge_pin_views(
-            lef_paths, pad_ring.parse_lef_pin_roles, "pad LEF")
-        driver_lib = dict(cell_lib)
-        for master, pins in pad_lib.items():
-            if master in driver_lib and driver_lib[master] != pins:
-                raise AdmissionRefusal(
-                    "D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                    f"pad/cell Liberty views disagree for {master}")
-            driver_lib[master] = pins
-        noninstance_drivers = _noninstance_driver_nets(
-            prepared["views"]["nl"].read_text(errors="replace"))
-        qualified = []
-        for instance, pin in endpoints:
-            if instance not in instances or instance not in pad_instances:
-                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                                       f"unowned disconnected endpoint {instance}/{pin}")
-            master, pins = instances[instance]
-            producer = pad_instances[instance]
-            if (producer.get("master") != master or producer.get("direction") != "output"
-                    or pin in pins):
-                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                                       f"current netlist/producer mismatch at {instance}/{pin}")
-            lib_pin = pad_lib.get(master, {}).get(pin, {})
-            if lib_pin.get("direction") != "output" or not lib_pin.get("function"):
-                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                                       f"Liberty does not define output {master}/{pin}")
-            if lef.get(master, {}).get(pin) != ("OUTPUT", "SIGNAL"):
-                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                                       f"LEF does not define OUTPUT SIGNAL {master}/{pin}")
-            literals = pad_ring._product_literals(lib_pin.get("function"))
-            if not literals:
-                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                                       f"unreadable output function for {master}/{pin}")
-            disabling = []
-            for negated, control in literals:
-                net = pins.get(control)
-                if not net or net in noninstance_drivers:
-                    continue
-                driver = _constant_driver(net, instances, driver_lib)
-                if driver is None:
-                    continue
-                literal_value = ((not bool(driver["level"])) if negated
-                                 else bool(driver["level"]))
-                authority = aux_by_endpoint.get((instance, control), {})
-                if (literal_value is False and authority.get("net") == net
-                        and authority.get("level") == driver["level"]
-                        and authority.get("tie_instance") == driver["instance"]
-                        and authority.get("tie_master") == driver["master"]
-                        and authority.get("tie_pin") == driver["pin"]):
-                    disabling.append({"control_pin": control, "net": net,
-                                      "negated": negated, "driver": driver})
-            if not disabling:
-                raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                                       f"no current constant disables {instance}/{pin}")
-            qualified.append({"endpoint": f"{instance}/{pin}", "master": master,
-                              "function": lib_pin["function"],
-                              "disabling_controls": disabling})
-        result.update(
-            status="QUALIFIED_INACTIVE_OUTPUTS", qualified=qualified,
-            required_disconnected_pins=0,
-            authority={
-                "producer_record": _ref(project, record_path),
-                "producer_capture": producer_capture,
-                "producer_output": _ref(project, generated),
-                "adopted_netlist": _ref(project, prepared["views"]["nl"]),
-                "adopted_odb": _ref(project, prepared["views"]["odb"]),
-                "pad_liberty_sha256": pad_hashes,
-                "cell_liberty_sha256": cell_hashes,
-                "pad_lef_sha256": lef_hashes,
-                "native_table": _ref(project, table)})
-    except AdmissionRefusal as exc:
-        result.update(reason=exc.code, detail=str(exc))
     return result
 
 
@@ -411,11 +124,12 @@ def _adopted_subject(project: Path) -> dict:
     handoff_path = project / "reports/phase3/librelane_postroute_repair_handoff.json"
     report, handoff = _read(report_path), _read(handoff_path)
     candidate = report.get("adopted")
-    if not isinstance(candidate, str) or not re.fullmatch(r"32-cand[0-9]+", candidate):
-        raise AdmissionRefusal("D42_D41_NOT_ACCEPTED", "adopted candidate absent")
+    if candidate is not None and (not isinstance(candidate, str) or not candidate):
+        raise AdmissionRefusal("D42_D41_NOT_ACCEPTED", "invalid adopted route identity")
     state_path = _inside(project, handoff.get("state"), "D41 handoff state")
+    report_state = _inside(project, report.get("adopted_state"), "D41 adopted state")
     if (handoff.get("state_sha256") != _sha(state_path)
-            or candidate not in state_path.parts):
+            or report_state != state_path):
         raise AdmissionRefusal("D42_D41_HANDOFF_STALE", str(state_path))
     receipt = contract.validate_step_receipt(state_path.parent, "Vibeic.PostRouteRepair")
     state = _read(state_path)
@@ -446,7 +160,9 @@ def _adopted_subject(project: Path) -> dict:
             raise AdmissionRefusal("D42_D41_HANDOFF_STALE", name)
     config_path = state_path.parent / "config.json"
     config = _read(config_path)
-    if config.get("PDK") != "gf180mcuD" or not config.get("STD_CELL_LIBRARY"):
+    pdk = config.get("PDK")
+    if (not isinstance(pdk, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", pdk)
+            or not config.get("STD_CELL_LIBRARY")):
         raise AdmissionRefusal("D42_PDK_UNSUPPORTED", str(config.get("PDK")))
     inputs = {"d41_backend": _ref(project, backend_path),
               "d41_report": _ref(project, report_path),
@@ -456,29 +172,29 @@ def _adopted_subject(project: Path) -> dict:
               "d41_config": _ref(project, config_path)}
     inputs.update({f"view_{name}": _ref(project, path) for name, path in views.items()})
     return {"candidate": candidate, "state": state, "state_path": state_path,
-            "views": views, "config": config, "inputs": inputs}
+            "views": views, "config": config, "pdk": pdk, "inputs": inputs}
 
 
 def prepare(project: Path, context: dict) -> dict:
     project = Path(project).resolve()
     if context.get("requested_step") != "D42" or context.get("native_step_id") != "flow109.D42":
         raise AdmissionRefusal("D42_CONTEXT_MISMATCH", "D42 Default component only")
-    image = os.environ.get("VIBEIC_EDA_IMAGE", EDA_IMAGE)
-    if image != EDA_IMAGE:
-        raise AdmissionRefusal("D42_IMAGE_MISMATCH", image)
+    image = os.environ.get("VIBEIC_EDA_IMAGE")
+    if not image:
+        raise AdmissionRefusal("D42_IMAGE_UNSTATED", "VIBEIC_EDA_IMAGE")
+    subject = _adopted_subject(project)
     pdk_root_value = os.environ.get("VIBEIC_LIBRELANE_PDK_ROOT")
     if not pdk_root_value:
         raise AdmissionRefusal("D42_PDK_ROOT_UNSTATED", "VIBEIC_LIBRELANE_PDK_ROOT")
     pdk_root = Path(pdk_root_value).resolve()
-    if not (pdk_root / "gf180mcuD").is_dir():
-        raise AdmissionRefusal("D42_PDK_ROOT_MISSING", str(pdk_root))
+    if not (pdk_root / subject["pdk"]).is_dir():
+        raise AdmissionRefusal("D42_PDK_ROOT_MISSING", str(pdk_root / subject["pdk"]))
     sources = operation_sources()
     uses = context.get("runtime_tool_uses")
     if uses is not None:
         if (not isinstance(uses, list) or any(
                 use.get("semantics", {}).get("operation_sources") != sources for use in uses)):
             raise AdmissionRefusal("D42_OPERATION_SOURCE_CHANGED", "runtime inventory")
-    subject = _adopted_subject(project)
     return {**subject, "image": image, "pdk_root": pdk_root,
             "sources": sources, "context_sha256": context.get("context_sha256")}
 
@@ -508,10 +224,104 @@ def _decimal(value: object, label: str) -> Decimal:
     return result
 
 
-def _consume(project: Path, folders: list[Path], configs: dict[str, Path],
+_RESULT_FIELDS = frozenset({"step", "case", "config", "status", "metrics", "scope", "log"})
+_NATIVE_FAILURE_METRICS = {
+    "Checker.TrDRC": ("route__drc_errors", "Routing DRC errors"),
+    "Checker.DisconnectedPins": (
+        "design__critical_disconnected_pin__count", "critical disconnected pins"),
+    "Checker.WireLength": ("route__wirelength__max", "Threshold-surpassing long wires"),
+}
+
+
+def _native_checker_failure(step: str, state: dict, config: dict, log: str) -> str | None:
+    """Recognise a native checker classification, never an arbitrary rc != 0."""
+    metric, description = _NATIVE_FAILURE_METRICS.get(step, (None, None))
+    if metric is None:
+        return None
+    value = (state.get("metrics") or {}).get(metric)
+    if value is None:
+        missing = f"metric was not found ({metric}): NOT_MEASURED"
+        return "MISSING_METRIC" if missing in log else None
+    if step == "Checker.WireLength":
+        threshold = config.get("WIRE_LENGTH_THRESHOLD")
+        if threshold is None or _decimal(value, metric) <= _decimal(threshold, metric):
+            return None
+    elif _decimal(value, metric) <= 0:
+        return None
+    pattern = rf"\b{re.escape(str(value))}\s+{re.escape(description)} found\."
+    return step if re.search(pattern, log) else None
+
+
+def _step_result(source: Path | dict, step: str, project: Path) -> dict:
+    """Normalize native folders and custom steps to one result shape."""
+    if isinstance(source, dict):
+        missing = _RESULT_FIELDS - source.keys()
+        if (missing or source.get("step") != step
+                or source.get("status") not in {"PASS", "FAIL", "NOT_RUN", "NOT_MEASURED"}
+                or not isinstance(source.get("metrics"), dict)):
+            raise AdmissionRefusal("D42_STEP_RESULT_INVALID", f"{step}: {sorted(missing)}")
+        return dict(source)
+    folder = Path(source).resolve()
+    relative = str(folder.relative_to(project))
+    config_path, log_path = folder / "config.json", folder / "invocation.log"
+    base = {"step": step, "case": relative,
+            "config": (_ref(project, config_path) if config_path.is_file() else None),
+            "metrics": {}, "scope": "librelane_native_step",
+            "log": (_ref(project, log_path) if log_path.is_file() else None)}
+    if not folder.is_dir() or not log_path.is_file() or not log_path.stat().st_size:
+        return {**base, "status": "NOT_RUN"}
+    config = _read(config_path)
+    if config.get("meta", {}).get("step") != step:
+        raise AdmissionRefusal("D42_STEP_RESULT_INVALID", f"{step}: config identity")
+    try:
+        contract.validate_step_receipt(folder, step)
+    except contract.Refusal:
+        state_path = folder / "state_in.json"
+        if not state_path.is_file():
+            return {**base, "status": "NOT_MEASURED"}
+        state = _read(state_path)
+        reason = _native_checker_failure(
+            step, state, config, log_path.read_text(errors="replace"))
+        if reason is None:
+            return {**base, "status": "NOT_MEASURED",
+                    "metrics": state.get("metrics") or {}}
+        return {**base, "status": "FAIL", "metrics": state.get("metrics") or {},
+                "reason": reason}
+    state = _read(folder / "state_out.json")
+    return {**base, "status": "PASS", "metrics": state.get("metrics") or {}}
+
+
+def _consume(project: Path, step_results: list[dict], configs: dict[str, Path],
              prepared: dict) -> dict:
-    if len(folders) != len(STEPS):
-        raise AdmissionRefusal("D42_NATIVE_OUTPUT_INCOMPLETE", str(len(folders)))
+    if (len(step_results) != len(STEPS)
+            or [row.get("step") for row in step_results] != STEPS):
+        raise AdmissionRefusal("D42_NATIVE_OUTPUT_INCOMPLETE", str(len(step_results)))
+    failed_rows = [row for row in step_results if row.get("status") == "FAIL"]
+    if failed_rows:
+        obligations = []
+        for row in failed_rows:
+            if row["step"] == "Checker.TrDRC":
+                obligations.append("route_check.route_short_overlap_errors")
+            elif row["step"] == "Checker.DisconnectedPins":
+                obligations.append("route_check.disconnected_required_pins")
+            elif row["step"] == "Checker.WireLength":
+                obligations.append("route_check.wire_length_threshold")
+        return {"status": "FAIL", "reason": "D42_NATIVE_CHECK_FAILED",
+                "failed_obligations": obligations,
+                "measurements": {key: value for row in step_results
+                                 for key, value in row.get("metrics", {}).items()},
+                "wire_length_check": {"status": "FAIL" if any(
+                    row["step"] == "Checker.WireLength" for row in failed_rows)
+                    else "NOT_RUN"},
+                "identity": {"producer": "LibreLane native route-check chain",
+                             "native_step_results": step_results,
+                             "consumed_inputs": prepared["inputs"],
+                             "source": prepared["sources"]},
+                "outputs": {}}
+    if any(row.get("status") != "PASS" for row in step_results):
+        states = {row["step"]: row.get("status") for row in step_results}
+        raise AdmissionRefusal("D42_NATIVE_OUTPUT_INCOMPLETE", str(states))
+    folders = [project / row["case"] for row in step_results]
     receipts = {}
     states = {}
     for step, folder in zip(STEPS, folders):
@@ -536,10 +346,7 @@ def _consume(project: Path, folders: list[Path], configs: dict[str, Path],
     if reported_critical != disconnected:
         raise AdmissionRefusal("D42_NATIVE_METRIC_DISAGREEMENT",
                                f"reporter={reported_critical}, checker={disconnected}")
-    qualification = _qualify_inactive_outputs(
-        project, table, prepared, reported_disconnected, disconnected)
-    required_disconnected = _count(
-        qualification["required_disconnected_pins"], "qualified disconnected count")
+    required_disconnected = disconnected
     wire_max = _decimal(states["Checker.WireLength"].get("metrics", {}).get(
         "route__wirelength__max"), "route__wirelength__max")
     wire_config = _read(configs["Checker.WireLength"])
@@ -560,7 +367,6 @@ def _consume(project: Path, folders: list[Path], configs: dict[str, Path],
     measurements = {"route_short_overlap_errors": route,
                     "native_disconnected_pins": reported_disconnected,
                     "native_critical_disconnected_pins": disconnected,
-                    "qualified_inactive_output_pins": len(qualification["qualified"]),
                     "disconnected_required_pins": required_disconnected,
                     "wire_length_max_um": str(wire_max),
                     "wire_length_threshold_um": str(threshold) if threshold is not None else None}
@@ -580,9 +386,9 @@ def _consume(project: Path, folders: list[Path], configs: dict[str, Path],
     outputs["Odb.ReportWireLength"]["report_sha256"] = _sha(wires)
     identity = {"producer": "LibreLane native route-check chain",
                 "checker": {"steps": STEPS, "metric_keys": METRICS},
+                "native_step_results": step_results,
                 "tool_execution": outputs,
                 "consumed_inputs": prepared["inputs"],
-                "disconnected_pin_qualification": qualification,
                 "requirements": {"route_check.disconnected_required_pins": 0,
                                  "route_check.route_short_overlap_errors": 0},
                 "configuration": {step: _sha(path) for step, path in configs.items()},
@@ -591,47 +397,6 @@ def _consume(project: Path, folders: list[Path], configs: dict[str, Path],
             "reason": "D42_NATIVE_CHECK_FAILED" if failed else "D42_NATIVE_CHECKS_PASS",
             "failed_obligations": failed, "measurements": measurements,
             "wire_length_check": wire_check, "identity": identity, "outputs": outputs}
-
-
-def _retained_native(project: Path, prepared: dict) -> tuple[list[Path], dict[str, Path], dict] | None:
-    """Reuse one completed checker chain after a consumer-only source repair."""
-    root = project / "reports/flow109/D42"
-    for receipt_path in sorted(root.glob("*/receipt.json"), reverse=True):
-        prior = _read(receipt_path)
-        if (prior.get("schema") != SCHEMA
-                or prior.get("reason") not in ("D42_WIRE_THRESHOLD_UNSTATED",
-                                               "D42_NATIVE_CHECK_FAILED")
-                or prior.get("native_started") is not True or prior.get("inputs") != prepared["inputs"]
-                or prior.get("image") != prepared["image"]
-                or prior.get("adopted_candidate") != prepared["candidate"]):
-            continue
-        recorded = prior.get("outputs")
-        if isinstance(recorded, dict) and all(
-                isinstance(recorded.get(step), dict)
-                and recorded[step].get("folder") for step in STEPS):
-            folders = [project / recorded[step]["folder"] for step in STEPS]
-        else:
-            lane = project / "phase3/librelane" / (
-                "D42-route-check-" + receipt_path.parent.name[:12])
-            folders = [lane / f"{index:02d}-{step.lower().replace('.', '-')}"
-                       for index, step in enumerate(STEPS, 1)]
-        for step, folder in zip(STEPS, folders):
-            receipt = contract.validate_step_receipt(folder, step)
-            recorded_step = recorded.get(step, {}) if isinstance(recorded, dict) else {}
-            if recorded_step and (recorded_step.get("receipt_sha256") != _sha(
-                    folder / "vibeic_receipt.json")
-                    or recorded_step.get("state_sha256") != _sha(folder / "state_out.json")):
-                raise AdmissionRefusal("D42_RETAINED_NATIVE_STALE", str(folder))
-        fingerprint = _read(folders[0] / "input_fingerprint.json")
-        actual = {_project_path(project, raw, "retained D42 input"): sha
-                  for raw, sha in fingerprint.get("state_files", {}).items()}
-        expected = {path: prepared["inputs"]["view_" + name]["sha256"]
-                    for name, path in prepared["views"].items()}
-        if fingerprint.get("image") != prepared["image"] or actual != expected:
-            raise AdmissionRefusal("D42_RETAINED_NATIVE_STALE", str(lane))
-        configs = {step: folder / "config.json" for step, folder in zip(STEPS, folders)}
-        return folders, configs, _ref(project, receipt_path)
-    return None
 
 
 def execute(project, context):
@@ -646,31 +411,37 @@ def execute(project, context):
     try:
         prepared = prepare(project, context)
         result.update(inputs=prepared["inputs"], operation_sources=prepared["sources"],
-                      adopted_candidate=prepared["candidate"], image=prepared["image"])
+                      adopted_candidate=prepared["candidate"], pdk=prepared["pdk"],
+                      image=prepared["image"])
         _before(project, context, prepared)
-        retained = _retained_native(project, prepared)
-        if retained is not None:
-            folders, configs, retained_receipt = retained
-            result.update(native_reused=True, retained_native_receipt=retained_receipt)
-        else:
-            overlay = {"ERROR_ON_TR_DRC": (False, "D42 consumer records native metric"),
-                       "ERROR_ON_DISCONNECTED_PINS": (False, "D42 consumer records native metric"),
-                       "ERROR_ON_LONG_WIRE": (False, "D42 consumer records native metric")}
-            configs = contract.resolve_step_configs(
-                project, prepared["image"], "gf180mcuD", STEPS,
-                pdk_root=prepared["pdk_root"], folder="D42-config-" + attempt.name[:12],
-                overlay=overlay)
-            bridge = attempt / "adopted_state.json"
-            state = dict(prepared["state"])
-            state.update({name: str(path) for name, path in prepared["views"].items()})
-            write_json(bridge, state)
-            _before(project, context, prepared)
-            result["native_started"] = True
-            lane = "D42-route-check-" + attempt.name[:12]
+        overlay = {
+            "ERROR_ON_TR_DRC": (True, "D42 requires native routed-DRC failure semantics"),
+            "ERROR_ON_DISCONNECTED_PINS": (
+                True, "D42 requires native critical-disconnected-pin failure semantics"),
+            "ERROR_ON_LONG_WIRE": (True, "D42 requires native PDK wire-limit semantics"),
+            "ERROR_ON_MISSING_METRIC": (True, "D42 refuses absent native metrics"),
+        }
+        configs = contract.resolve_step_configs(
+            project, prepared["image"], prepared["pdk"], STEPS,
+            pdk_root=prepared["pdk_root"], folder="D42-config-" + attempt.name[:12],
+            overlay=overlay)
+        _before(project, context, prepared)
+        result["native_started"] = True
+        lane = "D42-route-check-" + attempt.name[:12]
+        try:
             folders = contract.run_chain(
-                project, prepared["image"], [(step, configs[step], bridge) for step in STEPS],
+                project, prepared["image"],
+                [(step, configs[step], prepared["state_path"]) for step in STEPS],
                 mounts=[(prepared["pdk_root"], "/pdk")], lane=lane, pdk_root="/pdk")
-        consumed = _consume(project, folders, configs, prepared)
+        except contract.Refusal as exc:
+            if exc.code != "LL_STEP_FAILED":
+                raise
+            root = project / "phase3/librelane" / lane
+            folders = [root / f"{index:02d}-{step.lower().replace('.', '-')}"
+                       for index, step in enumerate(STEPS, 1)]
+        step_results = [_step_result(folder, step, project)
+                        for step, folder in zip(STEPS, folders)]
+        consumed = _consume(project, step_results, configs, prepared)
         result.update(component_status=consumed["status"],
                       metric_acceptance_status=consumed["status"],
                       reason=consumed["reason"],

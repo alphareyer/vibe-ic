@@ -684,13 +684,14 @@ def test_the_gate_level_sim_step_ships_in_the_plugin_the_contract_mounts():
     source = (contract.PLUGIN_ROOT / 'librelane_plugin_vibeic/__init__.py').read_text()
     assert 'id = "Vibeic.GateLevelSim"' in source
     assert contract._plugin_args(['Vibeic.GateLevelSim'])
-    # The step records; it parses nothing it produces (the judgement is the
-    # calibrated `sdf_gate_sim.judge_tool_arm` on the host).
+    # The native step applies the same calibrated judge before it returns a
+    # state; a bad native run must not advance to a later host-only reader.
     import ast
     tree = ast.parse(source)
     imported = ({a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
                 | {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)})
-    assert not imported & {'re', 'sdf_gate_sim'}
+    assert 'sdf_gate_sim' in imported
+    assert 'BLOCKING gate-level simulation verdict' in source
 
 
 def test_post_route_power_keeps_native_clock_analysis_and_pre_pnr_keeps_ideal_clocks(tmp_path, monkeypatch):
@@ -978,6 +979,36 @@ def test_default_step29_binds_a_same_line_clock_before_complete_capture(
 from test_librelane_contract import local_image  # noqa: E402,F401
 
 
+def _native_gls_cli_process(argv, monkeypatch, executions):
+    """Only model the CLI transport; Icarus and the native judge run for real.
+
+    A failed native Step raises StepError inside the CLI, which exits nonzero
+    after preserving its reports. It must not escape as an in-process fixture
+    exception or be rewritten into a successful state_out.json.
+    """
+    from librelane.state import DesignFormat
+    from librelane.steps.step import StepError
+    monkeypatch.syspath_prepend(str(contract.PLUGIN_ROOT))
+    from librelane_plugin_vibeic import GateLevelSim
+    folder = Path(argv[argv.index('-o') + 1])
+    folder.mkdir(parents=True, exist_ok=True)
+    config = json.loads(Path(argv[argv.index('-c') + 1]).read_text())
+    incoming = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
+    instance = SimpleNamespace(config={
+        'VIBEIC_GLS_MANIFEST': config['VIBEIC_GLS_MANIFEST'], 'VIBEIC_GLS_TIMEOUT_S': 30},
+        step_dir=str(folder), _run=GateLevelSim._run)
+    executions.append(folder)
+    try:
+        GateLevelSim.run(instance, {
+            DesignFormat.NETLIST: incoming['nl'], DesignFormat.SDF: incoming['sdf']})
+    except StepError as exc:
+        return SimpleNamespace(returncode=1, stdout='', stderr=str(exc) + '\n')
+    put(folder / 'state_out.json', incoming)
+    return SimpleNamespace(returncode=0,
+                           stdout='SOURCE_FIXTURE_ONLY: actual Icarus GLS completed\n',
+                           stderr='')
+
+
 @pytest.mark.parametrize('case', ['good', 'case_fail', 'missing_model', 'missing_include', 'docker_guest'])
 def test_default_gls_manifest_uses_the_compilers_execution_namespace(
         tmp_path, monkeypatch, local_image, case):
@@ -1041,25 +1072,11 @@ def test_default_gls_manifest_uses_the_compilers_execution_namespace(
             return edge(argv[:-1], **kwargs)
         if '--id' not in argv or not local:
             return edge(argv, **kwargs)
-        from librelane.state import DesignFormat
-        monkeypatch.syspath_prepend(str(contract.PLUGIN_ROOT))
-        from librelane_plugin_vibeic import GateLevelSim
-        folder = Path(argv[argv.index('-o') + 1])
-        folder.mkdir(parents=True, exist_ok=True)
-        config = json.loads(Path(argv[argv.index('-c') + 1]).read_text())
-        incoming = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
-        manifest = json.loads(Path(config['VIBEIC_GLS_MANIFEST']).read_text())
         if case == 'missing_model':
             (root / 'x/libs.ref/pads/verilog/pads.v').unlink()
         elif case == 'missing_include':
             header.unlink()
-        instance = SimpleNamespace(config={
-            'VIBEIC_GLS_MANIFEST': config['VIBEIC_GLS_MANIFEST'], 'VIBEIC_GLS_TIMEOUT_S': 30},
-            step_dir=str(folder), _run=GateLevelSim._run)
-        GateLevelSim.run(instance, {DesignFormat.NETLIST: incoming['nl'], DesignFormat.SDF: incoming['sdf']})
-        put(folder / 'state_out.json', incoming)
-        executions.append(folder)
-        return SimpleNamespace(returncode=0, stdout='SOURCE_FIXTURE_ONLY: actual Icarus GLS completed\n', stderr='')
+        return _native_gls_cli_process(argv, monkeypatch, executions)
     monkeypatch.setattr(contract, 'run_container', process_edge)
     gate = project / 'reports/phase2/gates/post_layout_sim.json'
     assert not gate.exists()
@@ -1074,8 +1091,15 @@ def test_default_gls_manifest_uses_the_compilers_execution_namespace(
         '/pdk/x/libs.ref/pads/verilog/pads.v'])
     assert Path(manifest['netlist']).is_file() and Path(manifest['stubs']).is_file()
     assert all(Path(c['testbench']).is_file() for c in manifest['cases'])
-    judged = json.loads((project / 'reports/phase3/gls_corners.json').read_text())
     good = case in ('good', 'docker_guest')
+    # A native rejection stops run_chain before its success-only host summary.
+    # The native judge still wrote the complete measured failure evidence.
+    judged_path = (project / 'reports/phase3/gls_corners.json' if good
+                   else executions[0] / 'gls_results.json')
+    judged = json.loads(judged_path.read_text())
+    if not good:
+        assert not (executions[0] / 'state_out.json').exists()
+        assert 'LL_STEP_FAILED' in row.detail, row.detail
     assert row.status == ('PASS' if good else 'FAIL'), row.detail
     assert judged['verdict'] == ('PASS' if good else 'FAIL')
     if local:
@@ -1093,7 +1117,17 @@ def test_default_gls_manifest_uses_the_compilers_execution_namespace(
                 assert judged['corners'][run['corner']]['delays_applied'] > 0
     definition = next(r for r in _flow_yaml.load()['steps'] if str(r['id']) == '29')
     _, missing = worker.resolve_contract(project, definition['required_outputs'])
-    assert missing == [] and gate.is_file()
+    if good:
+        assert missing == []
+    else:
+        # A blocking native failure retains its own runs/results instead of
+        # publishing the success-only host transcript or pass flag.
+        assert missing == [
+            'phase3/stage3/sim_postlayout/results.log OR '
+            'phase3/stage3/sim_postlayout/pass.flag']
+        assert not (runner._pl.sim_postlayout_dir(project) / 'results.log').exists()
+        assert not (runner._pl.sim_postlayout_dir(project) / 'pass.flag').exists()
+    assert gate.is_file()
     assert json.loads(gate.read_text())['verdict'] == ('PASS' if good else 'FAIL')
     if good:
         accepted = next(r for r in versions.current_acceptance(project, began) if r['id'] == '29')
@@ -1243,20 +1277,7 @@ def test_default_gls_uses_the_declared_physical_observation(
             return edge(argv[:-1], **kwargs)
         if '--id' not in argv:
             return edge(argv, **kwargs)
-        from librelane.state import DesignFormat
-        monkeypatch.syspath_prepend(str(contract.PLUGIN_ROOT))
-        from librelane_plugin_vibeic import GateLevelSim
-        folder = Path(argv[argv.index('-o') + 1])
-        folder.mkdir(parents=True, exist_ok=True)
-        config = json.loads(Path(argv[argv.index('-c') + 1]).read_text())
-        incoming = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
-        instance = SimpleNamespace(config={
-            'VIBEIC_GLS_MANIFEST': config['VIBEIC_GLS_MANIFEST'], 'VIBEIC_GLS_TIMEOUT_S': 30},
-            step_dir=str(folder), _run=GateLevelSim._run)
-        GateLevelSim.run(instance, {DesignFormat.NETLIST: incoming['nl'], DesignFormat.SDF: incoming['sdf']})
-        put(folder / 'state_out.json', incoming)
-        native.append(folder)
-        return SimpleNamespace(returncode=0, stdout='SOURCE_FIXTURE_ONLY: actual Icarus completed\n', stderr='')
+        return _native_gls_cli_process(argv, monkeypatch, native)
     monkeypatch.setattr(contract, 'run_container', process_edge)
     result = runner._default_pnr_rows(project, 'public_serial_product', cfg, 'SOURCE_FIXTURE_ONLY', ['29'])
     manifest = json.loads((project / 'phase3/librelane/29-config/gls/gls_manifest.json').read_text())
@@ -1391,20 +1412,7 @@ def test_default_gls_observes_the_current_output_deadline(
             return edge(argv[:-1], **kwargs)
         if '--id' not in argv:
             return edge(argv, **kwargs)
-        from librelane.state import DesignFormat
-        monkeypatch.syspath_prepend(str(contract.PLUGIN_ROOT))
-        from librelane_plugin_vibeic import GateLevelSim
-        folder = Path(argv[argv.index('-o') + 1])
-        folder.mkdir(parents=True, exist_ok=True)
-        config = json.loads(Path(argv[argv.index('-c') + 1]).read_text())
-        incoming = json.loads(Path(argv[argv.index('-i') + 1]).read_text())
-        instance = SimpleNamespace(config={
-            'VIBEIC_GLS_MANIFEST': config['VIBEIC_GLS_MANIFEST'], 'VIBEIC_GLS_TIMEOUT_S': 30},
-            step_dir=str(folder), _run=GateLevelSim._run)
-        GateLevelSim.run(instance, {DesignFormat.NETLIST: incoming['nl'], DesignFormat.SDF: incoming['sdf']})
-        put(folder / 'state_out.json', incoming)
-        native.append(folder)
-        return SimpleNamespace(returncode=0, stdout='SOURCE_FIXTURE_ONLY: actual Icarus completed\n', stderr='')
+        return _native_gls_cli_process(argv, monkeypatch, native)
     monkeypatch.setattr(contract, 'run_container', process_edge)
     result = runner._default_pnr_rows(project, 'public_serial_product', cfg, 'SOURCE_FIXTURE_ONLY', ['29'])
     manifest_path = project / 'phase3/librelane/29-config/gls/gls_manifest.json'

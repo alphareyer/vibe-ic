@@ -1637,7 +1637,8 @@ def test_the_step_is_registered_with_every_earlier_plugin_step():
         assert re.search(rf'\b{name}\b', init), name
     src = (STEP_DIR / 'postroute_repair.py').read_text()
     assert 'id = "Vibeic.PostRouteRepair"' in src
-    assert src.count('@Step.factory.register()') == 1
+    assert 'id = "Vibeic.PostRouteRepairAdoption"' in src
+    assert src.count('@Step.factory.register()') == 2
 
 
 def test_the_script_orders_the_repair_and_connects_before_it_writes():
@@ -2278,6 +2279,10 @@ def test_the_class_default_route_resolves_the_pdk_like_every_other_step(tmp_path
     design's PDK and image (materialised from the image), as 15..20 and 32 do;
     measured on spm: asking with no PDK/image refused LL_PDK_ROOT_NOT_DECLARED."""
     import test_librelane_route as tr
+    from _stated_eda_image import mock_docker_route
+    # This unit control substitutes the Docker/process edge, not a LOCAL
+    # execution. Keep its resolver question independent of the outer test CID.
+    mock_docker_route(monkeypatch)
     runner = tr.runner
     project, out_dir, pnr_tcl = tr._route_project(tmp_path, {'steps': {'21': 'librelane'}})
     (project / 'phase3/librelane_switch.json').unlink(missing_ok=True)

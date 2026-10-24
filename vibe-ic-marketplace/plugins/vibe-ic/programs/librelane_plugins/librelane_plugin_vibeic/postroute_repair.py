@@ -33,20 +33,28 @@ the input state: this step never writes over it.
 
 Shipped with the plugin, not the vibeic/librelane fork: the step is vibe-ic's
 closure policy on top of the tools, and its parameters come from vibe-ic's
-actuator registry.
+actuator registry. ``Vibeic.PostRouteRepairAdoption`` composes this candidate
+with same-view native measurement for flows that use ``meta.substituting_steps``;
+the candidate-only ID remains the host closure controller's actuator.
 """
 from __future__ import annotations
 
+import json
 import os
+import sys
 from decimal import Decimal
-from typing import Optional, Tuple
+from pathlib import Path as FilePath
+from typing import Any, Dict, Optional, Sequence, Tuple, Type
 
 from librelane.config import Variable
 from librelane.state import DesignFormat, State
-from librelane.steps.openroad import RCX, DetailedRouting, ResizerStep, _get_process_limit
-from librelane.steps.step import MetricsUpdate, Step, ViewsUpdate
+from librelane.steps.openroad import (
+    RCX, CheckAntennas, DetailedRouting, ResizerStep, STAPostPNR,
+    _get_process_limit,
+)
+from librelane.steps.step import MetricsUpdate, Step, StepError, ViewsUpdate
 
-__all__ = ["PostRouteRepair"]
+__all__ = ["PostRouteRepair", "PostRouteRepairAdoption"]
 
 _DRT_VARS = ("DRT_THREADS", "DRT_OPT_ITERS", "DRT_ANTENNA_REPAIR_MARGIN")
 
@@ -216,3 +224,171 @@ class PostRouteRepair(ResizerStep):
             views = {fmt: state_in[fmt] for fmt in self.outputs
                      if state_in.get(fmt) is not None}
         return views, metrics
+
+
+def _unique_config_vars(*steps: Type[Step]):
+    """Return the exact config union for baseline/candidate measurement."""
+    result, seen = [], set()
+    for step in steps:
+        for variable in step.config_vars:
+            if variable.name not in seen:
+                result.append(variable)
+                seen.add(variable.name)
+    return result
+
+
+@Step.factory.register()
+class PostRouteRepairAdoption(Step):
+    """BLOCKING native baseline/candidate measurement and state adoption.
+
+    ``Vibeic.PostRouteRepair`` remains the single-candidate actuator consumed
+    by the host closure controller. A complete native flow inserts this step
+    after ``OpenROAD.DetailedRouting`` through ``meta.substituting_steps``.
+    The input and candidate traverse the same CheckAntennas, RCX and
+    STAPostPNR steps. Only a measured, non-regressing improvement advances;
+    a worse candidate returns the measured input state, and an incomplete
+    input measurement blocks the flow.
+    """
+
+    id = "Vibeic.PostRouteRepairAdoption"
+    name = "Post-Route Repair with Native Adoption"
+    inputs = list(PostRouteRepair.inputs)
+    outputs = list(dict.fromkeys(
+        [*PostRouteRepair.outputs, *CheckAntennas.outputs,
+         *RCX.outputs, *STAPostPNR.outputs]))
+    config_vars = _unique_config_vars(
+        PostRouteRepair, CheckAntennas, RCX, STAPostPNR)
+    _measurement_steps = (CheckAntennas, RCX, STAPostPNR)
+
+    def _start_child(self, child_type: Type[Step], state: State,
+                     folder: str) -> State:
+        child = child_type(self.config, state)
+        return child.start(toolbox=self.toolbox,
+                           step_dir=os.path.join(self.step_dir, folder))
+
+    def _measure(self, state: State, prefix: str) -> State:
+        measured = state
+        for index, child_type in enumerate(self._measurement_steps, 1):
+            measured = self._start_child(
+                child_type, measured,
+                f"{prefix}-{index:02d}-{child_type.id.lower().replace('.', '-')}")
+        return measured
+
+    @staticmethod
+    def _antenna(metrics: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+        values = tuple(metrics.get(summary, metrics.get(native)) for summary, native in (
+            ("antenna_nets", "antenna__violating__nets"),
+            ("antenna_pins", "antenna__violating__pins")))
+        if any(type(value) is not int or value < 0 for value in values):
+            return None
+        return values  # type: ignore[return-value]
+
+    @staticmethod
+    def _adoption_decision(baseline: Dict[str, Any],
+                           candidate: Dict[str, Any],
+                           repair_metrics: Dict[str, Any],
+                           trigger: Dict[str, Any]) -> Tuple[str, str]:
+        """Conservative subset of run_in_chain's existing admission rules."""
+        if trigger.get("action") == "SKIP":
+            return "NO_REPAIR", "input timing and DRV are measured clean"
+        if trigger.get("action") != "RUN":
+            return "NOT_MEASURED", "input timing/DRV trigger is incomplete"
+        if baseline.get("unmeasured_corners") or candidate.get("unmeasured_corners"):
+            return "ROLLED_BACK", "candidate comparison has unmeasured STA corners"
+
+        before_ant = PostRouteRepairAdoption._antenna(baseline)
+        after_ant = PostRouteRepairAdoption._antenna(candidate)
+        if before_ant is None or after_ant is None:
+            return "ROLLED_BACK", "candidate antenna comparison is unmeasured"
+        if any(after > before for before, after in zip(before_ant, after_ant)):
+            return "ROLLED_BACK", "candidate regressed antenna violations"
+
+        route_values = tuple(repair_metrics.get(key) for key in (
+            "vibeic__prr__before__unrouted__count",
+            "vibeic__prr__after__unrouted__count",
+            "vibeic__prr__unrouted__added"))
+        if any(type(value) is not int or value < 0 for value in route_values):
+            return "ROLLED_BACK", "candidate route census is unmeasured"
+        route_before, route_after, route_added = route_values
+        if route_added != max(0, route_after - route_before) or route_added:
+            return "ROLLED_BACK", "candidate added unrouted nets"
+
+        improved = after_ant < before_ant
+        for kind in ("slew", "cap", "fanout"):
+            for corner, before in (baseline.get("drv", {}).get(kind, {}) or {}).items():
+                after = (candidate.get("drv", {}).get(kind, {}) or {}).get(corner)
+                if type(before) is not int or type(after) is not int:
+                    return "ROLLED_BACK", "candidate DRV comparison is unmeasured"
+                if after > before:
+                    return "ROLLED_BACK", f"candidate regressed {kind} at {corner}"
+                improved = improved or after < before
+        for field in ("setup_ws", "hold_ws"):
+            for corner, before in (baseline.get(field, {}) or {}).items():
+                after = (candidate.get(field, {}) or {}).get(corner)
+                if not isinstance(before, (int, float)) or not isinstance(after, (int, float)):
+                    return "ROLLED_BACK", "candidate timing comparison is unmeasured"
+                if after < before:
+                    return "ROLLED_BACK", f"candidate regressed {field} at {corner}"
+                improved = improved or after > before
+        if not improved:
+            return "ROLLED_BACK", "candidate has no measured timing, DRV, or antenna improvement"
+        return "ADOPTED", "candidate improved without timing, DRV, antenna, or route regression"
+
+    @staticmethod
+    def _views(state: State) -> ViewsUpdate:
+        views: ViewsUpdate = {}
+        for fmt in PostRouteRepairAdoption.outputs:
+            value = state.get_by_df(fmt)
+            if value is not None:
+                views[fmt] = value
+        return views
+
+    def run(self, state_in: State, **kwargs) -> Tuple[ViewsUpdate, MetricsUpdate]:
+        programs = str(FilePath(__file__).resolve().parents[2])
+        if programs not in sys.path:
+            sys.path.insert(0, programs)
+        import librelane_postroute_repair as policy
+
+        corners: Sequence[str] = tuple(self.config["STA_CORNERS"] or [])
+        baseline_state = self._measure(state_in, "baseline")
+        baseline = policy.summarize(dict(baseline_state.metrics), corners)
+        before_ant = self._antenna(dict(baseline_state.metrics))
+        if before_ant is not None:
+            baseline.update(antenna_nets=before_ant[0], antenna_pins=before_ant[1])
+        trigger = policy.measured_repair_trigger(baseline)
+
+        candidate_state = None
+        candidate = None
+        repair_metrics: Dict[str, Any] = {}
+        if trigger["action"] == "RUN":
+            candidate_raw = self._start_child(
+                PostRouteRepair, state_in, "candidate-01-vibeic-postrouterepair")
+            repair_metrics = {key: value for key, value in candidate_raw.metrics.items()
+                              if key.startswith("vibeic__prr__")}
+            candidate_state = self._measure(candidate_raw, "candidate")
+            candidate = policy.summarize(dict(candidate_state.metrics), corners)
+            after_ant = self._antenna(dict(candidate_state.metrics))
+            if after_ant is not None:
+                candidate.update(antenna_nets=after_ant[0], antenna_pins=after_ant[1])
+
+        decision, reason = self._adoption_decision(
+            baseline, candidate or baseline, repair_metrics, trigger)
+        record = {"schema": "vibeic.native_postroute_adoption.v1",
+                  "step": self.id,
+                  "verdict": "NOT_MEASURED" if decision == "NOT_MEASURED" else "PASS",
+                  "decision": decision, "reason": reason,
+                  "trigger": trigger, "baseline": baseline,
+                  "candidate": candidate, "repair_metrics": repair_metrics}
+        record_path = os.path.join(self.step_dir, "postroute_adoption.json")
+        with open(record_path, "w") as stream:
+            json.dump(record, stream, indent=2)
+        if decision == "NOT_MEASURED":
+            raise StepError(f"{self.id}: BLOCKING input measurement incomplete; "
+                            f"see {record_path}")
+        adopted = candidate_state if decision == "ADOPTED" else baseline_state
+        assert adopted is not None
+        metrics = dict(adopted.metrics)
+        metrics.update({"vibeic__prr__native__adopted": int(decision == "ADOPTED"),
+                        "vibeic__prr__native__rolled_back": int(decision == "ROLLED_BACK"),
+                        "vibeic__prr__native__no_repair": int(decision == "NO_REPAIR")})
+        return self._views(adopted), metrics
