@@ -335,6 +335,8 @@ def test_eqy_script_drops_bitwuzla_and_defines_initial_values():
     text = eqy.eqy_script("top", [Path("/r.v")], Path("/n.v"), "/lib/tt.lib")
     assert "bitwuzla" not in text and "setundef -init -zero" in text
     assert "read_liberty -ignore_miss_func /lib/tt.lib" in text and "-icells /n.v" in text
+    assert "gold-nomatch /^_[0-9]+_$/" in text
+    assert "gate-nomatch /^_[0-9]+_$/" in text
 
 
 @pytest.mark.skipif(shutil.which("eqy") is None, reason="native EQY is required")
@@ -342,6 +344,7 @@ def test_eqy_script_drops_bitwuzla_and_defines_initial_values():
     ("merged_alias", "PASS"),
     ("corrupt_output", "FAIL"),
     ("truncated_internal", "PASS"),
+    ("synthetic_alias_swap", "PASS"),
 ])
 def test_eqy_native_keeps_cutpoint_definitions(tmp_path, case, expected):
     """Exercise the actual script and partition reader, including a real CEX.
@@ -351,7 +354,21 @@ def test_eqy_native_keeps_cutpoint_definitions(tmp_path, case, expected):
     zero with unconstrained b=1 and incorrectly fails. Gold amendment keeps
     that state relation without removing a, b or any output comparison.
     """
-    if case == "truncated_internal":
+    if case == "synthetic_alias_swap":
+        # Yosys's generated counters belong to one elaborated view.  Equal
+        # spellings do not make them equivalent cutpoints: here the two
+        # functions are deliberately exchanged while the public output is
+        # unchanged.  EQY must prove the output cone, not the temporary names.
+        gold = ("module neutral(input a, b, c, output y); "
+                "(* keep *) wire _0000_ = a & b; "
+                "(* keep *) wire _0001_ = a & c; "
+                "assign y = _0000_ | _0001_; endmodule\n")
+        gate = ("module neutral(input a, b, c, output y); "
+                "(* keep *) wire _0000_ = a & c; "
+                "(* keep *) wire _0001_ = a & b; "
+                "assign y = _0000_ | _0001_; endmodule\n")
+        outputs = {"y": [0]}
+    elif case == "truncated_internal":
         gold = ("module neutral(input clk, rst, input [7:0] d, output reg [3:0] y); "
                 "wire [7:0] wide = d ^ 8'h96; "
                 "always @(posedge clk) y <= rst ? 0 : wide[3:0]; endmodule\n")
@@ -386,10 +403,15 @@ def test_eqy_native_keeps_cutpoint_definitions(tmp_path, case, expected):
             compared.setdefault(name, set()).update(bits)
     assert all(set(bits) <= compared.get(name, set()) for name, bits in outputs.items())
     if case == "merged_alias":
-        assert report["compared_points"] == 2
+        # Both public outputs remain present above, but the bounded materializer
+        # intentionally groups their obligations into one declared partition.
+        assert report["compared_points"] == 1
     if case == "corrupt_output":
         assert report["non_equivalent_points"] == ["neutral.a"]
         assert (folder / "scratch/strategies/neutral.a/sat/trace.vcd").is_file()
+    if case == "synthetic_alias_swap":
+        matched = (folder / "scratch/matched.ids").read_text()
+        assert " _0000_ " not in matched and " _0001_ " not in matched
 
 
 @pytest.mark.parametrize("a,b,expect", [
