@@ -703,8 +703,9 @@ def test_normal_flow109_default_entry_runs_d75_without_generic_qualification(
     features["package_model_required"] = False
     manifest = project / "flow109-manifest.json"
     manifest.write_text(json.dumps({"features": features}))
-    monkeypatch.delenv(flow109.CONTEXT_ENV, raising=False)
-    monkeypatch.delenv(flow109.ATTEMPT_ENV, raising=False)
+    # Register teardown even when absent: the in-process front door sets these.
+    monkeypatch.setenv(flow109.CONTEXT_ENV, "")
+    monkeypatch.setenv(flow109.ATTEMPT_ENV, "")
     generic_admission_calls = []
     monkeypatch.setattr(flow109_admission, "require_admission",
                         lambda *a, **k: generic_admission_calls.append("called") or
