@@ -2089,6 +2089,179 @@ def _run_finished_candidate_controller(project: Path, record: Path, *,
             base_ctl.controller_id).to_record()
 
 
+def retained_finished_candidate_readback(project: Path) -> Optional[Dict[str, Any]]:
+    """Return one fully sealed finishing promotion without rerunning repair.
+
+    ``finish-candidate`` is an explicit continuation of the normal Step-32
+    controller.  Once its native DRC/LVS and controller promotion complete,
+    the ordinary Default front door still has to publish the candidate onto
+    its routed handoff.  Re-entering :func:`run` instead destroys that
+    distinction: it initializes a new closure arm from the old routed DEF and
+    can launch another actuator.  This reader admits only the original
+    finishing authority and all of its current bytes; a pointer or a report
+    that merely says PASS is deliberately insufficient.
+    """
+    import librelane_contract as _ll
+
+    project = Path(project).resolve()
+    report_path = project / REPORT_REL
+    if not report_path.is_file():
+        return None
+    try:
+        report = _load(report_path)
+        finishing = report.get("candidate_finishing")
+        if not isinstance(finishing, dict):
+            return None
+        if finishing.get("verdict") != "PASS":
+            raise _ll.Refusal(
+                "LL_PRR_FINISHED_READBACK_FAILED",
+                f"candidate finishing verdict is {finishing.get('verdict')!r}")
+
+        impl = project / ARM_REL / IMPL_DIR
+        current_path = impl / CURRENT
+        current = _load(current_path)
+        ctx = _load(impl / CONTEXT)
+        candidate = finishing.get("candidate")
+        if (not isinstance(candidate, str) or not candidate
+                or report.get("verdict") != "PASS"
+                or report.get("adopted") != candidate
+                or current.get("candidate") != candidate):
+            raise ValueError("report/current promoted candidate identity differs")
+        if report.get("final") != current.get("measurement"):
+            raise ValueError("report final measurement is not the adopted measurement")
+        measurement = current.get("measurement")
+        if (not isinstance(measurement, dict)
+                or measurement.get("drv_count") != 0
+                or not isinstance(measurement.get("setup_ws_min"), (int, float))
+                or isinstance(measurement.get("setup_ws_min"), bool)
+                or not isinstance(measurement.get("hold_ws_min"), (int, float))
+                or isinstance(measurement.get("hold_ws_min"), bool)
+                or measurement.get("antenna_nets") != 0
+                or measurement.get("antenna_pins") != 0
+                or report.get("drv_signoff_verdict") != "PASS"):
+            raise ValueError("retained DRV/timing/antenna evidence is incomplete")
+        if (current.get("supply_ownership") or {}).get("verdict") != "PASS":
+            raise ValueError("retained supply ownership did not pass")
+
+        record = _resume_host_path(project, ctx, current["finishing_record"])
+        ready = _load(record)
+        decision_path = record.with_name("decision.json")
+        decision = _load(decision_path)
+        if (ready.get("schema") != "vibeic.prr.candidate_finishing.v1"
+                or ready.get("verdict") != "READY_FOR_CONTROLLER"
+                or ready.get("candidate") != candidate
+                or decision.get("schema") !=
+                   "vibeic.prr.candidate_finishing_decision.v1"
+                or decision.get("candidate") != candidate
+                or decision.get("lane") != ready.get("lane")
+                or decision.get("decision") != "PROMOTED"
+                or decision.get("adopted") != candidate
+                or (decision.get("run") or {}).get("outcome") != "CONVERGED"
+                or decision.get("ready_record_sha256") != _ll.digest(record)
+                or decision.get("current_after_sha256") != _ll.digest(current_path)
+                or _resume_host_path(project, ctx,
+                                     decision.get("ready_record", "")) != record):
+            raise ValueError("finishing controller ownership is absent or stale")
+        ledger = project / ARM_REL / LEDGER
+        if ready.get("ledger_sha256") != _ll.digest(ledger):
+            raise ValueError("candidate ledger changed after finishing authority")
+
+        finished_gds = _resume_host_path(project, ctx, ready["finished_gds"])
+        finished_sha = _ll.digest(finished_gds)
+        if not (ready.get("finished_gds_sha256") == finished_sha
+                == finishing.get("finished_gds_sha256")
+                == current.get("finished_gds_sha256")
+                and _resume_host_path(project, ctx, finishing["finished_gds"])
+                    == finished_gds
+                and _resume_host_path(project, ctx, current["finished_gds"])
+                    == finished_gds):
+            raise ValueError("finished GDS identity differs")
+
+        sealed = ready.get("sealed_inputs")
+        if not isinstance(sealed, dict) or not sealed:
+            raise ValueError("finishing sealed input readset is absent")
+        for raw, expected in sealed.items():
+            path = _resume_host_path(project, ctx, raw)
+            if (not isinstance(expected, str) or path.is_symlink()
+                    or not path.is_file() or _ll.digest(path) != expected):
+                raise ValueError(f"sealed finishing input changed: {raw}")
+        if sealed.get(ready["finished_gds"]) != finished_sha:
+            raise ValueError("finished GDS is absent from the sealed input readset")
+
+        live = ready.get("current_freshness")
+        state = _load(_resume_host_path(project, ctx, current["repair_state"]))
+        live_netlists = sorted((project / "phase3/stage3/pnr").glob("*_pnr.v"))
+        if (not isinstance(live, dict)
+                or len(live_netlists) != 1
+                or _ll.digest(project / "phase3/stage3/pnr/routed.def") !=
+                   live.get("live_def_sha256")
+                or _ll.digest(live_netlists[0]) !=
+                   live.get("live_nl_sha256")
+                or _ll.digest(_resume_host_path(project, ctx, state["sdc"])) !=
+                   live.get("adopted_sdc_sha256")):
+            raise ValueError("normal front-door input route changed after finishing")
+
+        repair_folder = _resume_host_path(project, ctx, current["repair_folder"])
+        native_chain = ((repair_folder, REPAIR_STEP),
+                        (repair_folder.parent / "02-openroad-checkantennas",
+                         MEASURE_STEPS[0]),
+                        (repair_folder.parent / "03-openroad-rcx",
+                         MEASURE_STEPS[1]),
+                        (repair_folder.parent / "04-openroad-stapostpnr",
+                         MEASURE_STEPS[2]))
+        for folder, step in native_chain:
+            _ll.validate_step_receipt(folder, step)
+            for owned in (folder / "state_out.json",
+                          folder / "vibeic_receipt.json"):
+                matches = [raw for raw in sealed
+                           if _resume_host_path(project, ctx, raw) == owned]
+                if (len(matches) != 1
+                        or sealed[matches[0]] != _ll.digest(owned)):
+                    raise ValueError(
+                        f"native {step} ownership is absent from finishing readset")
+
+        lane = ready["lane"]
+        signoff = project / ARM_REL / "candidate_signoff" / lane
+        pv = ready.get("pv")
+        if not isinstance(pv, dict):
+            raise ValueError("full finishing PV record is absent")
+        for kind, required in (("drc", ("Magic.DRC", "KLayout.DRC",
+                                         "KLayout.Density")),
+                               ("lvs", ("Magic.SpiceExtraction", "Netgen.LVS"))):
+            retained = pv.get(kind)
+            actual = _load(signoff / f"{kind}.json")
+            if (not isinstance(retained, dict) or retained != actual
+                    or retained.get("verdict") != "PASS"
+                    or tuple(retained.get("required_steps") or ()) != required):
+                raise ValueError(f"full finishing {kind.upper()} authority differs")
+            for metric in (retained.get("metrics") or {}).values():
+                if (not isinstance(metric, dict)
+                        or metric.get("status") != "MEASURED"
+                        or metric.get("value") != 0):
+                    raise ValueError(f"full finishing {kind.upper()} metric failed")
+                folder = _resume_host_path(project, ctx, metric["folder"])
+                receipt = _ll.validate_step_receipt(folder, metric["step"])
+                if (metric.get("state_out_sha256") !=
+                        _ll.digest(folder / "state_out.json")
+                        or (receipt.get("sha256") or {}).get("state_out.json") !=
+                           metric.get("state_out_sha256")):
+                    raise ValueError(
+                        f"full finishing {kind.upper()} native receipt differs")
+        drc_scope = pv["drc"].get("scope") or {}
+        lvs_scope = pv["lvs"].get("scope") or {}
+        if (drc_scope.get("gds_sha256") != finished_sha
+                or lvs_scope.get("gds_sha256") != finished_sha
+                or lvs_scope.get("extracted_gds_sha256") != finished_sha
+                or lvs_scope.get("magic_ext_use_gds") is not True
+                or drc_scope.get("def_sha256") != lvs_scope.get("def_sha256")):
+            raise ValueError("full finishing DRC/LVS subjects differ")
+        return report
+    except _ll.Refusal:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise _ll.Refusal("LL_PRR_FINISHED_READBACK_STALE", str(exc)) from exc
+
+
 def resume_candidate_finishing(project: Path, candidate: str, lane: str, *,
                                reuse_finished_lane: Optional[str] = None,
                                registry: Optional[Path] = None,

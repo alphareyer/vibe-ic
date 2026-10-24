@@ -47778,6 +47778,22 @@ def step_postroute_repair_librelane(project: Path, top: str, pdk: "PdkConfig",
                 f"{view.name} is absent, so there is no routed database for "
                 f"the LibreLane post-route repair to start from")
             return None
+    try:
+        retained = _llprr.retained_finished_candidate_readback(project)
+    except _ll.Refusal as exc:
+        status = ("FAIL" if exc.code == "LL_PRR_FINISHED_READBACK_FAILED"
+                  else "NOT_MEASURED")
+        _drv_promotion_disclose(
+            pnr_out, "finished_candidate_readback_refused",
+            f"the retained finishing promotion was refused before any new "
+            f"actuator ({exc}); the current route was not overwritten")
+        return StepResult(
+            "postroute_repair_librelane", status, time.time() - t0, f"{exc}",
+            reason_class=(_V.ReasonClass.EXECUTION_ERROR
+                          if status == "NOT_MEASURED" else ""))
+    if retained is not None:
+        return _postroute_repair_librelane_result(
+            project, pnr_out, retained, t0, handed=True, top=top)
     _prior_report = project / _llprr.REPORT_REL
     if _prior_report.is_file():
         try:

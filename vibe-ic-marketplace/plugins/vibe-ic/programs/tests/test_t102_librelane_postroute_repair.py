@@ -2630,6 +2630,181 @@ def _finishing_controller_fixture(tmp_path):
     return project, impl, current, record, finished
 
 
+def _finished_readback_fixture(tmp_path):
+    """A neutral, fully byte-bound finishing promotion for front-door tests."""
+    project = tmp_path / 'project'
+    impl = project / prr.ARM_REL / prr.IMPL_DIR
+    pnr = project / 'phase3/stage3/pnr'
+    live_def = write(pnr / 'routed.def', 'VERSION 5.8 ;\nDESIGN neutral ;\nEND DESIGN\n')
+    live_nl = write(pnr / 'neutral_pnr.v', 'module neutral; endmodule\n')
+    sdc = write(pnr / 'constraint.sdc', 'set_units -time ns\n')
+    put(impl / prr.CONTEXT, {'project': str(project), 'mounts': []})
+
+    def receipt(folder, step, state_extra=None):
+        state = put(folder / 'state_out.json', {'metrics': {}, **(state_extra or {})})
+        fp = put(folder / 'input_fingerprint.json', {'step': step})
+        pdk = put(folder / 'pdk_root.json', {'path': '/neutral/pdk'})
+        invocation = write(folder / 'invocation.log', f'ran {step}\n')
+        hashes = {path.name: contract.digest(path)
+                  for path in (state, fp, pdk, invocation)}
+        rec = put(folder / 'vibeic_receipt.json', {
+            'input': {'step': step}, 'sha256': hashes})
+        return state, rec
+
+    repair = project / 'phase3/librelane/32-cand09/01-vibeic-postrouterepair'
+    repair_state, repair_receipt = receipt(repair, prr.REPAIR_STEP,
+                                           {'sdc': str(sdc)})
+    chain = [(repair_state, repair_receipt)]
+    for name, step in zip(('02-openroad-checkantennas', '03-openroad-rcx',
+                           '04-openroad-stapostpnr'), prr.MEASURE_STEPS):
+        chain.append(receipt(repair.parent / name, step))
+
+    finished = write(tmp_path / 'neutral.topped.gds', 'neutral finished geometry\n')
+    def_sha = contract.digest(live_def)
+    gds_sha = contract.digest(finished)
+    metrics = {}
+    signoff = project / prr.ARM_REL / 'candidate_signoff' / 'lane-04'
+    for kind, specs in (
+            ('drc', (('magic__drc_error__count', 'Magic.DRC', '01-magic-drc'),
+                     ('klayout__drc_error__count', 'KLayout.DRC', '02-klayout-drc'),
+                     ('klayout__density_error__count', 'KLayout.Density',
+                      '03-klayout-density'))),
+            ('lvs', (('magic__illegal_overlap__count', 'Magic.SpiceExtraction',
+                      '01-magic-spiceextraction'),
+                     ('design__lvs_error__count', 'Netgen.LVS', '02-netgen-lvs')))):
+        section = {}
+        for metric, step, folder_name in specs:
+            folder = project / f'phase3/librelane/32-cand09-lane-04-pv-{kind}' / folder_name
+            state, _rec = receipt(folder, step)
+            section[metric] = {'step': step, 'folder': str(folder),
+                               'status': 'MEASURED', 'value': 0,
+                               'state_out_sha256': contract.digest(state)}
+        scope = {'gds_sha256': gds_sha, 'def_sha256': def_sha}
+        if kind == 'lvs':
+            scope.update({'magic_ext_use_gds': True,
+                          'extracted_gds_sha256': gds_sha})
+        body = {'verdict': 'PASS',
+                'required_steps': ([x[1] for x in specs]),
+                'metrics': section, 'scope': scope}
+        put(signoff / f'{kind}.json', body)
+        metrics[kind] = body
+
+    ledger = put(project / prr.ARM_REL / prr.LEDGER, {'candidates': []})
+    measurement = {'setup_ws_min': 0.1, 'hold_ws_min': 0.2, 'drv_count': 0,
+                   'antenna_nets': 0, 'antenna_pins': 0}
+    ready_path = project / prr.ARM_REL / 'candidate_continuations/lane-04/ready.json'
+    sealed = {str(path): contract.digest(path) for pair in chain for path in pair}
+    sealed[str(finished)] = gds_sha
+    ready = {
+        'schema': 'vibeic.prr.candidate_finishing.v1',
+        'verdict': 'READY_FOR_CONTROLLER', 'candidate': '32-cand09',
+        'lane': 'lane-04', 'ledger_sha256': contract.digest(ledger),
+        'sealed_inputs': sealed, 'finished_gds': str(finished),
+        'finished_gds_sha256': gds_sha,
+        'current_freshness': {'live_def_sha256': def_sha,
+                              'live_nl_sha256': contract.digest(live_nl),
+                              'adopted_sdc_sha256': contract.digest(sdc)},
+        'pv': metrics}
+    put(ready_path, ready)
+    current_path = put(impl / prr.CURRENT, {
+        'candidate': '32-cand09', 'repair_state': str(repair_state),
+        'repair_folder': str(repair), 'measurement': measurement,
+        'supply_ownership': {'verdict': 'PASS'},
+        'finishing_record': str(ready_path), 'finished_gds': str(finished),
+        'finished_gds_sha256': gds_sha})
+    decision = {
+        'schema': 'vibeic.prr.candidate_finishing_decision.v1',
+        'candidate': '32-cand09', 'lane': 'lane-04', 'decision': 'PROMOTED',
+        'adopted': '32-cand09', 'run': {'outcome': 'CONVERGED'},
+        'ready_record': str(ready_path),
+        'ready_record_sha256': contract.digest(ready_path),
+        'current_after_sha256': contract.digest(current_path)}
+    put(ready_path.with_name('decision.json'), decision)
+    report = {
+        'verdict': 'PASS', 'adopted': '32-cand09', 'final': measurement,
+        'drv_signoff_verdict': 'PASS',
+        'candidate_finishing': {'verdict': 'PASS', 'candidate': '32-cand09',
+                                'finished_gds': str(finished),
+                                'finished_gds_sha256': gds_sha}}
+    put(project / prr.REPORT_REL, report)
+    return project, report, ready_path, finished
+
+
+def test_finished_candidate_readback_requires_full_owned_promotion(tmp_path):
+    project, report, _ready, _finished = _finished_readback_fixture(tmp_path)
+    assert prr.retained_finished_candidate_readback(project) == report
+
+
+@pytest.mark.parametrize('damage,code', [
+    ('gds', 'LL_PRR_FINISHED_READBACK_STALE'),
+    ('drc', 'LL_PRR_FINISHED_READBACK_STALE'),
+    ('owner', 'LL_PRR_FINISHED_READBACK_STALE'),
+    ('failed', 'LL_PRR_FINISHED_READBACK_FAILED'),
+])
+def test_finished_candidate_readback_refuses_damage_before_actuation(
+        tmp_path, damage, code):
+    project, _report, ready_path, finished = _finished_readback_fixture(tmp_path)
+    if damage == 'gds':
+        finished.write_text('changed geometry\n')
+    elif damage == 'drc':
+        drc = project / prr.ARM_REL / 'candidate_signoff/lane-04/drc.json'
+        body = json.loads(drc.read_text())
+        body['verdict'] = 'FAIL'
+        put(drc, body)
+    elif damage == 'owner':
+        decision = ready_path.with_name('decision.json')
+        body = json.loads(decision.read_text())
+        body['candidate'] = 'wrong-owner'
+        put(decision, body)
+    else:
+        report_path = project / prr.REPORT_REL
+        body = json.loads(report_path.read_text())
+        body['candidate_finishing']['verdict'] = 'FAIL'
+        put(report_path, body)
+    with pytest.raises(contract.Refusal, match=code):
+        prr.retained_finished_candidate_readback(project)
+
+
+def test_normal_frontdoor_reads_promoted_finishing_before_any_new_actuator(
+        tmp_path, monkeypatch):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    project, report, _ready, _finished = _finished_readback_fixture(tmp_path)
+    put(project / 'phase3/librelane_switch.json', {'steps': {'32': 'librelane'}})
+    monkeypatch.setattr(runner, '_postroute_repair_in_chain',
+                        lambda _project: (None, 'focused control'))
+    entered = []
+    monkeypatch.setattr(prr, 'run', lambda *_a, **_k: entered.append('run'))
+    observed = SimpleNamespace(status='PASS', detail='retained finishing readback')
+
+    def result(project_, pnr_, report_, _t0, *, handed, top):
+        assert project_ == project and report_ == report
+        assert handed is True and top == 'neutral'
+        return observed
+
+    monkeypatch.setattr(runner, '_postroute_repair_librelane_result', result)
+    answer = runner.step_postroute_repair_librelane(
+        project, 'neutral', SimpleNamespace(name='processA'), 'unused')
+    assert answer.status == 'PASS'
+    assert answer.detail == 'retained finishing readback'
+    assert entered == []
+
+
+def test_normal_frontdoor_stale_finishing_blocks_before_actuator(
+        tmp_path, monkeypatch):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    project, _report, _ready, finished = _finished_readback_fixture(tmp_path)
+    put(project / 'phase3/librelane_switch.json', {'steps': {'32': 'librelane'}})
+    finished.write_text('changed after controller promotion\n')
+    monkeypatch.setattr(runner, '_postroute_repair_in_chain',
+                        lambda _project: (None, 'focused control'))
+    monkeypatch.setattr(prr, 'run',
+                        lambda *_a, **_k: pytest.fail('actuator was entered'))
+    answer = runner.step_postroute_repair_librelane(
+        project, 'neutral', SimpleNamespace(name='processA'), 'unused')
+    assert answer.status == 'NOT_MEASURED'
+    assert 'LL_PRR_FINISHED_READBACK_STALE' in answer.detail
+
+
 def test_finished_candidate_uses_normal_controller_measurement_and_promotes(tmp_path):
     project, _impl, current, record, _finished = _finishing_controller_fixture(tmp_path)
     run = prr._run_finished_candidate_controller(
