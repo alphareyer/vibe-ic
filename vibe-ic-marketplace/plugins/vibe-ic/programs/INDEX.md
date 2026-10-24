@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1495
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1495)
+- **Total programs (excluding helpers / shims):** 1496
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1496)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1486 |
+| `any` | 1487 |
 
 ## Alphabetical listing
 
@@ -915,6 +915,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `mpw_precheck_result_gate` | any | — | mpw_precheck RESULT parser gate (TAPEOUT-SIGNOFF P0#2, parser half). |
 | `mux_compare_synth` | any | — | a DETERMINISTIC solver for the CVDP MULTIPLEXER / DEMUX  +  COMPARATOR / MIN-MAX family. |
 | `mux_synth` | any | — | deterministic SOLVER for the MULTIPLEXER family (spec -> RTL). |
+| `native_flow_results` | any | — | Read one native LibreLane run through the shared CSV mapping, without rejudging metrics. |
 | `nba_addr_read_race_check` | any | — | FSM consuming addressed data without pipelining. |
 | `nba_shift_register_same_cycle_read_check` | any | Wave 12 | v0.119.44 (Wave 12) plugin gate. |
 | `nda_diff_scan_check` | any | — | NDA guard for a PR's DIFF CONTENT (added lines + added/renamed file PATHS), across the WHOLE change-set. |
@@ -1567,7 +1568,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1486 programs)
+### `any` (1487 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2453,6 +2454,7 @@ _(no programs in this group)_
 - `mpw_precheck_result_gate` — mpw_precheck RESULT parser gate (TAPEOUT-SIGNOFF P0#2, parser half).
 - `mux_compare_synth` — a DETERMINISTIC solver for the CVDP MULTIPLEXER / DEMUX  +  COMPARATOR / MIN-MAX family.
 - `mux_synth` — deterministic SOLVER for the MULTIPLEXER family (spec -> RTL).
+- `native_flow_results` — Read one native LibreLane run through the shared CSV mapping, without rejudging metrics.
 - `nba_addr_read_race_check` — FSM consuming addressed data without pipelining.
 - `nba_shift_register_same_cycle_read_check` — v0.119.44 (Wave 12) plugin gate.  _[Wave 12]_
 - `nda_diff_scan_check` — NDA guard for a PR's DIFF CONTENT (added lines + added/renamed file PATHS), across the WHOLE change-set.
