@@ -162,6 +162,35 @@ def test_step_invokes_the_contract_driven_emitter(tmp_path):
     assert "arith_declaration_emit.py" in body
 
 
+def test_normal_step_emits_contract_carried_only_by_generated_l_doc(tmp_path):
+    """The normal runner entry consumes the canonical generated-L-doc seam."""
+    project = tmp_path / "generated-contract"
+    out = project / "phase1/generated_docs"
+    out.mkdir(parents=True)
+    evidence = """The Plugin MUST declare `plugin_output/declaration.json`:
+
+| Field | Required | Example |
+|---|---|---|
+| `neutral_mode` | Yes | `\"stable_01\"` (primary) |
+"""
+    (out / "L9_INTEGRATION_SPEC.json").write_text(json.dumps({
+        "schema_version": 2,
+        "integration": {"build_declaration": [{"evidence": evidence}]},
+    }))
+
+    row = _load("design_one_shot_runner").step_arith_declaration_emit(project)
+
+    assert row.status == "PASS", row.detail
+    declaration = json.loads(
+        (project / "plugin_output/declaration.json").read_text())
+    assert declaration == {"neutral_mode": "stable_01"}
+    provenance = json.loads(
+        (project / "plugin_output/declaration.provenance.json").read_text())
+    source = provenance["fields"]["neutral_mode"]["provenance_detail"]
+    assert ("L9_INTEGRATION_SPEC.json#/integration/build_declaration/0/evidence"
+            in source)
+
+
 # #3233: absence of a generic declaration contract does not identify an
 # arithmetic top. These sources deliberately have no RTL: applicability must
 # come from the native top classification, while an arithmetic top still owes
