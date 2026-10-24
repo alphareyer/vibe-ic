@@ -2138,6 +2138,11 @@ def _recover_retained_finished_promotion(
         raise ValueError("retained promotion has no unique repair State")
     state_path = _resume_host_path(project, ctx, state_rows[0])
     state = _load(state_path)
+    route_metrics = state.get("metrics") or {}
+    unrouted_added = route_metrics.get("vibeic__prr__unrouted__added")
+    if not isinstance(unrouted_added, int) or isinstance(unrouted_added, bool) \
+            or unrouted_added < 0:
+        raise ValueError("retained repair State has no measured unrouted_added")
     sta_folder = state_path.parent.parent / "04-openroad-stapostpnr"
     sta_state = sta_folder / "state_out.json"
     summary = summarize(_load(sta_state).get("metrics") or {}, ctx["corners"])
@@ -2159,6 +2164,7 @@ def _recover_retained_finished_promotion(
         **summary,
         "antenna_nets": antenna["antenna__violating__nets"],
         "antenna_pins": antenna["antenna__violating__pins"],
+        "unrouted_added": unrouted_added,
         "antenna_state": str(antenna_folder / "state_out.json"),
     }
     iteration = ((decision.get("run") or {}).get("iterations") or [{}])[0]

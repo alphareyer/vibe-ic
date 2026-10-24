@@ -2659,7 +2659,10 @@ def _finished_readback_fixture(tmp_path):
     repair_state, repair_receipt = receipt(
         repair, prr.REPAIR_STEP,
         {'sdc': str(sdc), 'def': str(live_def), 'nl': str(live_nl),
-         'odb': str(odb)})
+         'odb': str(odb), 'metrics': {
+             'vibeic__prr__before__unrouted__count': 0,
+             'vibeic__prr__after__unrouted__count': 0,
+             'vibeic__prr__unrouted__added': 0}})
     chain = [(repair_state, repair_receipt)]
     for name, step in zip(('02-openroad-checkantennas', '03-openroad-rcx',
                            '04-openroad-stapostpnr'), prr.MEASURE_STEPS):
@@ -2796,9 +2799,34 @@ def test_finished_candidate_readback_recovers_displaced_normal_metadata(
     assert observed == 'PASS'
     assert report['adopted'] == '32-cand09'
     assert report['final']['drv_count'] == 0
+    assert report['final']['unrouted_added'] == 0
     assert report['candidate_finishing']['drc'] == 'PASS'
     assert report['candidate_finishing']['lvs'] == 'PASS'
     assert report['retained_promotion_readback']['ready_record_sha256']
+
+
+def test_finished_candidate_recovery_refuses_missing_route_census(
+        tmp_path, monkeypatch):
+    project, _report, _ready, _finished = _finished_readback_fixture(tmp_path)
+    _displace_finished_readback(project)
+    _stub_recovery_judges(monkeypatch)
+    state_path = (project / 'phase3/librelane/32-cand09' /
+                  '01-vibeic-postrouterepair/state_out.json')
+    state = json.loads(state_path.read_text())
+    state['metrics'].pop('vibeic__prr__unrouted__added')
+    put(state_path, state)
+    ready_path = (project / prr.ARM_REL / 'candidate_continuations' /
+                  'lane-04/ready.json')
+    ready = json.loads(ready_path.read_text())
+    ready['repair_state_sha256'] = contract.digest(state_path)
+    ready['sealed_inputs'][str(state_path)] = contract.digest(state_path)
+    put(ready_path, ready)
+    decision_path = ready_path.with_name('decision.json')
+    decision = json.loads(decision_path.read_text())
+    decision['ready_record_sha256'] = contract.digest(ready_path)
+    put(decision_path, decision)
+    with pytest.raises(contract.Refusal, match='no measured unrouted_added'):
+        prr.retained_finished_candidate_readback(project)
 
 
 def test_normal_frontdoor_reenters_retained_promotion_without_actuator(
