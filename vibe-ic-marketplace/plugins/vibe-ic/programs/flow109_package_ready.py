@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Mapping
 
@@ -73,6 +74,11 @@ def operation_sources() -> dict[str, str]:
         "provider_bond_pad_edge.py",
         "perc_signoff_check.py",
         "dft_atpg_coverage_check.py",
+        "execution_adapters_backend.py",
+        "_opensta_current.py",
+        "librelane_postroute.py",
+        "librelane_contract.py",
+        "librelane_signoff_evidence.py",
     )
     return {"programs/" + name: _sha(HERE / name) for name in names}
 
@@ -318,6 +324,148 @@ def _tech_lef(project: Path) -> Path:
     return selected.path
 
 
+def _current_native_geometry(project: Path, io_lefs: list[Path]) -> dict | None:
+    """Bind D75 geometry to the already-adopted native STA checkpoint."""
+    import fnmatch
+    import execution_adapters_backend as backend
+    import librelane_contract as contract
+    import librelane_ir_antenna as ir
+    import librelane_postroute as postroute
+
+    if not (project / ir.CURRENT_STA_RECORD).is_file():
+        return None
+    try:
+        selected = backend._default_step24_current_subject(
+            project, execution_mode="default")
+        if selected is None:
+            raise ValueError("current-owner record did not select a native subject")
+        folder, state = postroute.stapostpnr_state(project)
+        receipt = contract.validate_step_receipt(folder, "OpenROAD.STAPostPNR")
+        config_path = folder / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        fingerprint = receipt["input"]["config_files"]
+        state_fingerprint = receipt["input"]["state_files"]
+        if not isinstance(fingerprint, Mapping) or not isinstance(state_fingerprint, Mapping):
+            raise ValueError("native config/state fingerprints are malformed")
+        views = selected.get("views")
+        if not isinstance(views, Mapping):
+            raise ValueError("current native selector returned no views")
+
+        def selected_view(name: str, state_name: str) -> Path:
+            path = Path(views.get(name) or "").resolve(strict=True)
+            raw = Path(state.get(state_name) or "")
+            state_path = (raw if raw.is_absolute() else project / raw).resolve(strict=True)
+            recorded = (state_fingerprint.get(str(raw))
+                        or state_fingerprint.get(str(project / raw))
+                        or state_fingerprint.get(str(state_path)))
+            if path != state_path or not path.is_file() or recorded != _sha(path):
+                raise ValueError(f"selected {name} is not the executed current view")
+            return path
+
+        current_def = selected_view("def", "def")
+        current_odb = selected_view("odb", "odb")
+        root_record = json.loads((folder / "pdk_root.json").read_text(encoding="utf-8"))
+        mounts = (root_record.get("requested_mounts")
+                  if root_record.get("execution_route") == "LOCAL"
+                  else root_record.get("mounts_under_it"))
+        if not isinstance(mounts, list) or not mounts:
+            raise ValueError("native PDK mount authority is absent")
+
+        def host_path(raw: str) -> Path:
+            named = Path(raw)
+            matches = []
+            for row in mounts:
+                if not isinstance(row, list) or len(row) != 2:
+                    raise ValueError("native PDK mount authority is malformed")
+                host, guest = Path(row[0]), Path(row[1])
+                if named == guest or named.is_relative_to(guest):
+                    matches.append(host / named.relative_to(guest))
+            if matches and len({path.resolve() for path in matches}) != 1:
+                raise ValueError(f"ambiguous native path mapping: {raw}")
+            path = matches[0] if matches else (named if named.is_absolute()
+                                                else project / named)
+            return path.resolve(strict=True)
+
+        def bound_config_file(raw: str, kind: str) -> tuple[Path, dict]:
+            if not isinstance(raw, str) or not raw:
+                raise ValueError(f"empty {kind} path")
+            path = host_path(raw)
+            recorded = fingerprint.get(raw) or fingerprint.get(str(path))
+            if not path.is_file() or recorded != _sha(path):
+                raise ValueError(f"{kind} is absent, changed, or not config-bound: {raw}")
+            return path, _record(project, path)
+
+        tech_lefs = config.get("TECH_LEFS")
+        corner = config.get("DEFAULT_CORNER")
+        if (not isinstance(tech_lefs, Mapping) or not tech_lefs
+                or not isinstance(corner, str) or not corner):
+            raise ValueError("current TECH_LEFS/default corner is undeclared")
+        matches = [pattern for pattern in tech_lefs
+                   if isinstance(pattern, str) and fnmatch.fnmatch(corner, pattern)]
+        if len(matches) != 1:
+            raise ValueError(
+                f"current TECH_LEF selection is ambiguous for {corner!r}: {matches}")
+        tech_records, tech_paths = {}, {}
+        for pattern, raw in tech_lefs.items():
+            path, record = bound_config_file(raw, f"TECH_LEFS[{pattern!r}]")
+            tech_paths[pattern], tech_records[pattern] = path, record
+        tech = tech_paths[matches[0]]
+        text = tech.read_text(encoding="utf-8", errors="strict")
+        units = re.findall(r"(?is)\bDATABASE\s+MICRONS\s+(\d+)\s*;", text)
+        routing_layers = re.findall(
+            r"(?is)\bLAYER\s+(\S+)\s+(?:(?!\bEND\s+\1\b).)*?\bTYPE\s+ROUTING\s*;",
+            text)
+        if len(units) != 1 or int(units[0]) <= 0 or not routing_layers:
+            raise ValueError("selected current TECH_LEF has no unique units/routing semantics")
+
+        pad_config = config.get("PAD_LEFS")
+        if not isinstance(pad_config, list) or not pad_config:
+            raise ValueError("current PAD_LEFS are undeclared")
+        configured_pad_paths = {
+            bound_config_file(raw, "PAD_LEFS")[0]: raw for raw in pad_config}
+        for path in io_lefs:
+            if path.resolve() not in configured_pad_paths:
+                raise ValueError(f"IO LEF is not selected by current PAD_LEFS: {path}")
+            bound_config_file(configured_pad_paths[path.resolve()], "PAD_LEFS")
+
+        inputs = [_record(project, current_def), _record(project, current_odb),
+                  _record(project, config_path), _record(project, folder / "state_out.json"),
+                  _record(project, folder / "vibeic_receipt.json"),
+                  _record(project, folder / "pdk_root.json"),
+                  _record(project, project / ir.CURRENT_STA_RECORD)]
+        provenance = project / "phase3/librelane_pdk_root.provenance.json"
+        if provenance.is_file():
+            inputs.append(_record(project, provenance))
+        inputs.extend(tech_records.values())
+        for rel in selected.get("inputs") or ():
+            record = _record(project, Path(rel))
+            if record not in inputs:
+                inputs.append(record)
+        return {
+            "def": current_def, "odb": current_odb, "tech": tech,
+            "inputs": inputs,
+            "detail": {
+                "source": "current validated OpenROAD.STAPostPNR state",
+                "top": selected.get("top"),
+                "def": _record(project, current_def),
+                "odb": _record(project, current_odb),
+                "config": _record(project, config_path),
+                "receipt": _record(project, folder / "vibeic_receipt.json"),
+                "pdk_root": _record(project, folder / "pdk_root.json"),
+                "tool_image": receipt["input"].get("image"),
+                "default_corner": corner,
+                "selected_tech_pattern": matches[0],
+                "selected_tech_lef": tech_records[matches[0]],
+                "tech_lefs": tech_records,
+                "database_microns": int(units[0]),
+                "routing_layers": sorted(set(routing_layers)),
+            },
+        }
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError,
+            contract.Refusal) as exc:
+        raise D75Refusal("D75_CURRENT_NATIVE_GEOMETRY_UNBOUND", str(exc)) from exc
+
+
 def _check(name: str, status: str, detail: object, **extra) -> dict:
     return {"check": name, "status": status, "detail": detail, **extra}
 
@@ -469,8 +617,17 @@ def execute(project: Path, context: Mapping) -> dict:
         io_lefs = _io_lefs(project, io)
         inputs.extend(_record(project, path) for path in io_lefs)
 
-        def_path = project / PAD_DEF
-        inputs.append(_record(project, def_path))
+        current_geometry = _current_native_geometry(project, io_lefs)
+        if current_geometry is None:
+            def_path = project / PAD_DEF
+            tech = _tech_lef(project)
+            inputs.extend((_record(project, def_path), _record(project, tech)))
+        else:
+            def_path = current_geometry["def"]
+            tech = current_geometry["tech"]
+            inputs.extend(current_geometry["inputs"])
+            checks.append(_check("current_native_geometry_authority", "PASS",
+                                 current_geometry["detail"]))
         side = pad_side_constraint_check.check(project, def_path)
         if side.get("verdict") == "FAIL":
             checks.append(_check("pad_side_constraint_check", "FAIL", side))
@@ -479,8 +636,6 @@ def execute(project: Path, context: Mapping) -> dict:
         else:
             checks.append(_check("pad_side_constraint_check", "PASS", side))
 
-        tech = _tech_lef(project)
-        inputs.append(_record(project, tech))
         rc, pads = pad_bterm_coincidence_check.run(
             def_path.read_text(errors="replace"),
             tech.read_text(errors="replace"), io_lefs)

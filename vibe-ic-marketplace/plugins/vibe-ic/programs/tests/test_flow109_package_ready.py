@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import copy
+import hashlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -177,6 +178,77 @@ END DESIGN
     return project
 
 
+def _current_native_authority(project: Path, monkeypatch):
+    """Neutral retained STAPostPNR authority; it runs no EDA producer."""
+    import execution_adapters_backend as backend
+
+    folder = project / "phase3/librelane/neutral/01-openroad-stapostpnr"
+    old_def = project / D75.PAD_DEF
+    current_def = folder / "chip_top.def"
+    current_odb = folder / "chip_top.odb"
+    _write(current_def, old_def.read_text())
+    _write(current_odb, "neutral adopted ODB bytes\n")
+    netlist = folder / "chip_top.v"
+    sdc = folder / "chip_top.sdc"
+    spef = folder / "chip_top.nom.spef"
+    _write(netlist, "module chip_top; endmodule\n")
+    _write(sdc, "set_propagated_clock [all_clocks]\n")
+    _write(spef, "*SPEF neutral\n")
+    tech = project / "input/pdk/tech.tlef"
+    io_lef = project / "input/pdk/io.lef"
+    config = {
+        "DESIGN_NAME": "chip_top", "DEFAULT_CORNER": "nom_tt",
+        "TECH_LEFS": {"nom_*": str(tech)}, "PAD_LEFS": [str(io_lef)],
+    }
+    _write(folder / "config.json", config)
+    state = {"odb": str(current_odb), "def": str(current_def),
+             "nl": str(netlist), "sdc": str(sdc),
+             "spef": {"nom_*": str(spef)}, "metrics": {}}
+    _write(folder / "state_out.json", state)
+    _write(folder / "pdk_root.json", {
+        "stated_by": "run_chain(pdk_root=...)", "execution_route": "docker",
+        "cli_pdk_root": "/pdk", "mounts_under_it": [
+            [str(project / "input/pdk"), str(project / "input/pdk")]],
+    })
+    _write(folder / "invocation.log", "neutral retained producer invocation\n")
+
+    def rebind():
+        fp = {
+            "step": "OpenROAD.STAPostPNR",
+            "image": "ghcr.io/vibeic/vibeic-eda@sha256:" + "0" * 64,
+            "state_files": {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                            for path in (current_odb, current_def, netlist, sdc, spef)},
+            "config_files": {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                             for path in (tech, io_lef)},
+        }
+        _write(folder / "input_fingerprint.json", fp)
+        names = ["state_out.json", "config.json", "input_fingerprint.json",
+                 "pdk_root.json", "invocation.log", "chip_top.odb", "chip_top.def",
+                 "chip_top.v", "chip_top.sdc", "chip_top.nom.spef"]
+        receipt = {"input": fp, "sha256": {
+            name: hashlib.sha256((folder / name).read_bytes()).hexdigest()
+            for name in names}}
+        _write(folder / "vibeic_receipt.json", receipt)
+        _write(project / "reports/phase3/sta_postpnr_signoff.json", {
+            "sta_state": str(folder / "state_out.json"),
+            "sta_state_sha256": hashlib.sha256(
+                (folder / "state_out.json").read_bytes()).hexdigest(),
+        })
+
+    rebind()
+    selected = {
+        "top": "chip_top", "views": {"odb": current_odb.resolve(),
+            "def": current_def.resolve(), "netlist": netlist.resolve(),
+            "sdc": sdc.resolve(), "spef": spef.resolve()},
+        "inputs": (), "transport": None,
+    }
+    monkeypatch.setattr(backend, "_default_step24_current_subject",
+                        lambda *_a, **_k: selected)
+    return {"folder": folder, "def": current_def, "odb": current_odb,
+            "tech": tech, "old_def": old_def, "selected": selected,
+            "rebind": rebind}
+
+
 def _by_name(result, name):
     return next(check for check in result["checks"] if check["check"] == name)
 
@@ -222,6 +294,62 @@ def test_bare_die_positive_runs_actual_consumers_but_not_whole_flow(tmp_path):
     assert result["delivery_accepted"] is False
     assert result["inputs"] and all(item["sha256"] for item in result["inputs"])
     D75.validate(project, result)
+
+
+def test_current_native_geometry_and_tech_are_consumed_not_legacy_padring(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    authority = _current_native_authority(project, monkeypatch)
+    authority["old_def"].unlink()
+    result = D75.execute(project, _context(project))
+    assert result["component_status"] == "PASS", result
+    current = _by_name(result, "current_native_geometry_authority")
+    assert current["status"] == "PASS"
+    assert current["detail"]["def"]["sha256"] == hashlib.sha256(
+        authority["def"].read_bytes()).hexdigest()
+    assert current["detail"]["odb"]["sha256"] == hashlib.sha256(
+        authority["odb"].read_bytes()).hexdigest()
+    assert current["detail"]["selected_tech_pattern"] == "nom_*"
+    assert current["detail"]["database_microns"] == 2000
+    assert current["detail"]["routing_layers"] == ["Metal5"]
+
+
+def test_current_native_missing_stale_and_wrong_source_refuse(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    authority = _current_native_authority(project, monkeypatch)
+    original = authority["tech"].read_bytes()
+    authority["tech"].write_bytes(original + b"\nchanged after native receipt\n")
+    stale = D75.execute(project, _context(project))
+    assert stale["component_status"] == "NOT_MEASURED", stale
+    assert stale["reason"] == "D75_CURRENT_NATIVE_GEOMETRY_UNBOUND"
+    authority["tech"].write_bytes(original)
+    restored = D75.execute(project, _context(project))
+    assert restored["component_status"] == "PASS", restored
+
+    authority["tech"].unlink()
+    missing = D75.execute(project, _context(project))
+    assert missing["component_status"] == "NOT_MEASURED", missing
+    assert missing["reason"] == "D75_CURRENT_NATIVE_GEOMETRY_UNBOUND"
+    authority["tech"].write_bytes(original)
+
+    authority["selected"]["views"]["def"] = authority["old_def"].resolve()
+    wrong = D75.execute(project, _context(project))
+    assert wrong["component_status"] == "NOT_MEASURED", wrong
+    assert wrong["reason"] == "D75_CURRENT_NATIVE_GEOMETRY_UNBOUND"
+
+
+def test_current_native_wrong_geometry_remains_a_real_failure(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    authority = _current_native_authority(project, monkeypatch)
+    authority["def"].write_text(authority["def"].read_text().replace(
+        "+ PLACED ( 1820000 640000 ) N ;",
+        "+ PLACED ( 1000000 640000 ) N ;"))
+    authority["rebind"]()
+    result = D75.execute(project, _context(project))
+    assert result["component_status"] == "FAIL", result
+    assert _by_name(result, "current_native_geometry_authority")["status"] == "PASS"
+    assert _by_name(result, "pad_bterm_coincidence_check")["status"] == "FAIL"
 
 
 def test_validated_self_tapeout_does_not_require_a_provider(tmp_path):
