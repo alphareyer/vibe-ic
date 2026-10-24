@@ -2089,6 +2089,136 @@ def _run_finished_candidate_controller(project: Path, record: Path, *,
             base_ctl.controller_id).to_record()
 
 
+def _recover_retained_finished_promotion(
+        project: Path, report: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Read one sealed promotion after a failed normal entry replaced metadata.
+
+    The normal entry may replace ``current.json``, the candidate ledger and the
+    report before it notices that the old input route still has a DRV.  That is
+    not authority to replay a candidate whose finishing controller already
+    promoted it.  Recovery is read-only and is admitted only for that exact
+    failed-baseline shape and one complete retained promotion decision.
+    """
+    import librelane_contract as _ll
+
+    impl = project / ARM_REL / IMPL_DIR
+    ctx = _load(impl / CONTEXT)
+    live_current = _load(impl / CURRENT)
+    if not (report.get("code") == "LL_PRR_DRV_VIOLATION"
+            and report.get("adopted") is None
+            and live_current.get("candidate") is None
+            and report.get("final") == live_current.get("measurement")):
+        return None
+    promoted = []
+    root = project / ARM_REL / "candidate_continuations"
+    for decision_path in sorted(root.glob("*/decision.json")):
+        decision = _load(decision_path)
+        if (decision.get("schema") ==
+                "vibeic.prr.candidate_finishing_decision.v1"
+                and decision.get("decision") == "PROMOTED"
+                and decision.get("adopted") == decision.get("candidate")):
+            promoted.append((decision_path, decision))
+    if not promoted:
+        return None
+    if len(promoted) != 1:
+        raise _ll.Refusal("LL_PRR_FINISHED_READBACK_AMBIGUOUS",
+                          f"{len(promoted)} retained promotions")
+    decision_path, decision = promoted[0]
+    record = _resume_host_path(project, ctx, decision["ready_record"])
+    ready = _load(record)
+    if (decision_path != record.with_name("decision.json")
+            or decision.get("ready_record_sha256") != _ll.digest(record)
+            or ready.get("candidate") != decision.get("candidate")):
+        raise ValueError("retained promotion decision does not own its READY record")
+    sealed = ready.get("sealed_inputs") or {}
+    state_rows = [raw for raw, sha in sealed.items()
+                  if sha == ready.get("repair_state_sha256")
+                  and raw.endswith("/01-vibeic-postrouterepair/state_out.json")]
+    if len(state_rows) != 1:
+        raise ValueError("retained promotion has no unique repair State")
+    state_path = _resume_host_path(project, ctx, state_rows[0])
+    state = _load(state_path)
+    sta_folder = state_path.parent.parent / "04-openroad-stapostpnr"
+    sta_state = sta_folder / "state_out.json"
+    summary = summarize(_load(sta_state).get("metrics") or {}, ctx["corners"])
+    pin_census = drv_pin_census(
+        sta_folder, summary, ctx["corners"],
+        classifier=_drv_classifier(ctx, sta_folder))
+    summary.update(pin_census)
+    summary["drv_count"] = (len(pin_census["drv_pin_checks"])
+                            if pin_census["drv_pin_checks_state"] == "PASS"
+                            else None)
+    summary["drv_members"] = pin_census["drv_pin_checks"]
+    summary["drv_members_reason"] = "; ".join(
+        pin_census["drv_pin_checks_missing"])
+    antenna_folder = state_path.parent.parent / "02-openroad-checkantennas"
+    antenna = antenna_census(antenna_folder)
+    measurement = {
+        "sta_state": str(sta_state),
+        "sta_state_sha256": _ll.digest(sta_state),
+        **summary,
+        "antenna_nets": antenna["antenna__violating__nets"],
+        "antenna_pins": antenna["antenna__violating__pins"],
+        "antenna_state": str(antenna_folder / "state_out.json"),
+    }
+    iteration = ((decision.get("run") or {}).get("iterations") or [{}])[0]
+    measured = iteration.get("measurements") or {}
+    observed = {
+        "timing.setup": (round(measurement["setup_ws_min"], 6)
+                         if isinstance(measurement.get("setup_ws_min"), float)
+                         else measurement.get("setup_ws_min")),
+        "timing.hold": (round(measurement["hold_ws_min"], 6)
+                        if isinstance(measurement.get("hold_ws_min"), float)
+                        else measurement.get("hold_ws_min")),
+        "timing.drv": measurement.get("drv_count"),
+        "antenna.violations": measurement.get("antenna_nets"),
+    }
+    for domain, value in observed.items():
+        row = measured.get(domain) or {}
+        if row.get("status") != "MEASURED" or row.get("value") != value:
+            raise ValueError(f"retained controller {domain} differs: {value!r}")
+    host_ctx = dict(ctx)
+    host_ctx["project"] = str(project)
+    host_ctx["configs"] = {
+        key: str(_resume_host_path(project, ctx, value))
+        for key, value in (ctx.get("configs") or {}).items()}
+    ownership = supply_ownership(host_ctx, _resume_host_path(project, ctx, state["def"]))
+    if ownership.get("verdict") != "PASS":
+        raise ValueError(f"retained supply ownership is {ownership.get('verdict')!r}")
+    candidate = ready["candidate"]
+    recovered = dict(report)
+    recovered.pop("code", None)
+    recovered.pop("reason", None)
+    recovered.update(
+        verdict="PASS", adopted=candidate, adopted_state=str(state_path),
+        final=measurement, corners=list(ctx["corners"]),
+        final_antenna=measurement["antenna_nets"],
+        final_supply_ownership=ownership, drv_signoff_verdict="PASS",
+        drv_signoff={"verdict": "PASS", "violations": 0,
+                     "basis": "retained STAPostPNR complete pin/check census"},
+        candidate_finishing={
+            "verdict": "PASS", "candidate": candidate,
+            "finished_gds": ready["finished_gds"],
+            "finished_gds_sha256": ready["finished_gds_sha256"],
+            "density": 0, "drc": (ready.get("pv") or {}).get("drc", {}).get("verdict"),
+            "lvs": (ready.get("pv") or {}).get("lvs", {}).get("verdict"),
+            "final_electrical": "MEASURED"},
+        retained_promotion_readback={
+            "ready_record": str(record), "ready_record_sha256": _ll.digest(record),
+            "decision_record": str(decision_path),
+            "decision_record_sha256": _ll.digest(decision_path),
+            "displaced_normal_report_sha256": _ll.digest(project / REPORT_REL)})
+    current = {
+        "candidate": candidate, "repair_state": str(state_path),
+        "repair_folder": str(state_path.parent), "measurement": measurement,
+        "supply_ownership": ownership, "finishing_record": str(record),
+        "finished_gds": ready["finished_gds"],
+        "finished_gds_sha256": ready["finished_gds_sha256"]}
+    return {"report": recovered, "current": current, "ctx": ctx,
+            "record": record, "ready": ready, "decision": decision,
+            "recovered": True}
+
+
 def retained_finished_candidate_readback(project: Path) -> Optional[Dict[str, Any]]:
     """Return one fully sealed finishing promotion without rerunning repair.
 
@@ -2111,8 +2241,13 @@ def retained_finished_candidate_readback(project: Path) -> Optional[Dict[str, An
     try:
         report = _load(report_path)
         finishing = report.get("candidate_finishing")
+        recovery = None
         if not isinstance(finishing, dict):
-            return None
+            recovery = _recover_retained_finished_promotion(project, report)
+            if recovery is None:
+                return None
+            report = recovery["report"]
+            finishing = report["candidate_finishing"]
         if finishing.get("verdict") != "PASS":
             raise _ll.Refusal(
                 "LL_PRR_FINISHED_READBACK_FAILED",
@@ -2120,8 +2255,8 @@ def retained_finished_candidate_readback(project: Path) -> Optional[Dict[str, An
 
         impl = project / ARM_REL / IMPL_DIR
         current_path = impl / CURRENT
-        current = _load(current_path)
-        ctx = _load(impl / CONTEXT)
+        current = recovery["current"] if recovery else _load(current_path)
+        ctx = recovery["ctx"] if recovery else _load(impl / CONTEXT)
         candidate = finishing.get("candidate")
         if (not isinstance(candidate, str) or not candidate
                 or report.get("verdict") != "PASS"
@@ -2144,10 +2279,11 @@ def retained_finished_candidate_readback(project: Path) -> Optional[Dict[str, An
         if (current.get("supply_ownership") or {}).get("verdict") != "PASS":
             raise ValueError("retained supply ownership did not pass")
 
-        record = _resume_host_path(project, ctx, current["finishing_record"])
-        ready = _load(record)
+        record = (recovery["record"] if recovery else
+                  _resume_host_path(project, ctx, current["finishing_record"]))
+        ready = recovery["ready"] if recovery else _load(record)
         decision_path = record.with_name("decision.json")
-        decision = _load(decision_path)
+        decision = recovery["decision"] if recovery else _load(decision_path)
         if (ready.get("schema") != "vibeic.prr.candidate_finishing.v1"
                 or ready.get("verdict") != "READY_FOR_CONTROLLER"
                 or ready.get("candidate") != candidate
@@ -2159,12 +2295,13 @@ def retained_finished_candidate_readback(project: Path) -> Optional[Dict[str, An
                 or decision.get("adopted") != candidate
                 or (decision.get("run") or {}).get("outcome") != "CONVERGED"
                 or decision.get("ready_record_sha256") != _ll.digest(record)
-                or decision.get("current_after_sha256") != _ll.digest(current_path)
+                or (not recovery and decision.get("current_after_sha256") !=
+                    _ll.digest(current_path))
                 or _resume_host_path(project, ctx,
                                      decision.get("ready_record", "")) != record):
             raise ValueError("finishing controller ownership is absent or stale")
         ledger = project / ARM_REL / LEDGER
-        if ready.get("ledger_sha256") != _ll.digest(ledger):
+        if not recovery and ready.get("ledger_sha256") != _ll.digest(ledger):
             raise ValueError("candidate ledger changed after finishing authority")
 
         finished_gds = _resume_host_path(project, ctx, ready["finished_gds"])

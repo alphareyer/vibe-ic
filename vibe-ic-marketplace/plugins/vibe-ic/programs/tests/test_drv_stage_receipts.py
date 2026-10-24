@@ -1337,8 +1337,11 @@ def test_bounded_step32_refreshes_retained_census_before_native_consumer(tmp_pat
     from types import SimpleNamespace
     import execution_backend_producers as backend
     calls = []
-    runner = SimpleNamespace(step_postroute_repair_librelane=lambda *_: (
-        calls.append('step32') or SimpleNamespace(status='FAIL', detail='real design failure')))
+    runner = SimpleNamespace(
+        step_postroute_repair_librelane=lambda *_: (
+            calls.append('step32') or
+            SimpleNamespace(status='FAIL', detail='real design failure')),
+        _step32_producer_receipt=lambda *_: None)
     monkeypatch.setattr(backend, '_parameters', lambda *_: (runner, ll, object(), 'unused'))
     monkeypatch.setattr(backend, '_retained_synth_census', lambda *_: calls.append('retained_census'))
     result = backend.produce_signoff(tmp_path, {

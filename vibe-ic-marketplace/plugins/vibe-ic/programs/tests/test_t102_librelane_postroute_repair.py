@@ -2638,7 +2638,11 @@ def _finished_readback_fixture(tmp_path):
     live_def = write(pnr / 'routed.def', 'VERSION 5.8 ;\nDESIGN neutral ;\nEND DESIGN\n')
     live_nl = write(pnr / 'neutral_pnr.v', 'module neutral; endmodule\n')
     sdc = write(pnr / 'constraint.sdc', 'set_units -time ns\n')
-    put(impl / prr.CONTEXT, {'project': str(project), 'mounts': []})
+    put(impl / prr.CONTEXT, {
+        'project': str(project), 'mounts': [], 'corners': ['neutral_corner'],
+        'configs': {prr.REPAIR_STEP: str(tmp_path / 'neutral-config.json')}})
+    put(tmp_path / 'neutral-config.json', {})
+    odb = write(tmp_path / 'neutral.odb', 'neutral database\n')
 
     def receipt(folder, step, state_extra=None):
         state = put(folder / 'state_out.json', {'metrics': {}, **(state_extra or {})})
@@ -2652,12 +2656,25 @@ def _finished_readback_fixture(tmp_path):
         return state, rec
 
     repair = project / 'phase3/librelane/32-cand09/01-vibeic-postrouterepair'
-    repair_state, repair_receipt = receipt(repair, prr.REPAIR_STEP,
-                                           {'sdc': str(sdc)})
+    repair_state, repair_receipt = receipt(
+        repair, prr.REPAIR_STEP,
+        {'sdc': str(sdc), 'def': str(live_def), 'nl': str(live_nl),
+         'odb': str(odb)})
     chain = [(repair_state, repair_receipt)]
     for name, step in zip(('02-openroad-checkantennas', '03-openroad-rcx',
                            '04-openroad-stapostpnr'), prr.MEASURE_STEPS):
-        chain.append(receipt(repair.parent / name, step))
+        extra = None
+        if step == 'OpenROAD.CheckAntennas':
+            extra = {'metrics': {'antenna__violating__nets': 0,
+                                 'antenna__violating__pins': 0}}
+        elif step == 'OpenROAD.STAPostPNR':
+            extra = {'metrics': {
+                'timing__setup__ws__corner:neutral_corner': 0.1,
+                'timing__hold__ws__corner:neutral_corner': 0.2,
+                'design__max_slew_violation__count__corner:neutral_corner': 0,
+                'design__max_cap_violation__count__corner:neutral_corner': 0,
+                'design__max_fanout_violation__count__corner:neutral_corner': 0}}
+        chain.append(receipt(repair.parent / name, step, extra))
 
     finished = write(tmp_path / 'neutral.topped.gds', 'neutral finished geometry\n')
     def_sha = contract.digest(live_def)
@@ -2705,6 +2722,7 @@ def _finished_readback_fixture(tmp_path):
         'schema': 'vibeic.prr.candidate_finishing.v1',
         'verdict': 'READY_FOR_CONTROLLER', 'candidate': '32-cand09',
         'lane': 'lane-04', 'ledger_sha256': contract.digest(ledger),
+        'repair_state_sha256': contract.digest(repair_state),
         'sealed_inputs': sealed, 'finished_gds': str(finished),
         'finished_gds_sha256': gds_sha,
         'current_freshness': {'live_def_sha256': def_sha,
@@ -2721,7 +2739,13 @@ def _finished_readback_fixture(tmp_path):
     decision = {
         'schema': 'vibeic.prr.candidate_finishing_decision.v1',
         'candidate': '32-cand09', 'lane': 'lane-04', 'decision': 'PROMOTED',
-        'adopted': '32-cand09', 'run': {'outcome': 'CONVERGED'},
+        'adopted': '32-cand09', 'run': {
+            'outcome': 'CONVERGED', 'iterations': [{
+                'decision': 'PROMOTED', 'measurements': {
+                    'timing.setup': {'status': 'MEASURED', 'value': 0.1},
+                    'timing.hold': {'status': 'MEASURED', 'value': 0.2},
+                    'timing.drv': {'status': 'MEASURED', 'value': 0},
+                    'antenna.violations': {'status': 'MEASURED', 'value': 0}}}]},
         'ready_record': str(ready_path),
         'ready_record_sha256': contract.digest(ready_path),
         'current_after_sha256': contract.digest(current_path)}
@@ -2739,6 +2763,68 @@ def _finished_readback_fixture(tmp_path):
 def test_finished_candidate_readback_requires_full_owned_promotion(tmp_path):
     project, report, _ready, _finished = _finished_readback_fixture(tmp_path)
     assert prr.retained_finished_candidate_readback(project) == report
+
+
+def _displace_finished_readback(project):
+    baseline = {'setup_ws_min': 0.3, 'hold_ws_min': 0.2, 'drv_count': 1,
+                'antenna_nets': 0, 'antenna_pins': 0}
+    put(project / prr.ARM_REL / prr.IMPL_DIR / prr.CURRENT,
+        {'candidate': None, 'measurement': baseline})
+    put(project / prr.ARM_REL / prr.LEDGER, {'candidates': []})
+    put(project / prr.REPORT_REL, {
+        'verdict': 'FAIL', 'code': 'LL_PRR_DRV_VIOLATION',
+        'reason': 'one retained baseline violation', 'adopted': None,
+        'baseline': baseline, 'final': baseline})
+
+
+def _stub_recovery_judges(monkeypatch):
+    monkeypatch.setattr(prr, 'drv_pin_census', lambda *_a, **_k: {
+        'drv_pin_checks_state': 'PASS', 'drv_pin_checks': [],
+        'drv_pin_checks_missing': [], 'drv_pin_checks_excluded': [],
+        'drv_pin_checks_connectivity': None, 'drv_pin_checks_sources': {}})
+    monkeypatch.setattr(prr, 'supply_ownership',
+                        lambda *_a, **_k: {'verdict': 'PASS'})
+
+
+def test_finished_candidate_readback_recovers_displaced_normal_metadata(
+        tmp_path, monkeypatch):
+    project, _report, _ready, _finished = _finished_readback_fixture(tmp_path)
+    _displace_finished_readback(project)
+    _stub_recovery_judges(monkeypatch)
+    report = prr.retained_finished_candidate_readback(project)
+    observed = report['verdict'] if report is not None else 'NO_READBACK'
+    assert observed == 'PASS'
+    assert report['adopted'] == '32-cand09'
+    assert report['final']['drv_count'] == 0
+    assert report['candidate_finishing']['drc'] == 'PASS'
+    assert report['candidate_finishing']['lvs'] == 'PASS'
+    assert report['retained_promotion_readback']['ready_record_sha256']
+
+
+def test_normal_frontdoor_reenters_retained_promotion_without_actuator(
+        tmp_path, monkeypatch):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    project, _report, _ready, _finished = _finished_readback_fixture(tmp_path)
+    _displace_finished_readback(project)
+    _stub_recovery_judges(monkeypatch)
+    put(project / 'phase3/librelane_switch.json', {'steps': {'32': 'librelane'}})
+    monkeypatch.setattr(runner, '_postroute_repair_in_chain',
+                        lambda _project: (None, 'focused recovery control'))
+    monkeypatch.setattr(prr, 'run',
+                        lambda *_a, **_k: pytest.fail('actuator was entered'))
+    observed = SimpleNamespace(status='PASS', detail='retained recovery')
+
+    def result(_project, _pnr, report, _t0, *, handed, top):
+        assert report['retained_promotion_readback']['ready_record_sha256']
+        assert report['final']['drv_count'] == 0
+        assert handed is True and top == 'neutral'
+        return observed
+
+    monkeypatch.setattr(runner, '_postroute_repair_librelane_result', result)
+    answer = runner.step_postroute_repair_librelane(
+        project, 'neutral', SimpleNamespace(name='processA'), 'unused')
+    assert answer.status == 'PASS'
+    assert answer.detail == 'retained recovery'
 
 
 @pytest.mark.parametrize('damage,message', [
