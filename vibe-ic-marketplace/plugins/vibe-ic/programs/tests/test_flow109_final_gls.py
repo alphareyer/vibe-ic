@@ -443,6 +443,8 @@ def test_substrate_actual_native_negative_output_and_annotation_are_preserved(
     corner = record['result']['judge']['corners']['tt']
     if damage == 'functional_output':
         assert 'CASE_FAIL' in corner['reasons']
+        assert corner['cases'][0]['compile_rc'] == 0 and corner['cases'][0]['sim_rc'] == 1
+        assert corner['delays_applied'] == 1 and corner['sdf_errors'] == 0
     else:
         assert 'SDF_NOT_ANNOTATED' in corner['reasons']
     assert not (tmp_path / 'phase3/stage3/sim_postlayout/pass.flag').exists()
@@ -626,3 +628,24 @@ def test_native_case_worker_budget_cannot_expand(workers, tmp_path):
     from types import SimpleNamespace
     with pytest.raises(AdmissionRefusal, match='D71_CASE_WORKERS_INVALID'):
         final_gls.run_native_cases(SimpleNamespace(step_dir=str(tmp_path)), {}, {}, workers=workers)
+
+
+@pytest.mark.parametrize('failure', ['missing_result', 'nonfailure_result', 'infrastructure'])
+def test_native_blocking_exception_without_measured_fail_stays_infrastructure(tmp_path, failure):
+    from types import SimpleNamespace
+    from librelane.state import DesignFormat
+    from librelane.steps import StepError
+    def native(child, state):
+        folder = Path(child.step_dir)
+        (folder / 'gls_runs.json').write_text(json.dumps({'runs': [{
+            'corner': 'tt', 'case': 'functional', 'compile_rc': 0, 'sim_rc': 1}]}))
+        if failure != 'missing_result':
+            (folder / 'gls_results.json').write_text(json.dumps(
+                {'verdict': 'PASS' if failure == 'nonfailure_result' else 'FAIL'}))
+        raise RuntimeError('actual infrastructure failure') if failure == 'infrastructure' else StepError('blocked')
+    step = SimpleNamespace(step_dir=str(tmp_path), config={'VIBEIC_GLS_MANIFEST': 'full.json'},
+                           _run=lambda *args, **kwargs: 0)
+    rows = final_gls.run_native_cases(step, {DesignFormat.NETLIST: 'actual.v',
+        DesignFormat.SDF: {'tt': 'tt.sdf'}}, {'cases': [{'id': 'functional'}]}, native_run=native)
+    assert rows[0]['compile_rc'] == 125 and rows[0]['sim_rc'] is None
+    assert rows[0]['runner_error']

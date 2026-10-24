@@ -548,6 +548,7 @@ def run_native_cases(step, state, manifest, *, workers=1, native_run=None):
     if type(workers) is not int or not 1 <= workers <= 4:
         raise AdmissionRefusal('D71_CASE_WORKERS_INVALID', str(workers))
     from librelane.state import DesignFormat
+    from librelane.steps import StepError
     from librelane_plugin_vibeic import GateLevelSim
     native_run = native_run or GateLevelSim.run
     root = Path(step.step_dir)
@@ -561,18 +562,15 @@ def run_native_cases(step, state, manifest, *, workers=1, native_run=None):
         corner, case = job
         folder = root / 'case_runs' / corner / case['id']
         folder.mkdir(parents=True, exist_ok=False)
-        case_manifest = {**manifest, 'cases': [case]}
         manifest_path = folder / 'manifest.json'
-        write_json(manifest_path, case_manifest)
+        write_json(manifest_path, {**manifest, 'cases': [case]})
         child = SimpleNamespace(config={**step.config, 'VIBEIC_GLS_MANIFEST': str(manifest_path)},
                                 step_dir=str(folder), _run=step._run)
         child_state = {**state, DesignFormat.SDF: {corner: sdfs[corner]}}
-        started = time.time_ns()
-        argv_calls = []
+        started = time.time_ns(); argv_calls = []
         def logged_run(argv, log, limit, cwd=None):
             resources = str(log) + '.resources.txt'
-            # GNU time observes each unchanged native invocation; _run still
-            # owns subprocess cwd, timeout, transcript and return status.
+            # Observe each native invocation; _run owns cwd, timeout, logs and rc.
             timed = ['/usr/bin/time', '-f', 'max_rss_kib=%M\nuser_s=%U\nsystem_s=%S\nelapsed_s=%e',
                      '-o', resources, '--', *argv]
             call = {'argv': list(argv), 'executed_argv': timed, 'log': str(log),
@@ -583,7 +581,9 @@ def run_native_cases(step, state, manifest, *, workers=1, native_run=None):
             return rc
         child._run = logged_run
         try:
-            native_run(child, child_state)
+            try: native_run(child, child_state)
+            except StepError:
+                if _read(folder / 'gls_results.json').get('verdict') != 'FAIL': raise
             result = _read(folder / 'gls_runs.json')['runs']
             if len(result) != 1 or (result[0]['corner'], result[0]['case']) != (corner, case['id']):
                 raise RuntimeError('native case output population differs')
@@ -601,8 +601,7 @@ def run_native_cases(step, state, manifest, *, workers=1, native_run=None):
         return row
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='native-gls') as pool:
-        rows = list(pool.map(one, jobs))
-    rows.sort(key=lambda row: (row['corner'], row['case']))
+        rows = sorted(pool.map(one, jobs), key=lambda row: (row['corner'], row['case']))
     write_json(root / 'gls_runs.json', {'manifest': step.config['VIBEIC_GLS_MANIFEST'],
         'netlist': str(state[DesignFormat.NETLIST]), 'runs': rows, 'case_workers': workers})
     return rows
