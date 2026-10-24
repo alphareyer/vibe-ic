@@ -2772,6 +2772,30 @@ def main() -> int:
         return 2
 
     if args.flow == "109":
+        # Mixed-signal rows already have source-registered producers and
+        # consumers in the canonical Flow109 dispatcher.  Keep A01-A19 on
+        # this runner's native owner, but let an explicitly requested M row
+        # reach that existing dispatch instead of failing the A-only window
+        # parser before its producer can run.
+        requested = (args.entry_step or "", args.exit_step or "")
+        if any(step.startswith("M") for step in requested):
+            import flow109
+            args.flow109_plan_only = False
+            try:
+                result = flow109.prepare_front_door(args, project)
+            except flow109.Flow109Error as exc:
+                print(f"REFUSED: {exc}", file=sys.stderr)
+                return 2
+            except ValueError as exc:
+                if not hasattr(exc, "report") or not hasattr(exc, "code"):
+                    raise
+                from _atomic_artefact import write_json
+                write_json(project / "reports" / "flow109" / "admission.json",
+                           exc.report)
+                print(f"REFUSED: {exc.code}: {exc}", file=sys.stderr)
+                return 2
+            if result is not None:
+                return result
         from analog_native_flow import run_window
         try:
             result = run_window(project, args)

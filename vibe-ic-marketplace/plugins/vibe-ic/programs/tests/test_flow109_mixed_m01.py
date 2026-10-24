@@ -14,6 +14,7 @@ import pytest
 import flow109
 import flow109_admission as admission
 import flow109_mixed_m01 as mixed
+import _delivery_route
 from _hostpaths import require_repo
 
 
@@ -161,6 +162,15 @@ def _run(project):
         capture_output=True, text=True)
 
 
+def _run_analog_entry(project):
+    assert _delivery_route.admit(project, 'ip') is None
+    return subprocess.run([
+        sys.executable, str(mixed.HERE / 'analog_one_shot_runner.py'), str(project),
+        '--flow', '109', '--flow109-manifest', str(project / 'manifest.json'),
+        '--entry-step', 'M01', '--exit-step', 'M01'],
+        capture_output=True, text=True)
+
+
 def test_m01_adapter_loads_by_path_with_sibling_imports():
     path = mixed.HERE / 'flow109_mixed_m01.py'
     spec = importlib.util.spec_from_file_location('flow109_mixed_m01_path_control', path)
@@ -172,15 +182,40 @@ def test_m01_adapter_loads_by_path_with_sibling_imports():
 def test_m01_normal_entry_uses_inherited_producers_and_consumer(tmp_path):
     _case(tmp_path)
     result = _run(tmp_path)
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 2, result.stdout + result.stderr
     report = json.loads((tmp_path / 'reports/flow109/components/M01.json').read_text())
     assert report['component_status'] == 'PASS'
+    assert report['default_row_status'] == 'NOT_MEASURED'
     assert report['consumer']['verdict'] == 'PASS'
     assert report['a04_binding']['status'] == 'BOUND_COMPONENT_ONLY'
     assert report['a04_binding']['independent_review'] == 'PENDING'
     assert report['metric_acceptance_status'] == 'UNIMPLEMENTED'
     assert set(report['gate_layers'].values()) == {'NOT_MEASURED'}
     assert (tmp_path / mixed.FREEZE).is_file()
+
+
+def test_m01_analog_entry_uses_existing_flow109_producer(tmp_path):
+    _case(tmp_path)
+    result = _run_analog_entry(tmp_path)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'analog window must be ordered' not in result.stdout + result.stderr
+    report = json.loads((tmp_path / 'reports/flow109/components/M01.json').read_text())
+    assert report['component_status'] == 'PASS'
+    assert report['consumer']['verdict'] == 'PASS'
+    assert report['default_row_status'] == 'NOT_MEASURED'
+
+
+def test_m01_analog_entry_preserves_source_refusal(tmp_path):
+    case = _case(tmp_path)
+    path = tmp_path / case['requirements']['path']
+    body = json.loads(path.read_text())
+    body['pins'][0]['rail'] = _bound('VDDD', 'L9', 5, '| VDDD | 1.2 V |')
+    path.write_text(json.dumps(body, indent=2))
+    _sync(tmp_path, case, requirements_changed=True)
+    result = _run_analog_entry(tmp_path)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert 'M01_PIN_DOMAIN_RAIL_CONTRADICTION' in result.stdout + result.stderr
+    assert not (tmp_path / mixed.FREEZE).exists()
 
 
 @pytest.mark.parametrize('damage,token', [
