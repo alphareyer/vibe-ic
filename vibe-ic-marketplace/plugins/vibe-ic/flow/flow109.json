@@ -10055,22 +10055,48 @@
           "id": "default",
           "select_when": "otherwise",
           "provider": "librelane",
-          "tools": "Checker.TrDRC + Odb.ReportDisconnectedPins + Checker.DisconnectedPins + Checker.WireLength",
+          "tools": "Checker.TrDRC + Odb.ReportDisconnectedPins + Checker.DisconnectedPins + Odb.ReportWireLength + Checker.WireLength",
           "native_steps": [
             "Checker.TrDRC",
             "Odb.ReportDisconnectedPins",
             "Checker.DisconnectedPins",
+            "Odb.ReportWireLength",
             "Checker.WireLength"
           ],
-          "execution_status": "UNIMPLEMENTED"
+          "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
+          "dispatch": {
+            "adapter": "flow109_route_check",
+            "native_step_id": "flow109.D42",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "flow109_metrics_status": "IMPLEMENTED_D42_RUNTIME",
+            "engine_families": [
+              "python3",
+              "openroad"
+            ],
+            "engine_executables": {
+              "python3": "python3",
+              "openroad": "openroad"
+            },
+            "engine_steps": {
+              "python3": [
+                "Checker.TrDRC",
+                "Checker.DisconnectedPins",
+                "Checker.WireLength"
+              ],
+              "openroad": [
+                "Odb.ReportDisconnectedPins",
+                "Odb.ReportWireLength"
+              ]
+            }
+          }
         }
       ],
       "complementary_tools": [],
       "capability_status": "SELECTED_NOT_ROUTE_QUALIFIED",
       "availability_status": "NOT_INVENTORIED_THIS_UPDATE",
       "source_components": [
-        "drc_report_check",
-        "placement_legality_check"
+        "flow109_route_check"
       ],
       "obligations": [
         {
@@ -10092,7 +10118,7 @@
             "checker.route_check.disconnected_required_pins",
             "producer.route_check.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "IMPLEMENTED_D42_RUNTIME_BINDING"
         },
         {
           "id": "route_check.route_short_overlap_errors",
@@ -10113,10 +10139,10 @@
             "checker.route_check.route_short_overlap_errors",
             "producer.route_check.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "IMPLEMENTED_D42_RUNTIME_BINDING"
         }
       ],
-      "metric_acceptance_status": "UNIMPLEMENTED",
+      "metric_acceptance_status": "IMPLEMENTED_D42_RUNTIME",
       "gate_layer_ids": [
         "G1",
         "G2",
