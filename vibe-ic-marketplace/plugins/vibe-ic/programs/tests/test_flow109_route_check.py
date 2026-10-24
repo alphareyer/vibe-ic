@@ -226,6 +226,28 @@ def test_failed_d41_refuses_before_native(tmp_path, monkeypatch):
         route.prepare(tmp_path, _context())
 
 
+def test_same_bytes_project_symlink_refuses_before_native(tmp_path, monkeypatch):
+    views = _d41(tmp_path, monkeypatch)
+    folder = views["odb"].parent
+    alias = folder / "alias.odb"
+    alias.symlink_to(views["odb"].name)
+    state_path = folder / "state_out.json"
+    state = json.loads(state_path.read_text())
+    state["odb"] = str(alias)
+    _json(state_path, state)
+    native_receipt_path = folder / "vibeic_receipt.json"
+    native_receipt = json.loads(native_receipt_path.read_text())
+    native_receipt["sha256"]["state_out.json"] = _sha(state_path)
+    native_receipt["sha256"]["alias.odb"] = _sha(alias)
+    _json(native_receipt_path, native_receipt)
+    handoff_path = tmp_path / "reports/phase3/librelane_postroute_repair_handoff.json"
+    handoff = json.loads(handoff_path.read_text())
+    handoff["state_sha256"] = _sha(state_path)
+    _json(handoff_path, handoff)
+    with pytest.raises(AdmissionRefusal, match="D42_SUBJECT_SYMLINK"):
+        route.prepare(tmp_path, _context())
+
+
 @pytest.mark.parametrize(
     "route_errors,disconnected,omit,expected,reason",
     [(1, 0, None, "FAIL", "D42_NATIVE_CHECK_FAILED"),

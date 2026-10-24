@@ -2,13 +2,15 @@
 
 This adapter runs only LibreLane's existing post-route checkers.  It does not
 route, repair, extract, or infer connectivity from DEF geometry.  A D42 PASS
-therefore means the two catalog obligations and the selected wire-length
-checker were measured on the exact adopted D41 ODB; it is not Flow109 or
-whole-IC acceptance.  ``Checker.TrDRC`` exposes a total routed-DRC count, not
+therefore means the two mandatory catalog obligations were measured on the
+exact adopted D41 ODB.  The selected wire reporter/checker also executes, but
+an absent PDK threshold is the native checker's explicit NOT_APPLICABLE skip,
+never a measured wire-limit PASS.  D42 is not Flow109 or whole-IC acceptance.
+``Checker.TrDRC`` exposes a total routed-DRC count, not
 marker subtypes, so D42 conservatively requires the total to be zero for its
 short/overlap obligation. ``Checker.DisconnectedPins`` measures LibreLane's
 critical-pin classification, not arbitrary unused outputs.  Wire length uses
-the PDK-resolved threshold and is NOT_MEASURED when that limit is absent.
+the PDK-resolved threshold and never invents a universal limit.
 """
 from __future__ import annotations
 
@@ -66,9 +68,20 @@ def _project_path(project: Path, value: object, label: str) -> Path:
     raw = Path(value)
     # Native receipts use the canonical /project mount.  Translate only that
     # exact namespace; arbitrary absolute paths never become project inputs.
-    path = project / raw.relative_to("/project") if raw.is_absolute() \
+    lexical = project / raw.relative_to("/project") if raw.is_absolute() \
         and raw.is_relative_to("/project") else raw
-    path = (project / path).resolve() if not path.is_absolute() else path.resolve()
+    lexical = project / lexical if not lexical.is_absolute() else lexical
+    # Resolve only after rejecting every lexical symlink component.  Checking
+    # is_symlink() on the resolved target accepts a same-project alias and
+    # loses the producer's file identity.
+    current = lexical
+    while True:
+        if current.is_symlink():
+            raise AdmissionRefusal("D42_SUBJECT_SYMLINK", f"{label}: {lexical}")
+        if current == project or current.parent == current:
+            break
+        current = current.parent
+    path = lexical.resolve()
     if not path.is_relative_to(project):
         raise AdmissionRefusal("D42_SUBJECT_MISSING", f"{label}: {path}")
     return path
