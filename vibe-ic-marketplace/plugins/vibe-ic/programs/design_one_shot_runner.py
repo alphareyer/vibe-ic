@@ -1093,7 +1093,7 @@ def _docker_exec(container: str, cmd: str, timeout: int = 600, *,
     import _docker_watchdog as _dw
     return _dw.run_docker_supervised(
         container, cmd, marker, docker_exec_raw=_docker_exec_raw,
-        log_path=log_path)
+        exec_argv=_exec_argv, log_path=log_path)
 
 
 def _tool_in_container(container: str, tool: str) -> bool:
