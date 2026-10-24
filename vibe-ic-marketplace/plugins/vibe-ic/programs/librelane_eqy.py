@@ -5,7 +5,7 @@ lec_run (yosys equiv_*) stays arm A. This module runs EQY through the contract
 with a vibe-ic-generated EQY_SCRIPT and judges EQY's own per-partition status
 files, then `combine` keeps the conclusive arm.
 
-The generated script differs from LibreLane's generic one in four measured ways:
+The generated script differs from LibreLane's generic one in these measured ways:
 
 * No `bitwuzla` strategy — the solver is not in the image (review correction).
 * The gate side reads the cells from the PDK liberty's `function` attributes
@@ -22,6 +22,14 @@ The generated script differs from LibreLane's generic one in four measured ways:
   produce a counterexample at time zero even for two identical resettable
   registers. Amendment retains every match point and output obligation; it
   adds the producer logic behind cutpoints rather than dropping comparisons.
+* Collect all matched points into one fragment before partitioning.  This does
+  not remove an output or match obligation; it prevents EQY from materializing
+  one nearly-whole-design copy per internal match point on mapped netlists.
+* Do not name-match Yosys's ``_NNNN_`` temporaries.  Their counters are local
+  to each independently elaborated view and do not identify the same Boolean
+  function.  Public ports and stable authored/state names still use EQY's
+  default same-name matching, and the complete logic behind every output is
+  retained in the proof model.
 
 EQY's top-level status folds "could not decide" into FAIL. The reader therefore
 reads every partition's strategy status files: a partition is PROVEN when a
@@ -64,6 +72,9 @@ def eqy_script(top: str, rtl: list[Path], netlist: Path, liberty: str) -> str:
         "[script]", f"hierarchy -top {top}", "proc", f"prep -top {top} -flatten",
         "memory -nomap", "async2sync", "setundef -init -zero", "splitnets",
         observable_matchpoint_names(top).rstrip(), "",
+        "[match *]", "gold-nomatch /^_[0-9]+_$/",
+        "gate-nomatch /^_[0-9]+_$/", "",
+        "[collect *]", "group *", "",
         "[partition *]", "amend *", "",
         "[strategy sat]", "use sat", "depth 5", "",
         "[strategy pdr]", "use sby", "engine abc pdr -rfi", ""])

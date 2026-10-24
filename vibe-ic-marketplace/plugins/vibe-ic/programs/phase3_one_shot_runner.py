@@ -77845,7 +77845,9 @@ def _emit_em_current_authority(project: Path, pdk: PdkConfig,
 
 
 def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
-                          container: str, notes: List[str]) -> bool:
+                          container: str, notes: List[str], *,
+                          routed_def: Optional[Path] = None,
+                          lef_context: Optional[dict] = None) -> bool:
     """Aggregate the 7 Calibre-PERC categories into ONE honest open-source
     PERC-equivalent coverage report (v2.3 Step 28).
 
@@ -77856,7 +77858,7 @@ def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
     Writes reports/phase3/perc_equivalent.{rpt,json} + PERC_SIGNOFF_MEMO.md.
     chip-AGNOSTIC + deterministic. Best-effort; returns True if emitted."""
     pnr_out = _pl.pnr_dir(project)
-    def_file = pnr_out / f"{top}.def"
+    def_file = Path(routed_def) if routed_def is not None else pnr_out / f"{top}.def"
     if not def_file.is_file():
         notes.append("PERC-equiv skipped: routed DEF missing")
         return False
@@ -77873,6 +77875,9 @@ def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
     components = _parse_def_components(def_file)
     import perc_corpus_sweep as _perc
     io_library = _perc.perc_io_evidence(project, _pdk_dir_of(pdk) or None)
+    if lef_context is not None:
+        import latchup_esd_spacing_check as _roles
+        io_library['classes'] = _roles._checked_lef_roles(lef_context, def_file)
     esd = _esd_pad_ring_presence(components, io_library['classes'],
                                 io_library['esd_evidence'])
     # (Cross-voltage-domain now uses _xdomain_levelshifter_check, which counts
@@ -78332,6 +78337,7 @@ def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
                    if _pitch else {})
         geo = _geo.run_geometry_layer(
             str(def_file),
+            **({"lef_context": lef_context} if lef_context is not None else {}),
             **_screen,
             netlist_file=netlist_for_clamp,
             rated_tap_masters=([pdk.tapcell_master]
@@ -78434,6 +78440,8 @@ def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
                 geo["clamp_netlist"],
                 "extracted-netlist ESD clamp dual-rail connectivity"))
     except Exception as exc:  # pragma: no cover - defensive (geometry layer)
+        if lef_context is not None:
+            raise
         notes.append(f"PERC geometry layer: not run ({exc}); presence / "
                      "topology / x-domain categories above are unaffected.")
 
@@ -78481,6 +78489,8 @@ def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
     # CONCLUSIVE-FAIL-ONLY; an OK never becomes an automated device-physics PASS.
     if geometry_residual:
         summary["geometry_foundry_data_residual"] = geometry_residual
+    if lef_context is not None:
+        summary["geometry_lef_context"] = lef_context
 
     # --- perc_equivalent.json ---------------------------------------------
     _aa.write_text(rpt3 / "perc_equivalent.json", json.dumps(summary, indent=2) + "\n")

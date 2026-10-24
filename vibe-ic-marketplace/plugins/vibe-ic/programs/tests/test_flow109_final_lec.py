@@ -128,6 +128,7 @@ def test_actual_general_entry_proves_final_mapped_netlist_and_publishes_common_s
     assert record['flow109_acceptance'] == record['baseline_adoption'] == 'NOT_MEASURED'
     assert record['proof']['verdict'] == 'PASS'
     assert record['proof']['compared_points'] > 0
+    assert len(record['proof']['declared_partitions']) == 1
     assert set(record['proof']['declared_partitions']) == set(record['proof']['partitions'])
     metrics = record['metric_bindings']
     assert metrics['status'] == 'PASS'
@@ -167,6 +168,35 @@ def test_native_logic_change_or_functionless_cell_never_passes(tmp_path, damage,
         assert record['reason'] == 'D44_FUNCTIONAL_MODEL_UNSUPPORTED'
         assert record['metric_bindings']['status'] == 'NOT_MEASURED'
         assert record['metric_acceptance_status'] == 'NOT_MEASURED'
+
+
+@pytest.mark.skipif(shutil.which('eqy') is None, reason='native EQY is required')
+@pytest.mark.parametrize('invert_public,expected', [(False, 'PASS'), (True, 'FAIL')])
+def test_synthetic_looking_public_output_remains_a_native_obligation(
+        tmp_path, invert_public, expected):
+    """A generated-looking spelling never overrides primary-output authority."""
+    gold = tmp_path / 'gold.v'
+    gate = tmp_path / 'gate.v'
+    liberty = tmp_path / 'neutral.lib'
+    gold.write_text('module neutral(input a,b, output y, output _0000_); '
+                    'assign y=a; assign _0000_=b; endmodule\n')
+    public_expr = '~b' if invert_public else 'b'
+    gate.write_text('module neutral(input a,b, output y, output _0000_); '
+                    f'assign y=a; assign _0000_={public_expr}; endmodule\n')
+    liberty.write_text('library(neutral) {}\n')
+    script = tmp_path / 'proof.eqy'
+    script.write_text(lec.eqy.eqy_script('neutral', [gold], gate, str(liberty)))
+    folder = tmp_path / 'step'
+    native = subprocess.run(
+        ['eqy', '-j', '1', '-d', str(folder / 'scratch'), str(script)],
+        capture_output=True, text=True, timeout=60)
+    report = lec.eqy.judge_eqy(folder, tmp_path / 'report.json')
+    assert report['verdict'] == expected, native.stdout + native.stderr
+    assert native.returncode == (0 if expected == 'PASS' else 2)
+    assert 'neutral._0000_' in report['partitions']
+    if invert_public:
+        assert 'neutral._0000_' in report['non_equivalent_points']
+        assert report['partitions']['neutral.y'] == {'sat': 'PASS', 'pdr': 'PASS'}
 
 
 @pytest.mark.parametrize('damage', ['consumer', 'transformation', 'source', 'unsupported'])

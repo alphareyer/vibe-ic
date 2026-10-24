@@ -624,6 +624,7 @@ def _backend_input_contract(step_id: str, spec: Mapping[str, object]) -> tuple[o
                 if isinstance(item, Mapping) and item.get("path")]
     common = [
         "input/docs", "input/project.json", "input/step_0_5ic_answers.json", "input/submission_template",
+        {"from": "external", "path": "input/submission_template_source", "required": False},
         "phase1/generated_docs", "phase1/pdk_staging_read.json",
         "phase1/merged_docs", "phase2/stage1/rtl", "phase2/stage2", "reports/phase2/dft",
         "phase2/stage2/synth/synth_inputs.json",
@@ -868,14 +869,14 @@ def _default_step24_current_subject(project: Path, *,
         if path.is_file() and not path.is_symlink():
             carried.append(path.relative_to(root).as_posix())
 
-    return {"top": top, "views": views,
+    return {"top": top, "views": views, "folder": folder,
             "inputs": tuple(dict.fromkeys(carried)),
             "transport": subject.get("input_transport")}
 
 
 def backend_canonical_input_contract(project: Path, step_id: str, declarations,
                                      *, execution_mode: str = "ultra") -> tuple[object, ...]:
-    """Select Step 24's current native owner or attested self-tapeout subject.
+    """Select the current native owner for IR/PERC, or the legacy IR subject.
 
     A valid current STAPostPNR owner takes precedence and replaces both the
     obsolete routed-DEF and PDN-marker requirements with its exact final ODB
@@ -884,12 +885,12 @@ def backend_canonical_input_contract(project: Path, step_id: str, declarations,
     canonical declarations byte-for-byte; absence never selects either arm.
     """
     values = tuple(declarations or ())
-    if str(step_id) != "24":
+    if str(step_id) not in {"24", "28"}:
         return values
     current = _default_step24_current_subject(
         project, execution_mode=execution_mode)
-    subject = (None if current is not None else default_step24_physical_subject(
-        project, execution_mode=execution_mode))
+    subject = (None if current is not None or str(step_id) == "28" else
+               default_step24_physical_subject(project, execution_mode=execution_mode))
     if current is not None:
         selected: list[object] = []
         replacements = {
@@ -910,6 +911,13 @@ def backend_canonical_input_contract(project: Path, step_id: str, declarations,
                 row["path"] = replacement.relative_to(Path(project).resolve()).as_posix()
                 selected.append(row)
         selected.extend(current["inputs"])
+        if str(step_id) == "28":
+            import latchup_esd_spacing_check as geometry
+            context = geometry.current_lef_context(Path(project), current["folder"], current["views"]["def"])
+            for row in [*context["authorities"], *context["lefs"]]:
+                path = Path(row["path"])
+                if path.is_relative_to(Path(project).resolve()):
+                    selected.append(path.relative_to(Path(project).resolve()).as_posix())
         values = tuple(selected)
     if subject is None:
         if current is None:
@@ -935,6 +943,152 @@ def backend_canonical_input_contract(project: Path, step_id: str, declarations,
             seen.add(key)
             unique.append(item)
     return tuple(unique)
+
+
+def restore_continuation_prerequisites(project: Path) -> dict:
+    """Carry two original producer inputs into a relocated Default continuation.
+
+    This is input transport, not adoption of an old verdict. Current native
+    State/receipt, owner inputs, catalogue sources and pad geometry must agree
+    before the existing transactional copier touches each missing file.
+    Independently valid catalogue bytes remain available if pad geometry refuses.
+    """
+    import librelane_postroute as postroute
+    import librelane_contract as contract
+    import librelane_fill_dfm as fill
+    import latchup_esd_spacing_check as geometry
+    import submission_template_check as catalogue
+    import _submission_template as template
+    import _pad_ring as pads
+    import pad_bterm_coincidence_check as terminals
+    import execution_backend_snapshot as snapshot
+
+    root = Path(project).resolve(strict=True)
+    # Reuse the exact current-view authority that the registered D75 consumer
+    # opens. A validated native view does not need a historical pad publication.
+    # Catalogue integrity is independent and must not be skipped with the pad.
+    import flow109_package_ready as package
+    try:
+        io = json.loads((root / package.IO_REPORT).read_text())
+        native = package._current_native_geometry(root, package._io_lefs(root, io))
+    except (package.D75Refusal, OSError, ValueError):
+        native = None  # Only the existing fully validated legacy route remains.
+    catalogue_ready = not any((root / template.SLOTS_DIR_REL).glob("*.yaml"))
+    if native is not None and not catalogue_ready:
+        try:
+            record = json.loads((root / template.REPORT_REL).read_text())
+            catalogue_ready = catalogue.evaluate(root, record, None).get("verdict") in {
+                template.VERDICT_PASS, template.VERDICT_NOT_APPLICABLE}
+        except (OSError, ValueError):
+            pass
+    if native is not None and catalogue_ready:
+        return {'inputs': {}, 'current_native_geometry': native['detail']}
+
+    folder, state = postroute.stapostpnr_state(root)
+    receipt = contract.validate_step_receipt(folder, 'OpenROAD.STAPostPNR')
+    views = {name: Path(state[name]).resolve(strict=True) for name in ('def', 'odb', 'nl', 'sdc')}
+    timed = receipt['input']['state_files']
+    for path in views.values():
+        if timed.get(str(path)) != snapshot.sha(path):
+            raise ValueError('CONTINUATION_CURRENT_VIEW_CHANGED: ' + str(path))
+    owners = [p for p in views['def'].parents if (p / fill.RECORD_REL).is_file()]
+    if len(owners) != 1:
+        raise ValueError('CONTINUATION_ORIGINAL_OWNER_UNBOUND')
+    owner = owners[0]
+    if any(not path.is_relative_to(owner) for path in views.values()):
+        raise ValueError('CONTINUATION_WRONG_NATIVE_OWNER')
+    if owner == root:
+        return {'inputs': {}, 'reason': 'current project owns its native inputs'}
+    record = json.loads((owner / fill.RECORD_REL).read_text())
+    tool = record['odb']['tool']
+    native_state = Path(tool['state']).resolve(strict=True)
+    contract.validate_step_receipt(native_state.parent, fill.ODB_FILL_STEP)
+    filled = json.loads(native_state.read_text())
+    if (snapshot.sha(native_state) != tool['state_sha256']
+            or snapshot.sha(views['def']) != tool['filled_def_sha256']
+            or any(Path(filled[k]).resolve(strict=True) != views[k] for k in ('def', 'odb'))):
+        raise ValueError('CONTINUATION_ORIGINAL_GEOMETRY_UNBOUND')
+
+    # These are scientific owner/IO inputs, not optional filenames. A different
+    # continuation may not borrow another owner's catalogue or pad placement.
+    for rel in ('input/step_0_5ic_answers.json',
+                'input/submission_template/tapeout_declaration.json',
+                'input/submission_template/SELF_TAPEOUT.txt',
+                'reports/phase3/io_pad_chip_top.json'):
+        if snapshot.sha(owner / rel) != snapshot.sha(root / rel):
+            raise ValueError('CONTINUATION_OWNER_INPUT_CHANGED: ' + rel)
+    for rel in (template.STAGED_TEMPLATE_REL, template.SLOTS_DIR_REL):
+        a, b = {}, {}
+        source = snapshot.population(owner / rel, rel, a, boundary=owner)
+        current = snapshot.population(root / rel, rel, b, boundary=root)
+        if source != current or any(row.get('kind') == 'missing' for row in source.values()):
+            raise ValueError('CONTINUATION_CATALOGUE_SOURCE_CHANGED: ' + rel)
+
+    source_report = snapshot.safe_target(owner, template.REPORT_REL)
+    report = json.loads(source_report.read_text())
+    if report.get('program') != 'submission_template_ingest':
+        raise ValueError('CONTINUATION_CATALOGUE_PRODUCER_INVALID')
+    judged = catalogue.evaluate(root, report, None)
+    if judged.get('verdict') != template.VERDICT_NOT_APPLICABLE:
+        raise ValueError('CONTINUATION_CATALOGUE_CONSUMER_REFUSED: ' + str(judged.get('refusals')))
+
+    def carry(selected):
+        hashes = {name: snapshot.sha(path) for name, path in selected.items()}
+        journal = snapshot.Journal(root)
+        try:
+            for name, source in selected.items():
+                target = snapshot.safe_target(root, name)
+                if target.exists():
+                    if snapshot.sha(target) != hashes[name]:
+                        raise ValueError('CONTINUATION_EXISTING_INPUT_CHANGED: ' + name)
+                    continue
+                data = source.read_bytes()
+                if hashlib.sha256(data).hexdigest() != hashes[name]:
+                    raise ValueError('CONTINUATION_SOURCE_CHANGED: ' + name)
+                journal.write(name, data)
+        except BaseException:
+            journal.rollback()
+            raise
+        return {name: {'source': str(selected[name]), 'sha256': sha}
+                for name, sha in hashes.items()}
+
+    transported = carry({template.REPORT_REL: source_report})
+    if native is not None:
+        return {'source_project': str(owner), 'inputs': transported,
+                'current_native_geometry': native['detail']}
+
+    rel = pads.PADRING_DEF_REL
+    original = snapshot.safe_target(owner, rel)
+    roles = geometry.current_lef_context(root, folder, original)['roles']
+    roles.update(geometry.current_lef_context(root, folder, views['def'])['roles'])
+    config = json.loads((folder / 'config.json').read_text())
+    io_masters = set()
+    for path in config['PAD_LEFS']:
+        io_masters.update(pads.parse_lef_macro_classes(Path(path).read_text()))
+    before, after = (pads.parse_def(path.read_text()) for path in (original, views['def']))
+    def ring(value):
+        return {name: cell.as_dict() for name, cell in value.components.items()
+                if cell.master in io_masters
+                and roles.get(cell.master, '').partition(' ')[0] in {'PAD', 'ENDCAP'}}
+    if (before.design != after.design or before.units != after.units
+            or before.diearea != after.diearea or not ring(before)
+            or ring(before) != ring(after)
+            or terminals.def_pins(original.read_text()) != terminals.def_pins(views['def'].read_text())):
+        raise ValueError('CONTINUATION_PADRING_GEOMETRY_CHANGED')
+    # Match IO net terminals too: identical placement is not identical wiring.
+    ring_names = set(ring(before))
+    def pad_nets(path):
+        return {net: sorted((inst, pin) for inst, pin in members
+                            if inst in ring_names or inst == 'PIN')
+                for net, members in terminals.def_net_terminals(path.read_text()).items()
+                if any(inst in ring_names or inst == 'PIN' for inst, pin in members)}
+    if pad_nets(original) != pad_nets(views['def']):
+        raise ValueError('CONTINUATION_PADRING_CONNECTIVITY_CHANGED')
+
+    transported.update(carry({rel: original}))
+    return {'source_project': str(owner), 'inputs': transported,
+            'current_state': {'path': str(folder / 'state_out.json'),
+                              'sha256': snapshot.sha(folder / 'state_out.json')}}
 
 
 def backend_project_input_contract(project: Path, step_id: str, *,
@@ -992,6 +1146,15 @@ def backend_project_input_contract(project: Path, step_id: str, *,
         if require_nonempty and target.stat().st_size <= 0:
             return
         carry_checkpoint_file(raw)
+
+    # Preserve an existing producer's catalogue record along with the staged
+    # source tree; a later declaration consumer must see the same evidence.
+    carry_optional_checkpoint_file("reports/phase1/submission_template.json")
+    catalogue_source = root / "input/submission_template_source"
+    if catalogue_source.is_dir():
+        for target in sorted(catalogue_source.rglob("*")):
+            if target.is_file():
+                carry_checkpoint_file(target.relative_to(root).as_posix())
 
     # These are optional consumer edges.  Their absence means the consumer's
     # own condition does not apply; it must not become an issuer prerequisite.

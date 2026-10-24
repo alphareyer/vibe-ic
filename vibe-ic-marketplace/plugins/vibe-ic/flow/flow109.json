@@ -14573,15 +14573,57 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "ngspice package RLC/SPICE/IBIS-derived model checks",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "Ngspice.PackageRLCTransient",
+            "Vibeic.PackageModelPortsIdentity",
+            "Vibeic.PackageElectricalBounds"
+          ],
+          "execution_status": "SOURCE_ADAPTER_IMPLEMENTED_COMPONENT_ONLY",
+          "capability_status": "SUPPORTED_SUBSET_NOT_QUALIFIED",
+          "dispatch": {
+            "kind": "native_adapter",
+            "adapter": "flow109_package_electrical",
+            "native_step_id": "flow109.D67",
+            "producer": "flow109_package_electrical.py:execute",
+            "consumer": "flow109_package_electrical.py:consume",
+            "engine_families": [
+              "ngspice",
+              "python3"
+            ],
+            "engine_executables": {
+              "ngspice": "ngspice",
+              "python3": "python3"
+            },
+            "engine_steps": {
+              "ngspice": [
+                "Ngspice.PackageRLCTransient"
+              ],
+              "python3": [
+                "Vibeic.PackageModelPortsIdentity",
+                "Vibeic.PackageElectricalBounds"
+              ]
+            },
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "component_scope": "owner_provided_passive_lumped_RLC_model_ports_and_declared_transient_bounds",
+            "unsupported_scope": "thermal/full-wave/raw IBIS/undeclared signal requirements; physical package extraction/qualification; Liberty-only package R/L"
+          },
+          "limitations": [
+            "Only approved self-contained passive RLC subcircuits, exact top/port mappings, declared mission/corners and units/bounds are supported.",
+            "Every R/L/C parameter and requested native measurement requires approved limits; missing input or unsupported requirements refuse.",
+            "D55 SDC/Liberty external capacitance is a bare-die interface envelope, not physical package R/L or thermal behavior.",
+            "Whole-flow, dependency closure and physical package qualification remain NOT_MEASURED."
+          ]
         }
       ],
       "complementary_tools": [],
       "capability_status": "SELECTED_NOT_ROUTE_QUALIFIED",
       "availability_status": "NOT_INVENTORIED_THIS_UPDATE",
       "source_components": [
-        "spice_correlation_check"
+        "spice_correlation_check",
+        "flow109_analog_model_check",
+        "_specrtl_common",
+        "flow109_package_electrical"
       ],
       "obligations": [
         {
@@ -14600,7 +14642,7 @@
             "checker.package_electrical.package_model_ports_identity",
             "producer.package_electrical.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "IMPLEMENTED_D67_DECLARED_LUMPED_BINDING"
         },
         {
           "id": "package_electrical.package_rc_thermal_validity",
@@ -14620,10 +14662,10 @@
             "checker.package_electrical.package_rc_thermal_validity",
             "producer.package_electrical.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "IMPLEMENTED_D67_DECLARED_LUMPED_BINDING"
         }
       ],
-      "metric_acceptance_status": "UNIMPLEMENTED",
+      "metric_acceptance_status": "IMPLEMENTED_D67_DECLARED_LUMPED_SCOPE",
       "gate_layer_ids": [
         "G1",
         "G2",
