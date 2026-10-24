@@ -1810,6 +1810,9 @@ def produce_signoff(project, params):
             if current is None:
                 raise em.Refusal('BACKEND_PERC_CURRENT_SUBJECT_ABSENT', sid)
             perc_inputs['routed_def'] = current['views']['def']
+            import latchup_esd_spacing_check as geometry
+            perc_inputs['lef_context'] = geometry.current_lef_context(
+                project, current['folder'], current['views']['def'])
         if not R._emit_perc_equivalent(project, top, pdk, container, notes, **perc_inputs):
             raise em.Refusal('BACKEND_PERC_UNMEASURED', sid)
     elif sid == '29':

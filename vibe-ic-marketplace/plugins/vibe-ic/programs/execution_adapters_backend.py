@@ -868,7 +868,7 @@ def _default_step24_current_subject(project: Path, *,
         if path.is_file() and not path.is_symlink():
             carried.append(path.relative_to(root).as_posix())
 
-    return {"top": top, "views": views,
+    return {"top": top, "views": views, "folder": folder,
             "inputs": tuple(dict.fromkeys(carried)),
             "transport": subject.get("input_transport")}
 
@@ -910,6 +910,13 @@ def backend_canonical_input_contract(project: Path, step_id: str, declarations,
                 row["path"] = replacement.relative_to(Path(project).resolve()).as_posix()
                 selected.append(row)
         selected.extend(current["inputs"])
+        if str(step_id) == "28":
+            import latchup_esd_spacing_check as geometry
+            context = geometry.current_lef_context(Path(project), current["folder"], current["views"]["def"])
+            for row in [*context["authorities"], *context["lefs"]]:
+                path = Path(row["path"])
+                if path.is_relative_to(Path(project).resolve()):
+                    selected.append(path.relative_to(Path(project).resolve()).as_posix())
         values = tuple(selected)
     if subject is None:
         if current is None:
