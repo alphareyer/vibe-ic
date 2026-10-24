@@ -964,6 +964,26 @@ def restore_continuation_prerequisites(project: Path) -> dict:
     import execution_backend_snapshot as snapshot
 
     root = Path(project).resolve(strict=True)
+    # Reuse the exact current-view authority that the registered D75 consumer
+    # opens. A validated native view does not need a historical pad publication.
+    # Catalogue integrity is independent and must not be skipped with the pad.
+    import flow109_package_ready as package
+    try:
+        io = json.loads((root / package.IO_REPORT).read_text())
+        native = package._current_native_geometry(root, package._io_lefs(root, io))
+    except (package.D75Refusal, OSError, ValueError):
+        native = None  # Only the existing fully validated legacy route remains.
+    catalogue_ready = not any((root / template.SLOTS_DIR_REL).glob("*.yaml"))
+    if native is not None and not catalogue_ready:
+        try:
+            record = json.loads((root / template.REPORT_REL).read_text())
+            catalogue_ready = catalogue.evaluate(root, record, None).get("verdict") in {
+                template.VERDICT_PASS, template.VERDICT_NOT_APPLICABLE}
+        except (OSError, ValueError):
+            pass
+    if native is not None and catalogue_ready:
+        return {'inputs': {}, 'current_native_geometry': native['detail']}
+
     folder, state = postroute.stapostpnr_state(root)
     receipt = contract.validate_step_receipt(folder, 'OpenROAD.STAPostPNR')
     views = {name: Path(state[name]).resolve(strict=True) for name in ('def', 'odb', 'nl', 'sdc')}
@@ -1033,6 +1053,9 @@ def restore_continuation_prerequisites(project: Path) -> dict:
                 for name, sha in hashes.items()}
 
     transported = carry({template.REPORT_REL: source_report})
+    if native is not None:
+        return {'source_project': str(owner), 'inputs': transported,
+                'current_native_geometry': native['detail']}
 
     rel = pads.PADRING_DEF_REL
     original = snapshot.safe_target(owner, rel)

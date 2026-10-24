@@ -119,3 +119,86 @@ def test_sc_library_endcap_is_not_an_io_ring_instance(tmp_path,monkeypatch):
     restored=adapters.restore_continuation_prerequisites(project)
     assert len(restored['inputs'])==2
     assert catalogue.catalogue_selects_self_tapeout(project)[0] is True
+
+
+def _current_frontdoor_case(tmp_path, monkeypatch):
+    from test_flow109_package_ready import _project, _current_native_authority
+    project = _project(tmp_path)
+    authority = _current_native_authority(project, monkeypatch)
+    # Only the historical publication gets these obsolete supply BTerms.
+    # The current native view remains the fixture's valid adopted geometry.
+    old = authority['old_def']
+    old.write_text(old.read_text().replace('PINS 1 ;', 'PINS 3 ;').replace(
+        'END PINS', '- VDD + NET VDD + USE POWER + LAYER Metal5 ( 0 0 ) ( 20 20 ) + PLACED ( 0 0 ) N ;\n'
+        '- VSS + NET VSS + USE GROUND + LAYER Metal5 ( 0 0 ) ( 20 20 ) + PLACED ( 100 0 ) N ;\nEND PINS'))
+    return project, authority
+
+
+def _normal_d75_prerequisite(project, monkeypatch):
+    from types import SimpleNamespace
+    import flow109
+    from test_flow109_package_ready import _context
+    monkeypatch.setenv(flow109.CONTEXT_ENV, '')
+    monkeypatch.setenv(flow109.ATTEMPT_ENV, '')
+    context = _context(project)
+    manifest = project / 'input/current-selection.json'
+    manifest.write_text(json.dumps({'features': context['features']}))
+    args = SimpleNamespace(flow='109',flow109_manifest=manifest,flow109_plan_only=False,
+        execution_mode='default',entry_step='D75',exit_step='D75',container='')
+    try:
+        rc = flow109.prepare_front_door(args,project)
+    except (ValueError,OSError,contract.Refusal) as exc:
+        return {'route':'REFUSED_BEFORE_ADAPTER','reason':str(exc)}
+    result = json.loads((project/'reports/flow109/components/D75.json').read_text())
+    return {'route':'ADAPTER_EXECUTED','rc':rc,'result':result}
+
+
+@pytest.mark.parametrize('old_view', ['different_power_bterms','absent'])
+def test_normal_frontdoor_uses_d75_validated_native_authority(tmp_path,monkeypatch,old_view):
+    from test_flow109_package_ready import _by_name
+    project,authority=_current_frontdoor_case(tmp_path,monkeypatch)
+    if old_view=='absent':authority['old_def'].unlink()
+    old_bytes=authority['old_def'].read_bytes() if authority['old_def'].exists() else None
+    observed=_normal_d75_prerequisite(project,monkeypatch)
+    assert observed['route']=='ADAPTER_EXECUTED',observed
+    assert observed['rc']==0 and observed['result']['component_status']=='PASS',observed
+    bound=_by_name(observed['result'],'current_native_geometry_authority')
+    assert bound['status']=='PASS'
+    assert bound['detail']['def']['sha256']==contract.digest(authority['def'])
+    assert bound['detail']['odb']['sha256']==contract.digest(authority['odb'])
+    assert observed['result']['flow109_acceptance']=='NOT_MEASURED'
+    assert (authority['old_def'].read_bytes() if authority['old_def'].exists() else None)==old_bytes
+
+
+@pytest.mark.parametrize('damage',['missing_state','stale_tech','wrong_view','foreign_view'])
+def test_normal_frontdoor_invalid_current_authority_never_skips_checks(tmp_path,monkeypatch,damage):
+    project,authority=_current_frontdoor_case(tmp_path,monkeypatch)
+    if damage=='missing_state':(authority['folder']/'state_out.json').unlink()
+    elif damage=='stale_tech':authority['tech'].write_text(authority['tech'].read_text()+'\nchanged\n')
+    elif damage=='wrong_view':authority['selected']['views']['def']=authority['old_def']
+    else:
+        foreign=tmp_path/'foreign.def';foreign.write_bytes(authority['def'].read_bytes())
+        authority['selected']['views']['def']=foreign
+    observed=_normal_d75_prerequisite(project,monkeypatch)
+    assert observed['route']=='REFUSED_BEFORE_ADAPTER',observed
+    assert observed['reason']
+
+
+def test_normal_frontdoor_legacy_valid_route_is_unchanged(tmp_path,monkeypatch):
+    from test_flow109_package_ready import _project
+    observed=_normal_d75_prerequisite(_project(tmp_path),monkeypatch)
+    assert observed['route']=='ADAPTER_EXECUTED',observed
+    assert observed['rc']==0 and observed['result']['component_status']=='PASS'
+
+
+def test_normal_frontdoor_current_bad_pad_remains_measured_fail(tmp_path,monkeypatch):
+    from test_flow109_package_ready import _by_name
+    project,authority=_current_frontdoor_case(tmp_path,monkeypatch)
+    authority['def'].write_text(authority['def'].read_text().replace(
+        '+ PLACED ( 1820000 640000 ) N ;','+ PLACED ( 1000000 640000 ) N ;'))
+    authority['rebind']()
+    observed=_normal_d75_prerequisite(project,monkeypatch)
+    assert observed['route']=='ADAPTER_EXECUTED',observed
+    assert observed['rc']==1 and observed['result']['component_status']=='FAIL'
+    assert _by_name(observed['result'],'current_native_geometry_authority')['status']=='PASS'
+    assert _by_name(observed['result'],'pad_bterm_coincidence_check')['status']=='FAIL'
