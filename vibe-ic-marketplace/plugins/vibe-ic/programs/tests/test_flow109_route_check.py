@@ -13,6 +13,18 @@ from flow109_admission import AdmissionRefusal
 import flow109_route_check as route
 
 
+def test_netlist_comments_do_not_create_a_constant_driver():
+    text = "/*\nTIE fake (.Z(ctrl));\n*/\nBUF real (.A(data), .Z(ctrl));\n"
+    instances = route._netlist_instances(text)
+    assert len(instances) == 1
+    assert "fake" not in instances and "real" in instances
+
+
+def test_duplicate_structural_instances_still_refuse():
+    with pytest.raises(AdmissionRefusal, match="duplicate netlist instance"):
+        route._netlist_instances("TIE same (.Z(ctrl));\nTIE same (.Z(other));\n")
+
+
 def _sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 

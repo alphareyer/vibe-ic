@@ -33,6 +33,8 @@ from _atomic_artefact import write_json
 from flow109_admission import AdmissionRefusal, require_launch_admission
 import librelane_contract as contract
 import _pad_ring as pad_ring
+import _hdl_code_text as hdl_text
+import lec_post_layout_check as structural_netlist
 
 SCHEMA = "vibeic.flow109.route-check.v1"
 EDA_IMAGE = ("ghcr.io/vibeic/vibeic-eda@sha256:"
@@ -52,14 +54,6 @@ CAPABILITY_LIMITS = {
     "wire_length": "PDK threshold checker; not foundry signoff DRC",
 }
 _HEX = re.compile(r"[0-9a-f]{64}")
-_VERILOG_KEYWORDS = {"module", "endmodule", "input", "output", "inout",
-                     "wire", "reg", "assign", "supply0", "supply1", "tri"}
-_INSTANCE = re.compile(
-    r"^[ \t]*(?P<cell>[A-Za-z_][\w$]*)[ \t]+"
-    r"(?P<inst>\\\S+|[A-Za-z_][\w$\[\]]*)\s*"
-    r"\(\s*(?P<body>(?:\.[A-Za-z_][\w$]*\s*\([^()]*\)\s*,?\s*)+)\)\s*;",
-    re.M)
-_CONNECTION = re.compile(r"\.([A-Za-z_][\w$]*)\s*\(\s*([^()]*?)\s*\)")
 _PORT_DECL = re.compile(
     r"\b(?P<direction>input|output|inout)\b(?P<body>.*?)"
     r"(?=\b(?:input|output|inout)\b|[;)])", re.S)
@@ -118,7 +112,8 @@ def _ref(project: Path, path: Path) -> dict[str, str]:
 
 def operation_sources() -> dict[str, str]:
     paths = [Path(__file__), HERE / "flow109.py", HERE / "flow109_admission.py",
-             HERE / "librelane_contract.py", HERE / "_pad_ring.py"]
+             HERE / "librelane_contract.py", HERE / "_pad_ring.py",
+             HERE / "_hdl_code_text.py", HERE / "lec_post_layout_check.py"]
     result = {str(path.relative_to(HERE.parent)): _sha(path) for path in paths}
     # Bind the installed implementations that interpret the metrics and write
     # the disconnected/wire reports, not merely the Python executable.
@@ -130,26 +125,16 @@ def operation_sources() -> dict[str, str]:
     return result
 
 
-def _identifier(value: str) -> str:
-    value = (value or "").strip()
-    return value[1:].strip() if value.startswith("\\") else value
-
-
 def _netlist_instances(text: str) -> dict[str, tuple[str, dict[str, str]]]:
-    """Named structural instances only; ambiguity is refused by the caller."""
-    result = {}
-    for match in _INSTANCE.finditer(text or ""):
-        master = match.group("cell")
-        if master in _VERILOG_KEYWORDS:
-            continue
-        instance = _identifier(match.group("inst"))
-        pins = {_identifier(pin): _identifier(net)
-                for pin, net in _CONNECTION.findall(match.group("body"))}
-        if instance in result:
-            raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
-                                   f"duplicate netlist instance {instance}")
-        result[instance] = (master, pins)
-    return result
+    """Reuse the existing structural LEC grammar, excluding commented text."""
+    code = hdl_text.strip_hdl_comments_and_strings(text or "")
+    names = [structural_netlist._vid(match.group("inst"))
+             for match in structural_netlist._INST_RE.finditer(code)
+             if match.group("cell") not in structural_netlist._VERILOG_KEYWORDS]
+    if len(names) != len(set(names)):
+        raise AdmissionRefusal("D42_DISCONNECTED_QUALIFICATION_UNBOUND",
+                               "duplicate netlist instance")
+    return structural_netlist._parse_netlist_instances(code)
 
 
 def _config_paths(config: dict, key: str) -> list[str]:
