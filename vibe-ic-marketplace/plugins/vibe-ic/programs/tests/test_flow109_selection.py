@@ -217,7 +217,7 @@ def test_d24_routes_to_existing_default_dft_producer_and_consumer(tmp_path, monk
     assert dispatch["consumer"] == (
         "design_one_shot_runner retained Step 12 canonical acceptance")
     assert row["profile"]["execution_status"] == (
-        "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED")
+        "NATIVE_OWNER_WIRED_NOT_CASE_QUALIFIED")
     import _delivery_route
     assert _delivery_route.admit(tmp_path, "ip") is None
     manifest = tmp_path / "manifest.json"
@@ -247,7 +247,7 @@ def test_d23_routes_to_existing_default_dft_producer_and_consumer(tmp_path, monk
     assert dispatch["consumer"] == (
         "design_one_shot_runner retained Step 11 canonical acceptance")
     assert row["profile"]["execution_status"] == (
-        "NATIVE_COMPONENT_ONLY_NOT_109_ACCEPTED")
+        "NATIVE_OWNER_WIRED_NOT_CASE_QUALIFIED")
     import _delivery_route
     assert _delivery_route.admit(tmp_path, "ip") is None
     manifest = tmp_path / "manifest.json"
