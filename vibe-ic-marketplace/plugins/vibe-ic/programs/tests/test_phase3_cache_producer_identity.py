@@ -59,6 +59,9 @@ DIE, UTIL = "200x200", 0.45
 
 # ── unit level: the key itself ──────────────────────────────────────────────
 
+from test_phase3_postpnr_disclosure_and_gds_guard import _own_runtime_invocation, _source_unit_transports
+
+
 def _span_inputs(project, top: str = "top") -> None:
     """Everything the three SPANS declare that they do not produce themselves.
 
@@ -519,6 +522,8 @@ def _drive(monkeypatch, project: Path) -> list:
     """Neutralise everything main() does that is not the cache decision, and
     record which steps it invokes. The producer helpers are LEFT REAL — the
     cache verdict is what is under test."""
+    _own_runtime_invocation(monkeypatch)
+    _source_unit_transports(monkeypatch)
     called: list = []
     import execution_policy
     original_request = execution_policy.request
@@ -535,28 +540,30 @@ def _drive(monkeypatch, project: Path) -> list:
     monkeypatch.setattr(R, '_default_step15_with_backend_receipt',
                         lambda *a, **k: R.step_pnr(*a, **k))
 
+    def _touch_active_recipe(project):
+        # Every recorded source-unit span, including no-op repairs, executes
+        # this real retained helper. Live imports and test-only lambdas cannot
+        # establish what ran inside the active retained tree.
+        import runpy
+        runpy.run_path(str(R.PROGRAMS_DIR / "_path_layout.py"))["pnr_dir"](project)
+
     def _step(name):
         def _f(*a, **k):
             called.append(name)
-            # TOUCH REAL PLUGIN CODE. R-0924-3 r6 makes `code` what the step
-            # RAN, and a stub defined in this file runs none — so the recorder
-            # correctly records nothing and the kind is correctly poisoned.
-            # These stubs stand in for a step, so they run one real plugin
-            # function; the recording is then a true (small) record of plugin
-            # code that executed, which is what this suite's stamp/check
-            # round-trip needs. The recorder's own behaviour is covered by the
-            # r5/r6 tests that drive it for real.
-            R._pl.pnr_dir(a[0] if a else Path("."))
+            _touch_active_recipe(a[0] if a else Path("."))
             return R.StepResult(name, "PASS", 0.0, f"{name} ok")
         return _f
 
     for attr in ("step_synth", "step_pnr", "step_gds", "step_drc", "step_lvs",
                  "step_canonicalize_artefacts"):
         monkeypatch.setattr(R, attr, _step(attr[len("step_"):]))
-    monkeypatch.setattr(R, "step_signoff_spef_repair", lambda *a, **k: None)
-    monkeypatch.setattr(R, "step_postroute_repair_librelane", lambda *a, **k: None)
-    monkeypatch.setattr(R, "step_signoff_drv_wire_length_repair",
-                        lambda *a, **k: None)
+    def _no_repair(*a, **k):
+        _touch_active_recipe(a[0])
+        return None
+
+    for attr in ("step_signoff_spef_repair", "step_postroute_repair_librelane",
+                 "step_signoff_drv_wire_length_repair"):
+        monkeypatch.setattr(R, attr, _no_repair)
     # This fixture tests cache identity with synthetic route and timing data.
     # Its independent pre-stream admission is supplied as a measured premise;
     # the cache and GDS dispatch assertions below remain unchanged.

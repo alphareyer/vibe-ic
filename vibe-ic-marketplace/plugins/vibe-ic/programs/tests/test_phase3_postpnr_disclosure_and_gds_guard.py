@@ -37,6 +37,183 @@ sys.path.insert(0, str(PROGS))
 import phase3_one_shot_runner as R  # noqa: E402
 from _delivery_declaration import declare_delivery as _declare  # noqa: E402
 
+
+from contextlib import contextmanager
+import copy
+import os
+from types import ModuleType
+
+
+@contextmanager
+def _owning_runtime_state(runner):
+    """Return only this in-process invocation's retained runtime bindings.
+
+    The real activation and command guards remain installed throughout the
+    test; restoration is the invocation owner's responsibility at teardown.
+    """
+    modules = sys.modules.copy()
+    path = sys.path[:]
+    bytecode = sys.dont_write_bytecode
+    names = ("VIBEIC_RETAINED_PLUGIN_ROOT", "VIBEIC_RETAINED_PLUGIN_MANIFEST",
+             "PYTHONDONTWRITEBYTECODE", "EDA_CONTAINER")
+    environment = {name: os.environ.get(name) for name in names}
+    owners = [module for module in modules.values()
+              if isinstance(module, ModuleType)
+              and "_RUNTIME_PROGRAM_TREE" in vars(module)]
+    if runner not in owners:
+        owners.append(runner)
+    bindings = [(module, {name: vars(module)[name] for name in
+                 ("PROGRAMS_DIR", "_RUNTIME_PROGRAM_TREE", "__file__",
+                  "PROTOCOL_TB", "DEVICES_ROOT", "SKILLS_DIR")
+                 if name in vars(module)}) for module in owners]
+    progress = []
+    recordings = []
+    for module in owners:
+        pr = vars(module).get("_pr")
+        if pr is not None and all(pr is not old for old, _ in progress):
+            progress.append((pr, {name: getattr(pr, name) for name in
+                                  ("run", "run_best_effort") if hasattr(pr, name)}))
+        recorded = vars(module).get("_STEP_RECORDING")
+        if isinstance(recorded, dict):
+            recordings.append((recorded, copy.deepcopy(recorded)))
+    try:
+        yield
+    finally:
+        # Do not evict ordinary imports or reset unrelated modules. A retained
+        # import made/replaced by this invocation must not escape its project.
+        for name, module in list(sys.modules.items()):
+            filename = vars(module).get("__file__", "") if isinstance(module, ModuleType) else ""
+            if "/.vibeic/runtime-program-trees/" in str(filename):
+                if name in modules:
+                    sys.modules[name] = modules[name]
+                else:
+                    sys.modules.pop(name, None)
+        for module, values in bindings:
+            for name, value in values.items():
+                setattr(module, name, value)
+        for pr, values in progress:
+            for name, value in values.items():
+                setattr(pr, name, value)
+        for recorded, value in recordings:
+            recorded.clear()
+            recorded.update(value)
+        sys.path[:] = path
+        sys.dont_write_bytecode = bytecode
+        for name, value in environment.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _own_runtime_invocation(monkeypatch):
+    # _drive is also borrowed by other modules. Own the supplied patch scope,
+    # rather than a module-wide fixture which those callers would never run.
+    if getattr(monkeypatch, "_owning_runtime_restore", None) is not None:
+        return
+    state = _owning_runtime_state(R)
+    state.__enter__()
+    original_undo = monkeypatch.undo
+    monkeypatch._owning_runtime_restore = state
+
+    def undo_invocation():
+        try:
+            original_undo()
+        finally:
+            try:
+                state.__exit__(None, None, None)
+            finally:
+                monkeypatch.undo = original_undo
+                del monkeypatch._owning_runtime_restore
+
+    monkeypatch.undo = undo_invocation
+
+
+def _source_unit_transports(monkeypatch):
+    """These cache/geometry controls do not measure DFT, LEC or whole flow."""
+    for name in ("run_step11_dft_after_synth", "run_step13_lec_on_pnr_input"):
+        monkeypatch.setattr(R, name, lambda *a, _name=name, **k: [
+            R.StepResult(_name, "NOT_MEASURED", 0,
+                         "source-unit transport: no native DFT/LEC measurement",
+                         reason_class="not_executed")])
+    import subprocess
+    import re
+    real_run, real_popen = subprocess.run, subprocess.Popen
+
+    def run(argv, *args, **kwargs):
+        if (isinstance(argv, (list, tuple)) and len(argv) > 1
+                and Path(str(argv[1])).name in
+                ("flow_compliance_check.py", "flow_declared_producer_run.py")):
+            return subprocess.CompletedProcess(argv, 1,
+                stdout="source-unit transport: whole-flow NOT_MEASURED\n", stderr="")
+        return real_run(argv, *args, **kwargs)
+
+    class SourceOnlyPopen(real_popen):
+        # The real recorder subclasses Popen. Preserve that interface so the
+        # no-EDA guard does not prevent installation of the actual recorder.
+        def __init__(self, argv, *args, **kwargs):
+            values = argv if isinstance(argv, (list, tuple)) else [argv]
+            executable = Path(str(values[0])).name
+            eda = r"(?:^|[ /;|&])(?:yosys|openroad|klayout|magic|netgen|ngspice|sta)(?:$|[ ;|&])"
+            assert not (executable in ("yosys", "openroad", "klayout", "magic",
+                                      "netgen", "ngspice", "sta")
+                        or (executable in ("bash", "sh")
+                            and re.search(eda, " ".join(map(str, values))))), (
+                "source-unit fixture attempted EDA", argv)
+            super().__init__(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "Popen", SourceOnlyPopen)
+
+
+@pytest.mark.parametrize("exceptional_exit", [False, True])
+def test_owning_runtime_restores_retained_imports(tmp_path, exceptional_exit):
+    import importlib.util
+    import runtime_program_tree as runtime_tree
+
+    before = {name: getattr(R, name) for name in
+              ("PROGRAMS_DIR", "_RUNTIME_PROGRAM_TREE", "__file__")}
+    calls = {name: getattr(R._pr, name) for name in ("run", "run_best_effort")}
+    paths = sys.path[:]
+    bytecode = sys.dont_write_bytecode
+    environment = {name: os.environ.get(name) for name in
+                   (runtime_tree.ENV_ROOT, runtime_tree.ENV_MANIFEST,
+                    "PYTHONDONTWRITEBYTECODE", "EDA_CONTAINER")}
+    alias = "_owning_fixture_retained_probe"
+    replaced = "_owning_fixture_replaced_probe"
+    sentinel = ModuleType(replaced)
+
+    class EndInvocation(Exception):
+        pass
+
+    with pytest.MonkeyPatch.context() as patches:
+        patches.setitem(sys.modules, replaced, sentinel)
+        try:
+            with _owning_runtime_state(R):
+                R._activate_runtime_program_tree(tmp_path)
+                with pytest.raises(runtime_tree.RuntimeTreeError,
+                                   match="LIVE_PLUGIN_PATH_AFTER_RETENTION"):
+                    R._verify_runtime_command([sys.executable, before["__file__"]])
+                spec = importlib.util.spec_from_file_location(
+                    alias, R.PROGRAMS_DIR / "_path_layout.py")
+                retained = importlib.util.module_from_spec(spec)
+                sys.modules[alias] = retained
+                sys.modules[replaced] = retained
+                spec.loader.exec_module(retained)
+                assert retained.pnr_dir(tmp_path) == tmp_path / "phase3/stage3/pnr"
+                if exceptional_exit:
+                    raise EndInvocation()
+        except EndInvocation:
+            assert exceptional_exit
+        R._verify_runtime_command([sys.executable, before["__file__"]])
+        assert alias not in sys.modules
+        assert sys.modules[replaced] is sentinel
+    assert {name: getattr(R, name) for name in before} == before
+    assert all(getattr(R._pr, name) is value for name, value in calls.items())
+    assert sys.path == paths
+    assert sys.dont_write_bytecode == bytecode
+    assert {name: os.environ.get(name) for name in environment} == environment
+
 TOP = "chip_top"
 OLD_DIE, OLD_UTIL = "1233x1233", 0.40
 NEW_DIE, NEW_UTIL = "1500x1500", 0.30
@@ -285,24 +462,8 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float, execution_mode=
     """Neutralise everything main() does that is not the cache decision, and
     record the steps it invokes. `_pnr_cache_valid_for` and the geometry
     sidecar are LEFT REAL — the cache verdict is what is under test."""
-    # main() normally owns a process. This in-process fixture must restore
-    # its retained program-tree bindings when the test's monkeypatch exits.
-    # Keep real activation and command verification during the invocation.
-    import os
-    import runtime_program_tree as runtime_tree
-    for name in ("PROGRAMS_DIR", "_RUNTIME_PROGRAM_TREE", "__file__"):
-        monkeypatch.setattr(R, name, getattr(R, name))
-    for name in ("run", "run_best_effort"):
-        monkeypatch.setattr(R._pr, name, getattr(R._pr, name))
-    monkeypatch.setattr(sys, "path", sys.path[:])
-    monkeypatch.setattr(sys, "dont_write_bytecode", sys.dont_write_bytecode)
-    for name in (runtime_tree.ENV_ROOT, runtime_tree.ENV_MANIFEST,
-                 "PYTHONDONTWRITEBYTECODE", "EDA_CONTAINER"):
-        if name in os.environ:
-            monkeypatch.setenv(name, os.environ[name])
-        else:
-            monkeypatch.setenv(name, "")
-            monkeypatch.delenv(name)
+    _own_runtime_invocation(monkeypatch)
+    _source_unit_transports(monkeypatch)
     d = _Drive()
     if execution_mode is not None:
         import execution_policy
