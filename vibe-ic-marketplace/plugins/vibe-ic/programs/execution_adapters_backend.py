@@ -624,6 +624,7 @@ def _backend_input_contract(step_id: str, spec: Mapping[str, object]) -> tuple[o
                 if isinstance(item, Mapping) and item.get("path")]
     common = [
         "input/docs", "input/project.json", "input/step_0_5ic_answers.json", "input/submission_template",
+        {"from": "external", "path": "input/submission_template_source", "required": False},
         "phase1/generated_docs", "phase1/pdk_staging_read.json",
         "phase1/merged_docs", "phase2/stage1/rtl", "phase2/stage2", "reports/phase2/dft",
         "phase2/stage2/synth/synth_inputs.json",
@@ -944,6 +945,118 @@ def backend_canonical_input_contract(project: Path, step_id: str, declarations,
     return tuple(unique)
 
 
+def restore_continuation_prerequisites(project: Path) -> dict:
+    """Carry two original producer inputs into a relocated Default continuation.
+
+    This is input transport, not adoption of an old verdict. Current native
+    State/receipt, owner inputs, catalogue sources and pad geometry must agree
+    before the existing transactional copier touches either missing file.
+    """
+    import librelane_postroute as postroute
+    import librelane_contract as contract
+    import librelane_fill_dfm as fill
+    import latchup_esd_spacing_check as geometry
+    import submission_template_check as catalogue
+    import _submission_template as template
+    import _pad_ring as pads
+    import pad_bterm_coincidence_check as terminals
+    import execution_backend_snapshot as snapshot
+
+    root = Path(project).resolve(strict=True)
+    folder, state = postroute.stapostpnr_state(root)
+    receipt = contract.validate_step_receipt(folder, 'OpenROAD.STAPostPNR')
+    views = {name: Path(state[name]).resolve(strict=True) for name in ('def', 'odb', 'nl', 'sdc')}
+    timed = receipt['input']['state_files']
+    for path in views.values():
+        if timed.get(str(path)) != snapshot.sha(path):
+            raise ValueError('CONTINUATION_CURRENT_VIEW_CHANGED: ' + str(path))
+    owners = [p for p in views['def'].parents if (p / fill.RECORD_REL).is_file()]
+    if len(owners) != 1:
+        raise ValueError('CONTINUATION_ORIGINAL_OWNER_UNBOUND')
+    owner = owners[0]
+    if any(not path.is_relative_to(owner) for path in views.values()):
+        raise ValueError('CONTINUATION_WRONG_NATIVE_OWNER')
+    if owner == root:
+        return {'inputs': {}, 'reason': 'current project owns its native inputs'}
+    record = json.loads((owner / fill.RECORD_REL).read_text())
+    tool = record['odb']['tool']
+    native_state = Path(tool['state']).resolve(strict=True)
+    contract.validate_step_receipt(native_state.parent, fill.ODB_FILL_STEP)
+    filled = json.loads(native_state.read_text())
+    if (snapshot.sha(native_state) != tool['state_sha256']
+            or snapshot.sha(views['def']) != tool['filled_def_sha256']
+            or any(Path(filled[k]).resolve(strict=True) != views[k] for k in ('def', 'odb'))):
+        raise ValueError('CONTINUATION_ORIGINAL_GEOMETRY_UNBOUND')
+
+    # These are scientific owner/IO inputs, not optional filenames. A different
+    # continuation may not borrow another owner's catalogue or pad placement.
+    for rel in ('input/step_0_5ic_answers.json',
+                'input/submission_template/tapeout_declaration.json',
+                'input/submission_template/SELF_TAPEOUT.txt',
+                'reports/phase3/io_pad_chip_top.json'):
+        if snapshot.sha(owner / rel) != snapshot.sha(root / rel):
+            raise ValueError('CONTINUATION_OWNER_INPUT_CHANGED: ' + rel)
+    for rel in (template.STAGED_TEMPLATE_REL, template.SLOTS_DIR_REL):
+        a, b = {}, {}
+        source = snapshot.population(owner / rel, rel, a, boundary=owner)
+        current = snapshot.population(root / rel, rel, b, boundary=root)
+        if source != current or any(row.get('kind') == 'missing' for row in source.values()):
+            raise ValueError('CONTINUATION_CATALOGUE_SOURCE_CHANGED: ' + rel)
+
+    source_report = snapshot.safe_target(owner, template.REPORT_REL)
+    report = json.loads(source_report.read_text())
+    if report.get('program') != 'submission_template_ingest':
+        raise ValueError('CONTINUATION_CATALOGUE_PRODUCER_INVALID')
+    judged = catalogue.evaluate(root, report, None)
+    if judged.get('verdict') != template.VERDICT_NOT_APPLICABLE:
+        raise ValueError('CONTINUATION_CATALOGUE_CONSUMER_REFUSED: ' + str(judged.get('refusals')))
+
+    rel = pads.PADRING_DEF_REL
+    original = snapshot.safe_target(owner, rel)
+    roles = geometry.current_lef_context(root, folder, original)['roles']
+    roles.update(geometry.current_lef_context(root, folder, views['def'])['roles'])
+    before, after = (pads.parse_def(path.read_text()) for path in (original, views['def']))
+    def ring(value):
+        return {name: cell.as_dict() for name, cell in value.components.items()
+                if roles.get(cell.master, '').partition(' ')[0] in {'PAD', 'ENDCAP'}}
+    if (before.design != after.design or before.units != after.units
+            or before.diearea != after.diearea or not ring(before)
+            or ring(before) != ring(after)
+            or terminals.def_pins(original.read_text()) != terminals.def_pins(views['def'].read_text())):
+        raise ValueError('CONTINUATION_PADRING_GEOMETRY_CHANGED')
+    # Match IO net terminals too: identical placement is not identical wiring.
+    ring_names = set(ring(before))
+    def pad_nets(path):
+        return {net: sorted((inst, pin) for inst, pin in members
+                            if inst in ring_names or inst == 'PIN')
+                for net, members in terminals.def_net_terminals(path.read_text()).items()
+                if any(inst in ring_names or inst == 'PIN' for inst, pin in members)}
+    if pad_nets(original) != pad_nets(views['def']):
+        raise ValueError('CONTINUATION_PADRING_CONNECTIVITY_CHANGED')
+
+    selected = {template.REPORT_REL: source_report, rel: original}
+    hashes = {name: snapshot.sha(path) for name, path in selected.items()}
+    journal = snapshot.Journal(root)
+    try:
+        for name, source in selected.items():
+            target = snapshot.safe_target(root, name)
+            if target.exists():
+                if snapshot.sha(target) != hashes[name]:
+                    raise ValueError('CONTINUATION_EXISTING_INPUT_CHANGED: ' + name)
+                continue
+            data = source.read_bytes()
+            if hashlib.sha256(data).hexdigest() != hashes[name]:
+                raise ValueError('CONTINUATION_SOURCE_CHANGED: ' + name)
+            journal.write(name, data)
+    except BaseException:
+        journal.rollback()
+        raise
+    return {'source_project': str(owner), 'inputs': {
+        name: {'source': str(selected[name]), 'sha256': sha} for name, sha in hashes.items()},
+        'current_state': {'path': str(folder / 'state_out.json'),
+                          'sha256': snapshot.sha(folder / 'state_out.json')}}
+
+
 def backend_project_input_contract(project: Path, step_id: str, *,
                                    collect_missing: bool = False,
                                    execution_mode: str = "ultra") -> tuple[object, ...]:
@@ -999,6 +1112,15 @@ def backend_project_input_contract(project: Path, step_id: str, *,
         if require_nonempty and target.stat().st_size <= 0:
             return
         carry_checkpoint_file(raw)
+
+    # Preserve an existing producer's catalogue record along with the staged
+    # source tree; a later declaration consumer must see the same evidence.
+    carry_optional_checkpoint_file("reports/phase1/submission_template.json")
+    catalogue_source = root / "input/submission_template_source"
+    if catalogue_source.is_dir():
+        for target in sorted(catalogue_source.rglob("*")):
+            if target.is_file():
+                carry_checkpoint_file(target.relative_to(root).as_posix())
 
     # These are optional consumer edges.  Their absence means the consumer's
     # own condition does not apply; it must not become an issuer prerequisite.

@@ -764,6 +764,15 @@ def prepare_front_door(args, project: Path) -> int | None:
     context = execution_context(plan, args.entry_step, args.exit_step,
                                 runtime_tool_uses=manifest.get("runtime_tool_uses", manifest.get("tool_uses")),
                                 qualification_registry=manifest.get("qualification_registry"))
+    # The registered package/test consumer needs the same original catalogue
+    # and pad producer inputs after checkpoint relocation. Restore exact bytes
+    # only through the existing current-native-owner transport, before it runs.
+    import librelane_postroute as _continuation_postroute
+    if (any(row.get("id") == "D75" for row in
+            (context.get("resolved_rows") or [context.get("resolved_row", {})]))
+            and (project / _continuation_postroute.STEP23_RECORD).is_file()):
+        from execution_adapters_backend import restore_continuation_prerequisites
+        restore_continuation_prerequisites(project)
     # Native analog steps consume ordinary design configuration and artifacts.
     # Qualification documents are not a prerequisite for running these tools.
     if getattr(args, "container", None):
