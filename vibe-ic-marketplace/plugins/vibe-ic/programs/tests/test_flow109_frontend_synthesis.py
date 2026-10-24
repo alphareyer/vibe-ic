@@ -100,7 +100,9 @@ raise SystemExit(runner._main())
     native_binding=json.loads(receipt.read_text())['input']['flow109_synthesis']
     assert native_binding['context_sha256']==result['context_sha256']
     assert len(native_binding['qualification_uses'])==3
-    assert result['flow109_acceptance']=='NOT_MEASURED'
+    assert result['flow109_acceptance']=='PASS'
+    assert result['whole_flow_acceptance']=='NOT_MEASURED'
+    assert result['delivery_accepted'] is False
     assert result['producer']['status']=='PASS',result
     assert result['canonical_current_pass'],result
     assert result['component_status']=='PASS',result
@@ -175,3 +177,85 @@ def test_external_rtl_file_consumption_refuses_before_existing_owner(tmp_path,mo
     result=frontend.execute(tmp_path,context)
     assert result['reason']=='D22_TRANSITIVE_INPUT_UNIMPLEMENTED'
     assert result['native_started'] is False and calls==[]
+
+
+def engineering_case(project, monkeypatch):
+    """Ordinary source-owned entry, without a tool-qualification claim."""
+    from types import SimpleNamespace
+    features = next(p['features'] for p in flow109.load_registry()['reference_profiles']
+                    if p['name'] == 'Small digital IC without DFT')
+    context = flow109.execution_context(flow109.resolve_plan(features), 'D22', 'D22')
+    put(project, frontend.INPUT, {'schema': frontend.SCHEMA, 'top': 'unit_alpha', 'pdk': 'unit_pdk'})
+    put(project, 'phase2/stage1/rtl/unit_alpha.v', 'module unit_alpha(input a,output y);assign y=a;endmodule')
+    put(project, 'phase3/librelane_switch.json', {'steps': {'9': 'librelane'}})
+    lib = project / 'unit.lib'; lib.write_text('library(unit) {}')
+    import design_one_shot_runner as runner
+    monkeypatch.setattr(runner, '_phase2_pdk_config', lambda *a: SimpleNamespace(liberty=lib))
+    monkeypatch.setattr(frontend, 'operation_sources', lambda: {'native-source': 'current'})
+    path = project / 'context.json'; path.write_text(json.dumps(context))
+    monkeypatch.setenv('VIBEIC_FLOW109_CONTEXT', str(path))
+    return context
+
+
+def test_default_synthesis_uses_registered_owner_without_qualification_claim(tmp_path, monkeypatch):
+    context = engineering_case(tmp_path, monkeypatch)
+    assert flow109.source_owned_native_admission(context)['admitted'] is True
+    assert frontend.prepare(tmp_path, context)['manifest']['top'] == 'unit_alpha'
+    # Explicit unsupported qualification is never rescued by Default admission.
+    claimed = copy.deepcopy(context); claimed['runtime_tool_uses'] = []
+    assert flow109.source_owned_native_admission(claimed) is None
+
+
+@pytest.mark.parametrize('status,complete,expected', [('PASS', True, 'PASS'),
+                                                      ('PASS', False, 'NOT_MEASURED'),
+                                                      ('FAIL', False, 'FAIL'),
+                                                      ('NOT_MEASURED', False, 'NOT_MEASURED')])
+def test_default_synthesis_native_completion_controls_selected_exit(tmp_path, monkeypatch, status, complete, expected):
+    context = engineering_case(tmp_path, monkeypatch)
+    import step_preflight, step_output_collector, design_one_shot_runner as runner
+    def result(*args, **kwargs):
+        return runner.StepResult('yosys_synth', status, 0.0, 'controlled native disposition',
+            extras={'step_id':'9', 'completed':complete,
+                    'default_row_status':'PASS' if complete else 'NOT_MEASURED'})
+    monkeypatch.setattr(step_preflight, 'retained_call', result)
+    monkeypatch.setattr(step_output_collector, 'latest_pass', lambda *a: None)
+    result = frontend.execute(tmp_path, context)
+    selected = flow109._selected_step_result(tmp_path, context, result, frontend)
+    assert selected['default_row_status'] == expected
+    assert selected['whole_flow_acceptance'] == 'NOT_MEASURED'
+    assert selected['delivery_accepted'] is False
+
+
+def test_default_synthesis_missing_rtl_or_changed_input_stops_before_launch(tmp_path, monkeypatch):
+    context = engineering_case(tmp_path, monkeypatch)
+    prepared = frontend.prepare(tmp_path, context)
+    source = tmp_path / 'phase2/stage1/rtl/unit_alpha.v'
+    source.unlink()
+    with pytest.raises(admission.AdmissionRefusal, match='D22_INPUT_CHANGED'):
+        frontend._before(tmp_path, context, prepared)
+    with pytest.raises(admission.AdmissionRefusal, match='D22_RTL_ABSENT'):
+        frontend.prepare(tmp_path, context)
+
+
+def test_synthesis_config_without_physical_declaration_keeps_physical_entry_strict(tmp_path, monkeypatch):
+    import librelane_contract as contract
+    put(tmp_path,'phase1/generated_docs/L8_TIMING_WAVEFORM.json',
+        {'clock_domains':[{'role':'primary','source_pin':'clk','period_ns':20}]})
+    put(tmp_path,'phase1/generated_docs/L9_INTEGRATION_SPEC.json', {})
+    put(tmp_path,'phase1/generated_docs/L19_CONSTRAINTS_PDK.json', {})
+    output = tmp_path / 'synth.json'
+    result = contract.emit_config(tmp_path, 'unit_pdk', output, synthesis_only=True)
+    assert result['CLOCK_PERIOD'] == 20
+    assert 'DIE_AREA' not in result
+    with pytest.raises(FileNotFoundError):
+        contract.emit_config(tmp_path, 'unit_pdk', tmp_path / 'physical.json')
+
+
+def test_default_synthesis_detects_changed_native_sdc(tmp_path, monkeypatch):
+    context = engineering_case(tmp_path, monkeypatch)
+    put(tmp_path, 'phase3/stage3/pnr/constraint.sdc', 'create_clock -period 20 [get_ports clk]')
+    prepared = frontend.prepare(tmp_path, context)
+    assert 'phase3/stage3/pnr/constraint.sdc' in prepared['inputs']
+    put(tmp_path, 'phase3/stage3/pnr/constraint.sdc', 'create_clock -period 10 [get_ports clk]')
+    with pytest.raises(admission.AdmissionRefusal, match='D22_INPUT_CHANGED'):
+        frontend._before(tmp_path, context, prepared)

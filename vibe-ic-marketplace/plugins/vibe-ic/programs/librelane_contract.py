@@ -1420,7 +1420,7 @@ def _declared_flow_settings(l19: dict, pdk: str) -> tuple[dict, dict]:
     return result, sources
 
 
-def emit_config(project: Path, pdk: str, output: Path) -> dict:
+def emit_config(project: Path, pdk: str, output: Path, *, synthesis_only: bool = False) -> dict:
     """Emit only declared inputs; unavailable values stay absent, never guessed."""
     root = project / 'phase1/generated_docs'
     l8, l9, l19 = (_ldoc(root, name) for name in EMIT_CONFIG_LDOCS)
@@ -1460,7 +1460,11 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
         for key in ('PNR_SDC_FILE', 'SIGNOFF_SDC_FILE'):
             _set(result, sources, key, 'dir::' + str(sdc.relative_to(project)),
                  'phase3/stage3/pnr/constraint.sdc (L9-derived producer artefact)')
-    declared, declared_sources = declaration_config(project)
+    # Mapped synthesis does not require a die/core/pad placement declaration.
+    # A present declaration is still validated; physical callers remain strict.
+    declared, declared_sources = (({}, {}) if synthesis_only
+                                 and not (project / DECLARATION_REL).exists()
+                                 else declaration_config(project))
     for key, value in declared.items():
         _set(result, sources, key, value, declared_sources[key])
     settings, setting_sources = _declared_flow_settings(l19, pdk)
@@ -1629,7 +1633,7 @@ def emit_synthesis_config(project: Path, pdk: str, output: Path,
     if not rtl_files or any(not path.is_file() or not path.resolve().is_relative_to(project.resolve())
                             for path in rtl_files):
         raise Refusal('LL_SYNTH_INPUT_MISSING', 'selected RTL must exist inside the project')
-    result = emit_config(project, pdk, output)
+    result = emit_config(project, pdk, output, synthesis_only=True)
     sources = _load(output.with_suffix('.provenance.json'))
     _set(result, sources, 'PDK', pdk, 'resolved PDK supplied by phase3_one_shot_runner')
     if std_cell_library:

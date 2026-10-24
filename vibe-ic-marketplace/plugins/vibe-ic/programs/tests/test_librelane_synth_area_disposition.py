@@ -490,3 +490,30 @@ def test_selected_synthesis_critical_checks(tmp_path, monkeypatch, critical):
         assert 'critical CHECK errors' in str(report), report
     elif critical in ('missing_final', 'changed_final'):
         assert 'chk.rpt' in result.detail and 'chk.rpt' in str(report)
+
+
+@pytest.mark.parametrize('ceiling,damage,expected', [
+    (None, None, 'PASS'), ('0.5x0.5', None, 'FAIL'),
+    (None, 'pdk_consistency_check', 'FAIL'),
+    (None, 'area_report_conflicting', 'FAIL'),
+    (None, 'measurement_missing', 'NOT_MEASURED'),
+])
+def test_default_native_synthesis_completes_without_claiming_absent_ppa_target(
+        tmp_path, monkeypatch, ceiling, damage, expected):
+    import flow109_frontend as frontend
+    token = frontend._ACTIVE.set({'project': (tmp_path / 'project').resolve(),
+                                 'context': {'runtime_tool_uses': None}})
+    try:
+        result, calls, published, folder = synth_case(tmp_path, monkeypatch,
+                                                     ceiling=ceiling, damage=damage)
+    finally:
+        frontend._ACTIVE.reset(token)
+    assert result.status == expected, result.detail
+    if expected == 'PASS':
+        assert result.extras['completed'] is True
+        assert result.extras['default_row_status'] == 'PASS'
+        assert result.extras['ppa_acceptance'] == 'NOT_MEASURED'
+        assert [c for c in calls if c in CHECKS] == CHECKS
+        assert len(published) == 1
+    else:
+        assert not published

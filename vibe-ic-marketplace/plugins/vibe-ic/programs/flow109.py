@@ -262,6 +262,9 @@ def source_owned_native_dispatch(row: Mapping) -> dict | None:
                        or dispatch.get("operation_scope") != "native_analog_step"
                        or not (HERE / "analog_native_flow.py").is_file()
                        or native not in legacy | {"flow109." + str(row.get("id"))})
+        elif adapter == "flow109_frontend":
+            invalid = (common_invalid or row.get("id") != "D22" or native != "9"
+                       or dispatch.get("producer") != "design_one_shot_runner.py:step_yosys_synth")
         else:
             invalid = (common_invalid
                        or not isinstance(adapter, str) or not adapter.startswith("flow109_")
