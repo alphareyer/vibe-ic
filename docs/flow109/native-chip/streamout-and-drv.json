@@ -1,0 +1,34 @@
+{
+  "PAD_GDS": [
+    "pdk_dir::libs.ref/gf180mcu_fd_io/gds/gf180mcu_fd_io.gds"
+  ],
+  "MAGIC_GDS_FLATGLOB": [
+    "*_CDNS_*",
+    "*$$*",
+    "M1_N*",
+    "M1_P*",
+    "M2_M1*",
+    "M3_M2*",
+    "nmos_5p0*",
+    "nmos_1p2*",
+    "pmos_5p0*",
+    "pmos_1p2*",
+    "via1_*",
+    "ypass_gate*",
+    "G_ring_*",
+    "dcap_103*",
+    "din_*",
+    "mux821_*",
+    "rdummy_*",
+    "pmoscap_*",
+    "xdec_*",
+    "ypredec*",
+    "xpredec*",
+    "prexdec_*",
+    "xdec8_*",
+    "xdec16_*",
+    "xdec32_*",
+    "sa_*"
+  ],
+  "RUN_POST_GRT_DESIGN_REPAIR": true
+}

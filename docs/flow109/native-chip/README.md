@@ -11,3 +11,11 @@ Keep the existing owner SDC with `set_max_fanout 4 [current_design]`, slew/cap c
 Use the published `https://vibeic.ai/70step_dev/native-default-step-map.csv` mapping. Read a formal native run with `programs/native_flow_results.py RUN /path/to/native-default-step-map.csv --returncode RC --selection SELECTION --accepted-ledger LEDGER --output RESULT --rows-dir ROWS`. The reader records native outcomes and does not modify the global ledger. It does not rerun checkers or infer missing analyses. Do not use it to publish diagnostic runs whose error switches were disabled.
 
 Already accepted IDs D10, D11, D19, D20, D22, D31, D32, D34 and D35 gain native evidence, not additional points. Final-geometry and external obligations retain their stated CSV scope.
+
+## IO streamout and native post-GRT repair
+
+Load `streamout-and-drv.json` after the design/PDN configuration when using this IO library. It selects the actually instantiated `gf180mcu_fd_io` GDS, avoiding an unused `ef_io` wrapper with an undefined child. Official wafer.space import-flatten patterns resolve duplicate PDK contact subcells while retaining their geometry; no DRC rule is suppressed. Paths use native `pdk_dir::` resolution.
+
+`RUN_POST_GRT_DESIGN_REPAIR=true` enables LibreLane's existing native repair before detailed routing. On the retained SPM checkpoint this changed fanout violations from 5 to 0 and slew violations from 4 to 0, with zero cap violations across all nine corners and zero routing DRC. Fanout4, slew3ns and cap0.2pF are unchanged. This repair result was collected from a diagnostic segment, not counted as final-IC or Dxx acceptance.
+
+The source overlay was also replayed through native Magic.StreamOut under unchanged formal error switches: PASS in17.14s. The previous uncorrected native streamout failed. No ERROR_ON switch, threshold, baseline, waiver or disconnected-pin exception is present in this overlay. Output-only spare pins remain subject to the owner's pending rule decision; final signoff has not been completed.
