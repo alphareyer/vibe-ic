@@ -2279,6 +2279,10 @@ def test_the_class_default_route_resolves_the_pdk_like_every_other_step(tmp_path
     design's PDK and image (materialised from the image), as 15..20 and 32 do;
     measured on spm: asking with no PDK/image refused LL_PDK_ROOT_NOT_DECLARED."""
     import test_librelane_route as tr
+    from _stated_eda_image import mock_docker_route
+    # This unit control substitutes the Docker/process edge, not a LOCAL
+    # execution. Keep its resolver question independent of the outer test CID.
+    mock_docker_route(monkeypatch)
     runner = tr.runner
     project, out_dir, pnr_tcl = tr._route_project(tmp_path, {'steps': {'21': 'librelane'}})
     (project / 'phase3/librelane_switch.json').unlink(missing_ok=True)
