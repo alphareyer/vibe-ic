@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "version": 2,
+    "flow": "Chip",
+    "substituting_steps": {
+      "+OpenROAD.DetailedPlacement": "Vibeic.InsertSpareCells"
+    }
+  },
+  "MAX_FANOUT_CONSTRAINT": 4,
+  "MAX_TRANSITION_CONSTRAINT": 3,
+  "MAX_CAPACITANCE_CONSTRAINT": 0.2,
+  "PDN_VOFFSET": 7,
+  "PDN_HOFFSET": 7,
+  "PDN_SKIPTRIM": false,
+  "PDN_CORE_RING": true,
+  "PDN_CORE_RING_CONNECT_TO_PADS": true,
+  "MAGIC_EXT_USE_GDS": true,
+  "MAX_SLEW_VIOLATION_CORNERS": [
+    "*"
+  ],
+  "MAX_CAP_VIOLATION_CORNERS": [
+    "*"
+  ],
+  "VIBEIC_SPARE_DENSITY": 0.05,
+  "PDN_CORE_RING_CONNECT_TO_PAD_LAYERS": [
+    "Metal2"
+  ],
+  "PDN_CORE_RING_HWIDTH": 1.6,
+  "PDN_CORE_RING_VWIDTH": 1.6,
+  "PDN_CORE_RING_HSPACING": 1.7,
+  "PDN_CORE_RING_VSPACING": 1.7,
+  "PDN_CORE_RING_HOFFSET": -20,
+  "PDN_CORE_RING_VOFFSET": -20,
+  "PDN_CFG": "dir::pdn_cfg.tcl"
+}
