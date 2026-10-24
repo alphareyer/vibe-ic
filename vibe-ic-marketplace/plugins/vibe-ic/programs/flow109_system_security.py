@@ -1,0 +1,291 @@
+"""D16/D17/D73 readers for existing full-stack and formal producers.
+
+This is deliberately a narrow adapter.  It does not generate scenarios or
+security properties and it never turns a document/checklist claim into a
+measurement.  D16 reopens ``full_stack_functional_tb`` output.  D17 reopens
+one or more ``formal_property_run`` outputs whose SBY and transcript are still
+current.  D73 additionally binds those proved requirements to the adopted
+implementation netlist and checks the explicitly supported OpenTitan AES
+structural population.  Physical side-channel resistance is outside this
+component and remains NOT_MEASURED.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+import uuid
+
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+from _atomic_artefact import write_json
+
+SCHEMA = "vibeic.flow109.system-security.v1"
+MANIFESTS = {row: f"input/flow109/{row}.json" for row in ("D16", "D17", "D73")}
+SECURITY_IDS = (
+    "opentitan_aes.shadowed_controls",
+    "opentitan_aes.sparse_fsm_alert",
+    "opentitan_aes.lifecycle_escalation",
+)
+
+
+class Refusal(RuntimeError):
+    def __init__(self, code: str, detail: str, *, status: str = "NOT_MEASURED"):
+        self.code, self.status = code, status
+        super().__init__(f"{code}: {detail}")
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _read(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise Refusal("FLOW109_SECURITY_INPUT_ABSENT_OR_INVALID", str(path)) from exc
+    if not isinstance(value, dict):
+        raise Refusal("FLOW109_SECURITY_INPUT_INVALID", str(path))
+    return value
+
+
+def _bound(project: Path, item: object, label: str) -> tuple[Path, str]:
+    if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+        raise Refusal("FLOW109_SECURITY_INPUT_UNBOUND", label)
+    rel = item.get("path")
+    digest = item.get("sha256")
+    if not isinstance(rel, str) or not re.fullmatch(r"[0-9a-f]{64}", str(digest)):
+        raise Refusal("FLOW109_SECURITY_INPUT_UNBOUND", label)
+    path = Path(rel)
+    path = path if path.is_absolute() else project / path
+    if path.is_symlink() or not path.is_file() or _sha(path) != digest:
+        raise Refusal("FLOW109_SECURITY_INPUT_STALE", label)
+    return path.resolve(), digest
+
+
+def operation_sources() -> dict[str, str]:
+    return {"programs/flow109_system_security.py": _sha(Path(__file__))}
+
+
+def _context(context: dict) -> tuple[str, dict]:
+    row_id = str(context.get("requested_step") or "")
+    if row_id not in MANIFESTS or context.get("native_step_id") != f"flow109.{row_id}":
+        raise Refusal("FLOW109_SECURITY_CONTEXT_MISMATCH", row_id)
+    row = context.get("resolved_row") or {}
+    dispatch = ((row.get("profile") or {}).get("dispatch") or {})
+    if (row.get("id") != row_id
+            or dispatch.get("adapter") != "flow109_system_security"):
+        raise Refusal("FLOW109_SECURITY_CONTEXT_MISMATCH", "source-owned dispatch required")
+    return row_id, dispatch
+
+
+def _manifest(project: Path, row_id: str) -> tuple[dict, dict[str, str]]:
+    relative = MANIFESTS[row_id]
+    path = project / relative
+    body = _read(path)
+    if body.get("schema") != SCHEMA or body.get("step_id") != row_id:
+        raise Refusal(f"{row_id}_INPUT_INVALID", "schema/step_id")
+    return body, {relative: _sha(path)}
+
+
+def _current_ref(project: Path, ref: object, label: str,
+                 inputs: dict[str, str]) -> tuple[Path, dict]:
+    path, digest = _bound(project, ref, label)
+    inputs[str(path)] = digest
+    return path, _read(path)
+
+
+def _case_map(record: dict) -> dict[str, dict]:
+    rows = record.get("cases")
+    if not isinstance(rows, list):
+        raise Refusal("D16_NATIVE_RECORD_INVALID", "cases")
+    out = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+            raise Refusal("D16_NATIVE_RECORD_INVALID", "case row")
+        if row["name"] in out:
+            raise Refusal("D16_NATIVE_RECORD_INVALID", "duplicate case")
+        out[row["name"]] = row
+    return out
+
+
+def _d16(project: Path, manifest: dict, inputs: dict[str, str]) -> dict:
+    _path, record = _current_ref(project, manifest.get("full_stack_record"),
+                                 "full_stack_record", inputs)
+    if (record.get("program") != "full_stack_functional_tb"
+            or record.get("schema") != "vibeic.full_stack_functional.v1"):
+        raise Refusal("D16_NATIVE_PRODUCER_MISMATCH", "canonical producer required")
+    if record.get("verdict") == "FAIL":
+        raise Refusal("D16_MEASURED_FAILURE", str(record.get("reason")), status="FAIL")
+    if record.get("verdict") != "PASS":
+        raise Refusal("D16_NATIVE_NOT_MEASURED", str(record.get("reason")))
+    top = record.get("full_stack_top") or {}
+    if not top.get("module") or top.get("refusal"):
+        raise Refusal("D16_FULL_STACK_TOP_UNBOUND", str(top.get("refusal")))
+    design_input = record.get("design_input")
+    if not isinstance(design_input, dict) or not design_input:
+        raise Refusal("D16_DESIGN_INPUT_UNBOUND", "producer input digest absent")
+    for name, digest in design_input.items():
+        if digest is None:
+            continue
+        path = project / "phase1/generated_docs" / str(name)
+        if (not re.fullmatch(r"[0-9a-f]{64}", str(digest)) or path.is_symlink()
+                or not path.is_file() or _sha(path) != digest):
+            raise Refusal("D16_DESIGN_INPUT_STALE", str(name))
+        inputs[str(path.resolve())] = digest
+    for population in ("sources", "models"):
+        rows = record.get(population)
+        if not isinstance(rows, list) or not rows:
+            raise Refusal("D16_NATIVE_POPULATION_UNBOUND", population)
+        for index, item in enumerate(rows):
+            path, digest = _bound(project, item, f"{population}[{index}]")
+            inputs[str(path)] = digest
+    required = manifest.get("required_scenarios")
+    if not isinstance(required, list) or not required:
+        raise Refusal("D16_REQUIRED_SCENARIOS_EMPTY", "nonempty source-declared population required")
+    cases = _case_map(record)
+    covered = []
+    for item in required:
+        if (not isinstance(item, dict) or set(item) != {"id", "case"}
+                or not all(isinstance(item.get(k), str) and item[k] for k in ("id", "case"))):
+            raise Refusal("D16_REQUIRED_SCENARIO_INVALID", str(item))
+        case = cases.get(item["case"])
+        disposition = (case or {}).get("step5_disposition") or {}
+        accepted = ((case or {}).get("state") == "passed"
+                    or (disposition.get("disposition") == "isa_credited"
+                        and disposition.get("blocking") is False))
+        if not accepted:
+            raise Refusal("D16_REQUIRED_SCENARIO_NOT_PASSED", item["id"])
+        for key in ("tb", "run_log"):
+            rel, digest = case.get(key), case.get(key + "_sha256")
+            if rel and digest:
+                path, current = _bound(project, {"path": rel, "sha256": digest},
+                                       f"{item['id']}.{key}")
+                inputs[str(path)] = current
+        covered.append({"id": item["id"], "case": item["case"]})
+    return {"required_fullchip_scenarios": covered,
+            "boot_workload_protocol_errors": 0,
+            "blocking_system_scenario_failures": 0,
+            "system_signoff_required_scenarios": covered,
+            "producer": "full_stack_functional_tb"}
+
+
+def _formal_result(project: Path, ref: object, obligation: str,
+                   inputs: dict[str, str]) -> dict:
+    _path, result = _current_ref(project, ref, obligation, inputs)
+    if result.get("program") != "formal_property_run":
+        raise Refusal("D17_FORMAL_PRODUCER_MISMATCH", obligation)
+    if result.get("verdict") == "FAIL" or int(result.get("failed", 0) or 0) > 0:
+        raise Refusal("D17_SECURITY_COUNTEREXAMPLE", obligation, status="FAIL")
+    if result.get("verdict") != "PASS" or result.get("all_proved") is not True:
+        raise Refusal("D17_SECURITY_PROOF_INCOMPLETE", obligation)
+    if not result.get("unbounded_proved"):
+        raise Refusal("D17_SECURITY_PROOF_BOUNDED_ONLY", obligation)
+    for key in ("sby", "evidence"):
+        rel = result.get(key)
+        if not isinstance(rel, str):
+            raise Refusal("D17_FORMAL_EVIDENCE_UNBOUND", f"{obligation}.{key}")
+        path = project / rel
+        if path.is_symlink() or not path.is_file():
+            raise Refusal("D17_FORMAL_EVIDENCE_STALE", f"{obligation}.{key}")
+        inputs[str(path.resolve())] = _sha(path)
+    tags = result.get("flow109_requirement_ids")
+    if tags != [obligation]:
+        raise Refusal("D17_FORMAL_REQUIREMENT_MISMATCH", obligation)
+    return {"id": obligation, "proof_strength": result.get("proof_strength"),
+            "properties": result.get("properties")}
+
+
+def _d17(project: Path, manifest: dict, inputs: dict[str, str]) -> dict:
+    required = manifest.get("required_security_requirements")
+    proofs = manifest.get("formal_results")
+    if required != list(SECURITY_IDS) or not isinstance(proofs, dict) or set(proofs) != set(SECURITY_IDS):
+        raise Refusal("D17_SECURITY_DENOMINATOR_INVALID", "exact supported AES set required")
+    covered = [_formal_result(project, proofs[item], item, inputs) for item in SECURITY_IDS]
+    return {"threat_requirements_coverage": covered,
+            "security_counterexample_failures": 0,
+            "security_metric_targets": {"status": "NOT_MEASURED",
+                "reason": "no source-declared quantitative security bounds; physical threats excluded"},
+            "limitations": ["SecMasking=0 masking evaluation excluded",
+                            "power/EM/timing side-channel and physical fault resistance NOT_MEASURED"]}
+
+
+def _d73(project: Path, manifest: dict, inputs: dict[str, str]) -> dict:
+    d17_path, d17 = _current_ref(project, manifest.get("d17_component"),
+                                 "d17_component", inputs)
+    if (d17.get("step_id") != "D17" or d17.get("component_status") != "PASS"
+            or d17.get("source_sha256") != operation_sources()):
+        raise Refusal("D73_D17_NOT_CURRENT", str(d17_path))
+    _d44_path, d44 = _current_ref(project, manifest.get("d44_component"),
+                                  "d44_component", inputs)
+    if (d44.get("step_id") != "D44" or d44.get("component_status") != "PASS"
+            or d44.get("metric_acceptance_status") != "PASS"):
+        raise Refusal("D73_D44_EQUIVALENCE_NOT_CURRENT", str(_d44_path))
+    netlist_path, _digest = _bound(project, manifest.get("adopted_netlist"), "adopted_netlist")
+    inputs[str(netlist_path)] = _digest
+    baseline_ref = d44.get("common_baseline")
+    _baseline_path, baseline = _current_ref(project, baseline_ref,
+                                            "d44_common_baseline", inputs)
+    if (baseline.get("adopted_netlist") or {}).get("sha256") != _digest:
+        raise Refusal("D73_D44_NETLIST_IDENTITY_MISMATCH", str(netlist_path))
+    text = netlist_path.read_text(errors="replace")
+    top = manifest.get("top")
+    if not isinstance(top, str) or not re.search(rf"\bmodule\s+{re.escape(top)}\s*\(", text):
+        raise Refusal("D73_ADOPTED_NETLIST_TOP_MISMATCH", str(top))
+    required_patterns = {
+        SECURITY_IDS[0]: (r"shadow_q", r"committed_q", r"err_(?:update|storage)"),
+        SECURITY_IDS[1]: (r"aes_ctrl_cs|sparse", r"alert"),
+        SECURITY_IDS[2]: (r"lc_escalate_en", r"alert_fatal"),
+    }
+    population = []
+    for obligation, patterns in required_patterns.items():
+        missing = [pattern for pattern in patterns if not re.search(pattern, text)]
+        if missing:
+            raise Refusal("D73_IMPLEMENTED_SECURITY_POPULATION_MISSING",
+                          f"{obligation}: {missing}")
+        population.append({"id": obligation, "patterns": list(patterns)})
+    header = re.search(rf"\bmodule\s+{re.escape(top)}\s*\((.*?)\);", text, re.S)
+    ports = header.group(1) if header else ""
+    forbidden = re.findall(r"\b(?:scan|jtag|debug|test_en)[A-Za-z0-9_$]*\b", ports, re.I)
+    if forbidden:
+        raise Refusal("D73_TEST_DEBUG_ACCESS_EXPOSED", ",".join(sorted(set(forbidden))), status="FAIL")
+    return {"final_security_requirements": population,
+            "scan_debug_access_violations": 0,
+            "final_analog_security_targets": {"status": "NOT_APPLICABLE",
+                "reason": "digital AES supported subset"},
+            "limitations": ["structural adopted-netlist population plus current D17 proofs only",
+                            "physical side-channel and fault-injection signoff NOT_MEASURED"]}
+
+
+def execute(project, context):
+    project = Path(project).resolve()
+    row_id = str(context.get("requested_step") or "UNKNOWN")
+    attempt = project / "reports/flow109" / row_id / uuid.uuid4().hex
+    attempt.mkdir(parents=True, exist_ok=False)
+    record = {"schema": SCHEMA, "step_id": row_id,
+              "component_status": "NOT_MEASURED", "flow109_acceptance": "NOT_MEASURED",
+              "whole_flow_acceptance": "NOT_MEASURED", "native_started": False,
+              "context_sha256": context.get("context_sha256"),
+              "source_sha256": operation_sources()}
+    try:
+        row_id, _dispatch = _context(context)
+        manifest, inputs = _manifest(project, row_id)
+        record["native_started"] = True
+        if row_id == "D16":
+            metrics = _d16(project, manifest, inputs)
+        elif row_id == "D17":
+            metrics = _d17(project, manifest, inputs)
+        else:
+            metrics = _d73(project, manifest, inputs)
+        record.update(component_status="PASS", reason=None,
+                      input_sha256=inputs, metrics=metrics)
+    except Refusal as exc:
+        record.update(component_status=exc.status, reason=exc.code, detail=str(exc))
+    write_json(attempt / "receipt.json", record)
+    record["receipt"] = {"path": str((attempt / "receipt.json").relative_to(project)),
+                         "sha256": _sha(attempt / "receipt.json")}
+    return record

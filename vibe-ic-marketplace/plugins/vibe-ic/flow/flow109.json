@@ -4405,8 +4405,29 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "Icarus Verilog/vvp + cocotb + Python workload runner",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "full_stack_functional_tb.generate",
+            "flow109_system_security.execute"
+          ],
+          "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
+          "dispatch": {
+            "adapter": "flow109_system_security",
+            "native_step_id": "flow109.D16",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "flow109_metrics_status": "IMPLEMENTED_D16_COMPONENT_RUNTIME",
+            "engine_families": ["python3", "iverilog", "vvp"],
+            "engine_executables": {
+              "python3": "python3",
+              "iverilog": "iverilog",
+              "vvp": "vvp"
+            },
+            "engine_steps": {
+              "python3": ["flow109_system_security.execute"],
+              "iverilog": ["full_stack_functional_tb.generate"],
+              "vvp": ["full_stack_functional_tb.generate"]
+            }
+          }
         }
       ],
       "complementary_tools": [],
@@ -4582,8 +4603,31 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "SymbiYosys + cocotb/Python threat harness",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "formal_property_run.run",
+            "flow109_system_security.execute"
+          ],
+          "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
+          "dispatch": {
+            "adapter": "flow109_system_security",
+            "native_step_id": "flow109.D17",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "flow109_metrics_status": "IMPLEMENTED_D17_COMPONENT_RUNTIME",
+            "engine_families": ["python3", "sby", "yosys", "yosys-abc"],
+            "engine_executables": {
+              "python3": "python3",
+              "sby": "sby",
+              "yosys": "yosys",
+              "yosys-abc": "yosys-abc"
+            },
+            "engine_steps": {
+              "python3": ["flow109_system_security.execute"],
+              "sby": ["formal_property_run.run"],
+              "yosys": ["formal_property_run.run"],
+              "yosys-abc": ["formal_property_run.run"]
+            }
+          }
         }
       ],
       "complementary_tools": [],
@@ -16045,9 +16089,29 @@
           "select_when": "otherwise",
           "provider": "other",
           "tools": "SymbiYosys + cocotb/Python secure-scan/debug harness",
-          "native_steps": [],
-          "capability_status": "DEFERRED_CONTRACT_ONLY",
-          "execution_status": "UNIMPLEMENTED"
+          "native_steps": [
+            "formal_property_run.run",
+            "flow109_system_security.execute"
+          ],
+          "capability_status": "SUPPORTED_AES_STRUCTURAL_SUBSET",
+          "execution_status": "EXISTING_COMPONENT_DISPATCH_NOT_109_ACCEPTANCE",
+          "dispatch": {
+            "adapter": "flow109_system_security",
+            "native_step_id": "flow109.D73",
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "flow109_metrics_status": "IMPLEMENTED_D73_COMPONENT_RUNTIME",
+            "engine_families": ["python3"],
+            "engine_executables": {"python3": "python3"},
+            "engine_steps": {
+              "python3": ["flow109_system_security.execute"]
+            }
+          },
+          "limitations": [
+            "OpenTitan AES shadowed-control, sparse-FSM alert and lifecycle-escalation subset only",
+            "SecMasking=0 masking evaluation excluded",
+            "physical side-channel and fault-injection signoff remain NOT_MEASURED"
+          ]
         }
       ],
       "complementary_tools": [],
