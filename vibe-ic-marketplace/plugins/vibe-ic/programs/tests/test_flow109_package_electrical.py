@@ -274,3 +274,33 @@ def test_required_thermal_blocks_normal_d67_consumer_without_changing_flag(tmp_p
     assert report['reason'] == 'D67_REQUIRED_SCOPE_UNSUPPORTED'
     assert report['native_started'] is False
     assert json.loads((project / 'manifest.json').read_text())['features']['package_model_required'] is True
+
+
+@pytest.mark.parametrize('card', [
+    'not Rseries die neck 10', 'Rseries die neck 10 not measured',
+    'Rseries die neck no10', 'Rseries die neck 10unknown',
+    'Rseries die neck 1_0', "Rseries die neck '10'",
+    '.include absent.sp', '.param resistance=10',
+])
+def test_structured_model_reader_refuses_prose_and_undeclared_cards(tmp_path, card):
+    source = require_repo('vibe-ic-marketplace', 'plugins', 'vibe-ic', 'programs',
+                          'tests', 'fixtures', 'flow109_d67', 'package.sp').read_text()
+    model = tmp_path / 'provided.sp'
+    model.write_text(source.replace('Rseries die neck 10', card))
+    with pytest.raises(d67.AdmissionRefusal, match='D67_MODEL_'):
+        d67._model(model, {'subckt': 'neutral_package'})
+
+
+def test_formal_spice_net_named_not_still_runs_and_obeys_bounds(tmp_path):
+    project = tmp_path / 'case'
+    context, req, ref = _case(project)
+    source = Path(req['cases'][0]['model']['path']).read_text()
+    model = _put(project, 'input/formal_not.sp', source.replace('neck', 'not'))
+    req['cases'][0]['model'] = model
+    ref['reference']['models'][0]['model'] = model
+    _bind(project, req, ref)
+    report = _native(project, context)
+    assert report['component_status'] == 'PASS', report
+    assert report['native'][0]['returncode'] == 0
+    checks = report['metrics']['package_rc_thermal_validity']['checks']
+    assert any(c['metric'] == 'Rseries' and c['value'] == 10.0 and c['status'] == 'PASS' for c in checks)

@@ -27,7 +27,8 @@ import flow109
 from flow109_admission import AdmissionRefusal, require_launch_admission
 import flow109_analog_model_check as model_check
 from flow109_metric_acceptance import evaluate_operator, MetricRefusal, _identity_complete
-from spice_correlation_check import extract_subckt
+from _pad_ring import parse_spice_subckts
+from analog_a7_post_layout_emit import spice_number
 
 SCHEMA = 'vibeic.flow109.package-electrical.v1'
 INPUT = 'input/flow109/D67.json'
@@ -79,7 +80,7 @@ def _record(project, path):
 
 
 def operation_sources():
-    names = ('flow109_package_electrical.py', 'spice_correlation_check.py',
+    names = ('flow109_package_electrical.py', '_pad_ring.py', 'analog_a7_post_layout_emit.py',
              'flow109_analog_model_check.py', '_specrtl_common.py', '_watchdog.py',
              '_atomic_artefact.py', 'flow109_metric_acceptance.py',
              'flow109.py', 'flow109_admission.py')
@@ -107,32 +108,45 @@ def _approved(project, doc):
 
 def _model(path, case):
     text = path.read_text()
-    extracted = extract_subckt(text, case['subckt'], model_map={})
+    parsed = parse_spice_subckts(text)
     lines = [line.strip() for line in text.splitlines()
              if line.strip() and not line.lstrip().startswith('*')]
-    if (extracted is None or len(lines) < 3
+    if (set(parsed) != {case['subckt']} or len(lines) < 3
             or lines[0].lower().split()[:2] != ['.subckt', case['subckt'].lower()]
             or lines[-1].lower().split() not in
                (['.ends'], ['.ends', case['subckt'].lower()])):
         _refuse('MODEL_SCOPE_UNSUPPORTED', 'one self-contained passive subcircuit required')
-    pins = extracted[0]
+    pins, cards = parsed[case['subckt']]
+    # Keep the original closed subset: do not let a permissive CDL reader
+    # discard directives, extra subcircuits, parameters or unknown tokens.
+    if (lines[0].split()[2:] != pins
+            or cards != [line.split() for line in lines[1:-1]]):
+        _refuse('MODEL_SCOPE_UNSUPPORTED', 'exact formal SPICE cards required')
     if len(pins) != 3 or len(set(pins)) != 3 or not all(IDENT.fullmatch(p) for p in pins):
         _refuse('MODEL_PORTS_UNSUPPORTED', pins)
     components = {}
     units = {'R': 'ohm', 'L': 'H', 'C': 'F'}
-    suffixes = {'': 1, 't': 1e12, 'g': 1e9, 'meg': 1e6, 'k': 1e3,
-                'm': 1e-3, 'u': 1e-6, 'n': 1e-9, 'p': 1e-12, 'f': 1e-15}
     nodes = set()
-    for line in lines[1:-1]:
-        words = line.split()
+    for words in cards:
+        line = ' '.join(words)
         if (len(words) != 4 or not IDENT.fullmatch(words[0])
                 or words[0][0].upper() not in units
                 or not all(IDENT.fullmatch(node) for node in words[1:3])):
             _refuse('MODEL_SCOPE_UNSUPPORTED', line)
-        match = re.fullmatch(r'(' + model_check.NUMBER + r')([A-Za-z]*)', words[3])
-        if not match or match[2].lower() not in suffixes or words[0] in components:
+        token = words[3]
+        # Validate one complete numeric token before consulting the existing
+        # SPICE scale reader; prose suffixes and quoted expressions stay out.
+        numeric = token.rstrip('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ')
+        suffix = token[len(numeric):].lower()
+        if (not numeric or set(numeric) - set('0123456789.eE+-')
+                or suffix not in ('', 't', 'g', 'meg', 'k', 'm', 'u', 'n', 'p', 'f')
+                or words[0] in components):
             _refuse('MODEL_PARAMETER_UNSUPPORTED', line)
-        value = _number(float(match[1]) * suffixes[match[2].lower()], positive=True)
+        try:
+            float(numeric)
+        except ValueError:
+            _refuse('MODEL_PARAMETER_UNSUPPORTED', line)
+        value = _number(spice_number(token), positive=True)
         components[words[0]] = {'value': value, 'unit': units[words[0][0].upper()]}
         nodes.update(words[1:3])
     if not set(pins) <= nodes or {name[0].upper() for name in components} != {'R', 'L', 'C'}:
