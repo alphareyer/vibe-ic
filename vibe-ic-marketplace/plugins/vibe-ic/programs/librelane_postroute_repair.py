@@ -2102,6 +2102,7 @@ def retained_finished_candidate_readback(project: Path) -> Optional[Dict[str, An
     that merely says PASS is deliberately insufficient.
     """
     import librelane_contract as _ll
+    import librelane_pv_signoff as _pv
 
     project = Path(project).resolve()
     report_path = project / REPORT_REL
@@ -2234,11 +2235,20 @@ def retained_finished_candidate_readback(project: Path) -> Optional[Dict[str, An
                     or retained.get("verdict") != "PASS"
                     or tuple(retained.get("required_steps") or ()) != required):
                 raise ValueError(f"full finishing {kind.upper()} authority differs")
-            for metric in (retained.get("metrics") or {}).values():
+            expected_metrics = {metric: step for step in _pv.HALVES[kind]
+                                for metric in _pv.PRODUCED[step]}
+            populated = retained.get("metrics")
+            if (not isinstance(populated, dict)
+                    or set(populated) != set(expected_metrics)):
+                raise ValueError(
+                    f"full finishing {kind.upper()} metric population differs")
+            for name, metric in populated.items():
                 if (not isinstance(metric, dict)
+                        or metric.get("step") != expected_metrics[name]
                         or metric.get("status") != "MEASURED"
                         or metric.get("value") != 0):
-                    raise ValueError(f"full finishing {kind.upper()} metric failed")
+                    raise ValueError(
+                        f"full finishing {kind.upper()} metric producer/value differs")
                 folder = _resume_host_path(project, ctx, metric["folder"])
                 receipt = _ll.validate_step_receipt(folder, metric["step"])
                 if (metric.get("state_out_sha256") !=

@@ -2671,7 +2671,13 @@ def _finished_readback_fixture(tmp_path):
                       '03-klayout-density'))),
             ('lvs', (('magic__illegal_overlap__count', 'Magic.SpiceExtraction',
                       '01-magic-spiceextraction'),
-                     ('design__lvs_error__count', 'Netgen.LVS', '02-netgen-lvs')))):
+                     ('design__lvs_error__count', 'Netgen.LVS', '02-netgen-lvs'),
+                     ('design__lvs_unmatched_device__count', 'Netgen.LVS',
+                      '02-netgen-lvs'),
+                     ('design__lvs_unmatched_net__count', 'Netgen.LVS',
+                      '02-netgen-lvs'),
+                     ('design__lvs_unmatched_pin__count', 'Netgen.LVS',
+                      '02-netgen-lvs')))):
         section = {}
         for metric, step, folder_name in specs:
             folder = project / f'phase3/librelane/32-cand09-lane-04-pv-{kind}' / folder_name
@@ -2684,7 +2690,7 @@ def _finished_readback_fixture(tmp_path):
             scope.update({'magic_ext_use_gds': True,
                           'extracted_gds_sha256': gds_sha})
         body = {'verdict': 'PASS',
-                'required_steps': ([x[1] for x in specs]),
+                'required_steps': list(dict.fromkeys(x[1] for x in specs)),
                 'metrics': section, 'scope': scope}
         put(signoff / f'{kind}.json', body)
         metrics[kind] = body
@@ -2733,6 +2739,38 @@ def _finished_readback_fixture(tmp_path):
 def test_finished_candidate_readback_requires_full_owned_promotion(tmp_path):
     project, report, _ready, _finished = _finished_readback_fixture(tmp_path)
     assert prr.retained_finished_candidate_readback(project) == report
+
+
+@pytest.mark.parametrize('damage,message', [
+    ('empty', 'metric population differs'),
+    ('missing', 'metric population differs'),
+    ('wrong_step', 'metric producer/value differs'),
+])
+def test_finished_candidate_readback_requires_exact_pv_metric_population(
+        tmp_path, damage, message):
+    project, _report, ready_path, _finished = _finished_readback_fixture(tmp_path)
+    ready = json.loads(ready_path.read_text())
+    rows = ready['pv']['drc']['metrics']
+    if damage == 'empty':
+        rows.clear()
+    elif damage == 'missing':
+        rows.pop('klayout__density_error__count')
+    else:
+        rows['klayout__density_error__count']['step'] = 'KLayout.DRC'
+    put(project / prr.ARM_REL / 'candidate_signoff/lane-04/drc.json',
+        ready['pv']['drc'])
+    put(ready_path, ready)
+    decision_path = ready_path.with_name('decision.json')
+    decision = json.loads(decision_path.read_text())
+    decision['ready_record_sha256'] = contract.digest(ready_path)
+    put(decision_path, decision)
+    try:
+        prr.retained_finished_candidate_readback(project)
+        observed = 'ADMITTED'
+    except contract.Refusal as exc:
+        observed = str(exc)
+    assert observed != 'ADMITTED', f'observed readback outcome={observed!r}'
+    assert message in observed, f'observed readback refusal={observed!r}'
 
 
 @pytest.mark.parametrize('damage,code', [
