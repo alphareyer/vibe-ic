@@ -3356,7 +3356,7 @@
           "id": "default",
           "select_when": "otherwise",
           "provider": "other",
-          "tools": "KLayout Python + Yosys.JsonHeader + OpenSTA child-view QA",
+          "tools": "Python existing macro view-set QA (ip_integration_check)",
           "native_steps": [
             "macro view-set audit"
           ],
@@ -8105,8 +8105,8 @@
         {
           "id": "default",
           "select_when": "otherwise",
-          "provider": "librelane",
-          "tools": "OpenROAD.CheckMacroInstances + Odb.CheckMacroAntennaProperties",
+          "provider": "other",
+          "tools": "KLayout macro instance merge + Python existing macro view-set QA; physical LVS endpoint separate",
           "native_steps": [
             "current macro instance merge",
             "merge receipt consumer"
@@ -8601,8 +8601,8 @@
         {
           "id": "default",
           "select_when": "otherwise",
-          "provider": "openroad",
-          "tools": "OpenROAD read_upf/evaluate_upf/global_connect + Python crossing checks",
+          "provider": "other",
+          "tools": "Yosys structural power-domain connectivity + Python UPF/crossing consumers",
           "native_steps": [
             "power-domain connectivity",
             "crossing consumers"
