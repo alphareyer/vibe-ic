@@ -1,13 +1,20 @@
 """D58 consumes the already-validated current D57/STA physical subject."""
 import hashlib
+import io
 import json
+import os
 import re
+import subprocess
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import pytest
 
 import em_current_density_check as E
+import em_peak_current_authority_check as A
 import execution_backend_producers as B
+import flow_declared_producer_run as FDP
+import flow_compliance_check as FC
 import phase3_one_shot_runner as R
 from test_default_step24_current_adoption import _external_current_primary
 from test_default_step25_em_owner import (DHEADER, HEADER, TECH, _ready,
@@ -328,6 +335,50 @@ def _install_two_rail_transport(project, monkeypatch):
     return calls
 
 
+def _carry_real_authority_in_process(monkeypatch):
+    """Keep the real declared checker while retaining the fixture owner stub.
+
+    The current-owner fixture deliberately substitutes only its source-side
+    owner resolver.  The normal row otherwise launches declared checkers in a
+    child, where that source fixture cannot exist.  Carry this one command
+    through the same ``main`` entry point in-process; every other declared
+    command keeps the production subprocess path.
+    """
+    real_run = subprocess.run
+    real_supervised = FC._watchdog.run_host_supervised
+
+    def authority(argv, cwd):
+        script_index = next(index for index, part in enumerate(argv)
+                            if str(part).endswith("em_peak_current_authority_check.py"))
+        before = Path.cwd()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        try:
+            os.chdir(cwd)
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                rc = A.main([str(part) for part in argv[script_index + 1:]])
+        finally:
+            os.chdir(before)
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def run(argv, **kwargs):
+        if not any(str(part).endswith("em_peak_current_authority_check.py")
+                   for part in argv):
+            return real_run(argv, **kwargs)
+        rc, out, err = authority(argv, kwargs["cwd"])
+        return subprocess.CompletedProcess(argv, rc, out, err)
+
+    def supervised(argv, **kwargs):
+        if not any(str(part).endswith("em_peak_current_authority_check.py")
+                   for part in argv):
+            return real_supervised(argv, **kwargs)
+        rc, out, err = authority(argv, kwargs["cwd"])
+        return FC._watchdog.SupervisedResult(
+            rc, out, err, "natural", scope={"fixture": "in_process"})
+
+    monkeypatch.setattr(FDP.subprocess, "run", run)
+    monkeypatch.setattr(FC._watchdog, "run_host_supervised", supervised)
+
+
 def test_current_vsrc_producer_validates_from_absolute_and_project_dot(
         tmp_path, monkeypatch):
     project, report, _, _, _ = _external_current_primary(tmp_path, monkeypatch)
@@ -336,27 +387,35 @@ def test_current_vsrc_producer_validates_from_absolute_and_project_dot(
     doc["record"]["def_sha256"] = doc["inputs"]["def"]["sha256"]
     tech = Path(doc["native_basis"]["tech_lef"]["path"])
     tech.write_text(TECH)
+    pdk.tech_lef = str(tech)
     doc["native_basis"]["tech_lef"]["sha256"] = _sha(tech)
     doc["artifacts"][str(tech.relative_to(project))] = _sha(tech)
     report.write_text(json.dumps(doc))
     (project / "phase3/librelane_switch.json").write_text(json.dumps(
         {"steps": {"24": "dual", "25": "direct"}}))
     calls = _install_two_rail_transport(project, monkeypatch)
-    primary = E.validate_primary_ir(project, for_em=True)
-    assert primary["valid"] is True, primary
-    notes = []
-    assert R._emit_ir_em_reports(
-        project, "neutral", pdk, "offline",
-        project / "reports/phase3/ir_drop_psm_cross_check.rpt",
-        project / "reports/phase3/em.rpt", notes,
-        em_only=True, layout_basis=primary["current_em_basis"]) == (True, True)
+    _carry_real_authority_in_process(monkeypatch)
+    monkeypatch.setattr(B, "_parameters",
+                        lambda *_a, **_k: (R, None, pdk, "offline"))
+    legacy = R._pl.pnr_dir(project)
+    (legacy / "neutral.def").unlink()
+    row = R._default_pnr_rows(project, "neutral", pdk, "offline", ["25"])
+    assert row.status == "PASS", row.detail
     assert len(calls) == 1
     absolute = E.validate_native_density(project)
     assert absolute["valid"] is True, absolute
+    authority = json.loads(
+        (project / "reports/phase3/em_current_authority.json").read_text())
+    assert authority["verdict"] == "PASS", authority
+    assert authority["jmax_screen"]["summary"]["odb_pg_geometry_width_uses"] > 0
+    assert not (legacy / "neutral.def").exists()
     monkeypatch.chdir(project)
     lexical_dot = E.validate_native_density(Path("."))
     assert lexical_dot["valid"] is True, lexical_dot
     assert lexical_dot["verdict"] == absolute["verdict"]
+    dot_authority = A.jmax_tier(
+        Path("."), None, Path(absolute["authority"]), E._DEFAULT_MARGIN)
+    assert dot_authority["verdict"] == "PASS", dot_authority
 
 
 def test_current_external_subject_same_bytes_wrong_owner_refuses(
@@ -378,3 +437,32 @@ def test_current_external_subject_same_bytes_wrong_owner_refuses(
     result = E.validate_native_density(Path("."))
     assert result["valid"] is False
     assert result["reason"] == "DEF or power basis disagrees with the measurement"
+    refused = A.jmax_tier(
+        Path("."), None, Path(density["authority"]["snapshot"]),
+        E._DEFAULT_MARGIN)
+    assert refused["verdict"] == "NOT_MEASURED"
+    assert refused["native_density"]["valid"] is False
+
+
+@pytest.mark.parametrize("damage", ["changed_geometry", "missing_geometry",
+                                    "stale_source"])
+def test_current_external_geometry_reader_refuses_damaged_evidence(
+        tmp_path, monkeypatch, damage):
+    test_current_vsrc_producer_validates_from_absolute_and_project_dot(
+        tmp_path, monkeypatch)
+    project = Path.cwd()
+    density_path = project / "reports/phase3/em_openroad_density.json"
+    density = json.loads(density_path.read_text())
+    geometry = project / "reports/phase3/em_pg_geometry.tsv"
+    if damage == "changed_geometry":
+        geometry.write_text(geometry.read_text() + "VDD\twireA\t9\t9\t10\t9\tforeign\n")
+    elif damage == "missing_geometry":
+        geometry.unlink()
+    else:
+        density["source_identity"]["em_peak_current_authority_check.py"] = "0" * 64
+        density_path.write_text(json.dumps(density))
+    refused = A.jmax_tier(
+        Path("."), None, Path(density["authority"]["snapshot"]),
+        E._DEFAULT_MARGIN)
+    assert refused["verdict"] == "NOT_MEASURED", (damage, refused)
+    assert refused["native_density"]["valid"] is False, (damage, refused)
