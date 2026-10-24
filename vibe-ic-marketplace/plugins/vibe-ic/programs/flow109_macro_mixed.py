@@ -138,7 +138,14 @@ def _m03(project: Path, context: dict, manifest: dict, inputs: dict[str, str], a
     receipt = project / "phase3/mixed_signal/m1_merge_receipt.json"
     if native.get("verdict") == "FAIL":
         raise AdmissionRefusal("M03_NATIVE_MERGE_FAIL", str(native), status="FAIL")
-    if not receipt.is_file() or receipt.is_symlink():
+    # The legacy M1 owner checks KLayout before it invalidates an earlier
+    # receipt.  Therefore file presence alone is not evidence of this call:
+    # only the receipt digest returned by the current native invocation may
+    # authorize the downstream macro-view consumer.
+    returned_receipt_sha = native.get("m1_receipt_sha256")
+    if (not receipt.is_file() or receipt.is_symlink()
+            or not isinstance(returned_receipt_sha, str)
+            or returned_receipt_sha != _sha(receipt)):
         raise AdmissionRefusal("M03_NATIVE_MERGE_NOT_MEASURED", str(native))
     gate_path = attempt / "macro_view_consumer.json"
     _before(project, context, inputs)

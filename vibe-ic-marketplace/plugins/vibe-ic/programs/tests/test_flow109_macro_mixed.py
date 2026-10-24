@@ -143,3 +143,29 @@ def test_actual_macro_merge_power_domain_chain_and_controls(tmp_path):
     stale = rows.execute(project, contexts["D08"])
     assert stale["component_status"] == "NOT_MEASURED"
     assert stale["reason"] == "D08_STALE_OR_MISSING_INPUT"
+
+
+def test_m03_missing_klayout_cannot_reuse_old_merge_receipt(tmp_path, monkeypatch):
+    project, macro = _fixture(tmp_path)
+    contexts = _contexts()
+    views = sorted(macro.iterdir())
+    _write_manifest(project, "D08", views)
+    d08 = rows.execute(project, contexts["D08"])
+    assert d08["component_status"] == "PASS", d08
+    inputs = views + [project / "phase3/stage3/pnr/boundary.gds",
+                      project / "phase3/stage3/pnr/routed.def"]
+    _write_manifest(project, "M03", inputs, top="boundary", pdk=None,
+                    predecessor=d08["receipt"])
+    positive = rows.execute(project, contexts["M03"])
+    assert positive["component_status"] == "PASS", positive
+    receipt = project / "phase3/mixed_signal/m1_merge_receipt.json"
+    old_sha = hashlib.sha256(receipt.read_bytes()).hexdigest()
+
+    real_tool_ok = rows.m1._tool_ok
+    monkeypatch.setattr(rows.m1, "_tool_ok",
+                        lambda container, tool: False if tool == "klayout"
+                        else real_tool_ok(container, tool))
+    refused = rows.execute(project, contexts["M03"])
+    assert hashlib.sha256(receipt.read_bytes()).hexdigest() == old_sha
+    assert refused["component_status"] == "NOT_MEASURED", refused
+    assert refused["reason"] == "M03_NATIVE_MERGE_NOT_MEASURED"
