@@ -70,6 +70,13 @@ def _record(project: Path, path: Path) -> dict[str, str]:
     return {"path": str(path.resolve().relative_to(project)), "sha256": _sha(path)}
 
 
+def _selected_steps(context: dict) -> set[str]:
+    """Re-evaluate the validated plan; producer_selected is plan state."""
+    import flow109
+    plan = flow109.resolve_plan(context["features"], context["step_profiles"])
+    return {row["id"] for row in plan["rows"]}
+
+
 def _prepare(project: Path, context: dict) -> tuple[str, dict, dict[str, str]]:
     row = context.get("requested_step")
     if row not in ROWS or context.get("native_step_id") != "flow109." + str(row):
@@ -92,8 +99,10 @@ def _prepare(project: Path, context: dict) -> tuple[str, dict, dict[str, str]]:
     for record in records:
         path = _bound(project, record, row + "_STALE_OR_MISSING_INPUT")
         inputs[str(path)] = record["sha256"]
-    if row != "D08":
-        dep_id = "D08" if row == "M03" else "M03"
+    selected = _selected_steps(context)
+    needs_predecessor = row == "M04" or row == "M03" and "D08" in selected
+    if needs_predecessor:
+        dep_id = "M03" if row == "M04" else "D08"
         dep = _bound(project, manifest.get("predecessor"), row + "_PREDECESSOR_STALE")
         receipt = _read(dep, row + "_PREDECESSOR_INVALID")
         if (receipt.get("schema") != SCHEMA or receipt.get("step_id") != dep_id

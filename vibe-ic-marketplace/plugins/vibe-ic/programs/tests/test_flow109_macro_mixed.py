@@ -169,3 +169,39 @@ def test_m03_missing_klayout_cannot_reuse_old_merge_receipt(tmp_path, monkeypatc
     assert hashlib.sha256(receipt.read_bytes()).hexdigest() == old_sha
     assert refused["component_status"] == "NOT_MEASURED", refused
     assert refused["reason"] == "M03_NATIVE_MERGE_NOT_MEASURED"
+
+
+def test_m03_mixed_hard_ip_uses_a17_views_when_d08_is_not_selected(tmp_path):
+    project, macro = _fixture(tmp_path)
+    features = next(row["features"] for row in flow109.load_registry()["reference_profiles"]
+                    if row["name"] == "Mixed hard-IP")
+    plan = flow109.resolve_plan(features)
+    selected = {row["id"] for row in plan["rows"]}
+    assert "A17" in selected and "M03" in selected and "D08" not in selected
+    context = flow109.execution_context(plan, "M03", "M03")
+    inputs = sorted(macro.iterdir()) + [project / "phase3/stage3/pnr/boundary.gds",
+                                        project / "phase3/stage3/pnr/routed.def"]
+    _write_manifest(project, "M03", inputs, top="boundary", pdk=None)
+    result = rows.execute(project, context)
+    assert result["component_status"] == "PASS", result
+    assert result["native_merge"]["path"].endswith("m1_merge_receipt.json")
+    assert result["flow109_acceptance"] == "NOT_MEASURED"
+
+
+def test_m03_selected_d08_stale_receipt_still_refuses(tmp_path):
+    project, macro = _fixture(tmp_path)
+    context = _contexts()["M03"]
+    receipt_path = project / "reports/flow109/components/D08.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_path.write_text(json.dumps({"schema": rows.SCHEMA, "step_id": "D08",
+                                        "component_status": "PASS",
+                                        "flow109_acceptance": "NOT_MEASURED"}))
+    predecessor = _ref(project, receipt_path)
+    inputs = sorted(macro.iterdir()) + [project / "phase3/stage3/pnr/boundary.gds",
+                                        project / "phase3/stage3/pnr/routed.def"]
+    _write_manifest(project, "M03", inputs, top="boundary", pdk=None,
+                    predecessor=predecessor)
+    receipt_path.write_text(receipt_path.read_text() + "\n")
+    result = rows.execute(project, context)
+    assert result["component_status"] == "NOT_MEASURED", result
+    assert result["reason"] == "M03_PREDECESSOR_STALE"
