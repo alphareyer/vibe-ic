@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Flow109 D75 Default bare-die package/test interface component.
+"""Flow109 D75 Default package/test interface component.
 
 This is a BLOCKING component check for the inputs it actually consumes.  It
 does not approve a package or a tapeout: packaged SI/PI/thermal co-design and
@@ -23,6 +23,7 @@ import _pad_ring
 import _submission_template as submission
 import _tapeout_declaration as declaration
 import dft_atpg_coverage_check
+import flow109_package_electrical
 import pad_bterm_coincidence_check
 import pad_side_constraint_check
 import perc_signoff_check
@@ -47,6 +48,7 @@ PAD_DEF = Path(_pad_ring.PADRING_DEF_REL)
 PDK_DIR = Path("input/pdk")
 CONTEXT_REQUESTS = Path("reports/flow109/requests")
 PROVIDER_TARGET = Path("input/submission_template/provider_target.json")
+D67_REPORT = Path("reports/flow109/components/D67.json")
 
 
 class D75Refusal(ValueError):
@@ -63,6 +65,7 @@ def operation_sources() -> dict[str, str]:
     """Bind the exact adapter and existing consumers loaded for D75."""
     names = (
         "flow109_package_ready.py",
+        "flow109_package_electrical.py",
         "submission_template_check.py",
         "tapeout_declaration_check.py",
         "pad_side_constraint_check.py",
@@ -72,6 +75,86 @@ def operation_sources() -> dict[str, str]:
         "dft_atpg_coverage_check.py",
     )
     return {"programs/" + name: _sha(HERE / name) for name in names}
+
+
+def _d67_record(project: Path, value: object, label: str) -> dict:
+    """Rebind one path/hash identity published by the D67 producer."""
+    if (not isinstance(value, Mapping)
+            or not isinstance(value.get("path"), str)
+            or not isinstance(value.get("sha256"), str)):
+        raise D75Refusal("D75_D67_RECEIPT_INVALID", label)
+    record = _record(project, Path(value["path"]))
+    if record["sha256"] != value["sha256"]:
+        raise D75Refusal("D75_D67_INPUT_STALE", str(value["path"]))
+    return record
+
+
+def _consume_d67(project: Path) -> tuple[dict, list[dict]]:
+    """Consume the current D67 receipt through D67's declared consumer.
+
+    D75 does not interpret package models, reconstruct a D67 context, or infer
+    missing package facts.  It reopens the producer's saved canonical context
+    and lets D67 recheck its current source/model/bounds/tool/native evidence.
+    """
+    report_path = project / D67_REPORT
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise D75Refusal(
+            "D75_D67_REPORT_ABSENT_OR_INVALID", str(D67_REPORT)) from exc
+    if not isinstance(report, dict):
+        raise D75Refusal("D75_D67_REPORT_ABSENT_OR_INVALID", str(D67_REPORT))
+    identity = report.get("context_sha256")
+    if not isinstance(identity, str) or len(identity) != 64:
+        raise D75Refusal("D75_D67_CONTEXT_UNBOUND", repr(identity))
+    context_path = project / CONTEXT_REQUESTS / f"{identity}.json"
+    try:
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise D75Refusal(
+            "D75_D67_CONTEXT_ABSENT_OR_INVALID",
+            str(context_path.relative_to(project))) from exc
+    if not isinstance(context, dict):
+        raise D75Refusal("D75_D67_CONTEXT_ABSENT_OR_INVALID",
+                         str(context_path.relative_to(project)))
+    try:
+        consumed = flow109_package_electrical.consume(project, context, report)
+    except (flow109_package_electrical.AdmissionRefusal,
+            flow109_package_electrical.MetricRefusal) as exc:
+        raise D75Refusal(
+            "D75_D67_CONSUMER_REFUSED", f"{exc.code}: {exc}",
+            failed=getattr(exc, "status", "NOT_MEASURED") == "FAIL") from exc
+    if consumed.get("status") not in ("PASS", "FAIL"):
+        raise D75Refusal("D75_D67_STATUS_UNSUPPORTED",
+                         str(consumed.get("status")))
+    if (report.get("component_status") != consumed["status"]
+            or report.get("metrics") != consumed):
+        raise D75Refusal("D75_D67_RECEIPT_STATUS_MISMATCH",
+                         "producer status/metrics differ from current consumer",
+                         failed=consumed["status"] == "FAIL")
+    records = [_record(project, report_path), _record(project, context_path)]
+    published_inputs = report.get("inputs")
+    if not isinstance(published_inputs, Mapping) or not published_inputs:
+        raise D75Refusal("D75_D67_RECEIPT_INVALID", "inputs")
+    for path, digest in sorted(published_inputs.items()):
+        records.append(_d67_record(project, {"path": path, "sha256": digest},
+                                   "inputs"))
+    native = report.get("native")
+    if not isinstance(native, list) or not native:
+        raise D75Refusal("D75_D67_NATIVE_RECEIPT_INVALID", "native")
+    for row in native:
+        if not isinstance(row, Mapping):
+            raise D75Refusal("D75_D67_NATIVE_RECEIPT_INVALID", "native row")
+        for field in ("model", "deck", "log"):
+            records.append(_d67_record(project, row.get(field), field))
+    detail = {
+        "status": consumed["status"],
+        "d67_context_sha256": identity,
+        "d67_report": _record(project, report_path),
+        "d67_context": _record(project, context_path),
+        "metrics": consumed,
+    }
+    return detail, records
 
 
 def _read(path: Path) -> dict:
@@ -276,6 +359,26 @@ def validate(project: Path, receipt: Mapping) -> None:
         if not resolved.is_file() or _sha(resolved) != item["sha256"]:
             raise D75Refusal("D75_INPUT_STALE", str(path))
     if not refused_context:
+        context_path = project / CONTEXT_REQUESTS / f"{context_sha256}.json"
+        saved_context = _read(context_path)
+        package_required = (saved_context.get("features") or {}).get(
+            "package_model_required") is True
+        package_check = next((item for item in receipt.get("checks", [])
+                              if isinstance(item, Mapping)
+                              and item.get("check") == "package_electrical_feedback"), None)
+        if package_required:
+            if package_check is not None and package_check.get("status") == "PASS":
+                detail, _ = _consume_d67(project)
+                if package_check.get("detail") != detail:
+                    raise D75Refusal("D75_D67_RECEIPT_STALE",
+                                     "current D67 consumer result changed")
+            elif receipt.get("component_status") == "PASS":
+                raise D75Refusal("D75_D67_RECEIPT_INVALID",
+                                 "PASS omitted required D67 consumption")
+        elif (package_check is not None
+              and package_check.get("status") not in ("NOT_APPLICABLE",)):
+            raise D75Refusal("D75_D67_SCOPE_MISMATCH",
+                             "package model is not selected")
         provider = receipt.get("provider_identity")
         provider_ran = any(isinstance(item, Mapping)
                            and item.get("check") == "provider_bond_pad_edge"
@@ -348,9 +451,15 @@ def execute(project: Path, context: Mapping) -> dict:
 
         features = context.get("features") or {}
         if features.get("package_model_required") is True:
-            raise D75Refusal(
-                "D75_PACKAGE_MODEL_PATH_UNSUPPORTED",
-                "package SI/PI/thermal models and their selected commercial consumers are absent")
+            detail, d67_inputs = _consume_d67(project)
+            inputs.extend(d67_inputs)
+            checks.append(_check("package_electrical_feedback",
+                                 detail["status"], detail))
+            if detail["status"] != "PASS":
+                raise D75Refusal(
+                    "D75_D67_CONSUMER_FAILED",
+                    "current D67 package electrical result failed",
+                    failed=True)
 
         io_path = project / IO_REPORT
         io = _read(io_path)
@@ -445,8 +554,9 @@ def execute(project: Path, context: Mapping) -> dict:
             checks.append(_check("perc_signoff_check", "NOT_APPLICABLE",
                                  "requires_perc is false"))
 
-        checks.append(_check("package_electrical_feedback", "NOT_APPLICABLE",
-                             "declared Default route is bare die; package_model_required is false"))
+        if features.get("package_model_required") is not True:
+            checks.append(_check("package_electrical_feedback", "NOT_APPLICABLE",
+                                 "package_model_required is false"))
         status = _aggregate(checks)
         reason = "D75_BARE_DIE_INTERFACE_COMPONENT_" + status
     except D75Refusal as exc:
@@ -465,7 +575,7 @@ def execute(project: Path, context: Mapping) -> dict:
         "flow109_acceptance": "NOT_MEASURED",
         "whole_flow_acceptance": "NOT_MEASURED",
         "delivery_accepted": False,
-        "scope": "Default bare-die package/test interface component only",
+        "scope": "Default package/test interface plus consumed D67 component only",
     }
     validate(project, result)
     return result

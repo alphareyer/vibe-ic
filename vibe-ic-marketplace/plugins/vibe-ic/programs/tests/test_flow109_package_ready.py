@@ -17,8 +17,11 @@ sys.path.insert(0, str(PROGRAMS))
 import _tapeout_declaration as TD  # noqa: E402
 import _submission_template as ST  # noqa: E402
 import flow109  # noqa: E402
+import flow109_package_electrical as D67  # noqa: E402
 import flow109_package_ready as D75  # noqa: E402
 import submission_template_ingest as ING  # noqa: E402
+import test_flow109_package_electrical as D67T  # noqa: E402
+from programs.tests._hostpaths import require_repo  # noqa: E402
 
 
 def test_d75_adapter_loads_by_path_with_existing_consumers():
@@ -178,6 +181,18 @@ def _by_name(result, name):
     return next(check for check in result["checks"] if check["check"] == name)
 
 
+def _produced_d67(project: Path):
+    """Run the supplied D67 producer on its neutral checked-in RLC model."""
+    context, requirements, reference = D67T._case(project)
+    fixture = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic",
+                           "programs", "tests", "fixtures", "flow109_d67",
+                           "package.sp")
+    assert Path(requirements["cases"][0]["model"]["path"]).resolve() == fixture.resolve()
+    report = D67T._native(project, context)
+    assert report["component_status"] == "PASS", report
+    return context, requirements, reference, report
+
+
 def test_registry_routes_only_the_existing_default_d75_component():
     registry = json.loads((PLUGIN / "flow/flow109.json").read_text())
     row = next(row for row in registry["rows"] if row["id"] == "D75")
@@ -305,7 +320,7 @@ def test_wrong_domain_pad_pin_geometry_fails(tmp_path):
     assert _by_name(result, "pad_bterm_coincidence_check")["status"] == "FAIL"
 
 
-def test_missing_geometry_and_unsupported_package_models_do_not_pass(tmp_path):
+def test_missing_geometry_and_missing_required_package_models_do_not_pass(tmp_path):
     project = _project(tmp_path)
     (project / "phase3/stage4/gds/chip_top.gds").unlink()
     missing = D75.execute(project, _context(project))
@@ -315,7 +330,107 @@ def test_missing_geometry_and_unsupported_package_models_do_not_pass(tmp_path):
     project = _project(tmp_path / "packaged")
     packaged = D75.execute(project, _context(project, package_model_required=True))
     assert packaged["component_status"] == "NOT_MEASURED"
-    assert packaged["reason"] == "D75_PACKAGE_MODEL_PATH_UNSUPPORTED"
+    assert packaged["reason"] == "D75_D67_REPORT_ABSENT_OR_INVALID"
+
+
+def test_current_produced_d67_is_consumed_by_whole_d75_component(tmp_path):
+    project = _project(tmp_path)
+    d67_context, requirements, reference, d67_report = _produced_d67(project)
+    result = D75.execute(project, _context(project, package_model_required=True))
+    assert result["component_status"] == "PASS", result
+    electrical = _by_name(result, "package_electrical_feedback")
+    assert electrical["status"] == "PASS"
+    assert electrical["detail"]["d67_context_sha256"] == d67_context["context_sha256"]
+    assert electrical["detail"]["metrics"]["status"] == "PASS"
+    assert (electrical["detail"]["metrics"]["physical_package_qualification"]
+            == "NOT_MEASURED")
+    assert any(item["path"] == str(D75.D67_REPORT) for item in result["inputs"])
+    D75.validate(project, result)
+    report_path = project / D75.D67_REPORT
+    report_bytes = report_path.read_bytes()
+    report_path.write_bytes(report_bytes + b"\n")
+    with pytest.raises(D75.D75Refusal, match="D75_INPUT_STALE"):
+        D75.validate(project, result)
+    report_path.write_bytes(report_bytes)
+    D75.validate(project, result)
+
+    # A changed model invalidates both D67's declared consumer and D75.  Restore
+    # the same source bytes and the current producer receipt is consumable again.
+    model = Path(requirements["cases"][0]["model"]["path"])
+    original = model.read_text()
+    local = D67T._put(project, "input/package-current.sp", original)
+    requirements["cases"][0]["model"] = local
+    reference["reference"]["models"][0]["model"] = local
+    D67T._bind(project, requirements, reference)
+    current = D67T._native(project, d67_context)
+    assert current["component_status"] == "PASS", current
+    model = project / local["path"]
+    model.write_text(original + "\n* changed after native receipt\n")
+    stale = D75.execute(project, _context(project, package_model_required=True))
+    assert stale["component_status"] == "NOT_MEASURED", stale
+    assert stale["reason"] == "D75_D67_CONSUMER_REFUSED"
+    assert "D67_INPUT_STALE_OR_MISSING" in _by_name(
+        stale, "adapter_refusal")["detail"]
+    model.write_text(original)
+    restored = D75.execute(project, _context(project, package_model_required=True))
+    assert restored["component_status"] == "PASS", restored
+
+
+def test_d67_wrong_netlist_port_and_unsupported_model_do_not_pass_d75(tmp_path):
+    project = _project(tmp_path / "port")
+    context, requirements, reference = D67T._case(project)
+    netlist = Path(requirements["netlist"]["path"]).read_text().replace(
+        "output y", "output q")
+    local_netlist = D67T._put(project, "input/wrong-port.v", netlist)
+    requirements["netlist"] = local_netlist
+    reference["reference"]["netlist"] = local_netlist
+    D67T._bind(project, requirements, reference)
+    d67_report = D67T._native(project, context)
+    assert d67_report["component_status"] == "FAIL", d67_report
+    assert d67_report["reason"] == "D67_PORT_IDENTITY_MISMATCH"
+    wrong_port = D75.execute(project, _context(project, package_model_required=True))
+    assert wrong_port["component_status"] == "FAIL", wrong_port
+    assert wrong_port["reason"] == "D75_D67_CONSUMER_REFUSED"
+    assert "D67_PORT_IDENTITY_MISMATCH" in _by_name(
+        wrong_port, "adapter_refusal")["detail"]
+
+    project = _project(tmp_path / "unsupported")
+    context, requirements, reference = D67T._case(project)
+    source = Path(requirements["cases"][0]["model"]["path"]).read_text()
+    unsupported = D67T._put(project, "input/unsupported-package.sp",
+                            source.replace("Rseries die neck 10", ".include absent.sp"))
+    requirements["cases"][0]["model"] = unsupported
+    reference["reference"]["models"][0]["model"] = unsupported
+    D67T._bind(project, requirements, reference)
+    d67_report = D67T._native(project, context)
+    assert d67_report["component_status"] == "NOT_MEASURED", d67_report
+    unsupported_result = D75.execute(
+        project, _context(project, package_model_required=True))
+    assert unsupported_result["component_status"] == "NOT_MEASURED"
+    assert unsupported_result["reason"] == "D75_D67_CONSUMER_REFUSED"
+    assert "D67_MODEL_SCOPE_UNSUPPORTED" in _by_name(
+        unsupported_result, "adapter_refusal")["detail"]
+
+
+def test_d67_native_failure_and_open_item_label_cannot_pass_d75(tmp_path):
+    project = _project(tmp_path / "native-fail")
+    context, requirements, reference = D67T._case(project)
+    requirements["cases"][0]["limits"]["voltage_at_sample"] = {"max": 0.5}
+    D67T._bind(project, requirements, reference)
+    d67_report = D67T._native(project, context)
+    assert d67_report["native_started"] is True
+    assert d67_report["component_status"] == "FAIL", d67_report
+    failed = D75.execute(project, _context(project, package_model_required=True))
+    assert failed["component_status"] == "FAIL", failed
+    assert _by_name(failed, "package_electrical_feedback")["status"] == "FAIL"
+
+    project = _project(tmp_path / "open-items")
+    _context67, _requirements, _reference, report = _produced_d67(project)
+    report["component_status"] = "PASS_WITH_OPEN_ITEMS"
+    _write(project / D75.D67_REPORT, report)
+    open_items = D75.execute(project, _context(project, package_model_required=True))
+    assert open_items["component_status"] == "NOT_MEASURED", open_items
+    assert open_items["reason"] == "D75_D67_RECEIPT_STATUS_MISMATCH"
 
 
 def test_failing_and_missing_perc_evidence_remain_fail_or_unmeasured(tmp_path):
