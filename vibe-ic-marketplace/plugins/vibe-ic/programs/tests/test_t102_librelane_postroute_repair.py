@@ -2920,6 +2920,13 @@ def test_recovered_promotion_crosses_full_existing_step32_consumer_chain(
     current_def = project / 'phase3/stage3/pnr/routed.def'
     assert current_def.read_text() == (tmp_path / 'neutral.candidate.def').read_text()
     assert (project / runner.ROUTE_PROMOTION_REL).is_file()
+    reread = prr.retained_finished_candidate_readback(project)
+    assert reread['adopted'] == '32-cand09'
+    assert runner._promotion_unmeasured(
+        runner._step32_own_measurement(reread)) == ''
+    current_def.write_text(current_def.read_text() + '# damaged after handoff\n')
+    with pytest.raises(contract.Refusal, match='input route changed'):
+        prr.retained_finished_candidate_readback(project)
 
     bad_root = tmp_path / 'damaged'
     bad_project, _r, _ready, _finished = _finished_readback_fixture(bad_root)

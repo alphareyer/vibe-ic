@@ -2104,20 +2104,29 @@ def _recover_retained_finished_promotion(
     impl = project / ARM_REL / IMPL_DIR
     ctx = _load(impl / CONTEXT)
     live_current = _load(impl / CURRENT)
-    if not (report.get("code") == "LL_PRR_DRV_VIOLATION"
+    marker = report.get("retained_promotion_readback")
+    failed_shape = (report.get("code") == "LL_PRR_DRV_VIOLATION"
             and report.get("adopted") is None
             and live_current.get("candidate") is None
-            and report.get("final") == live_current.get("measurement")):
+            and report.get("final") == live_current.get("measurement"))
+    published_shape = (isinstance(marker, dict)
+                       and report.get("verdict") == "PASS"
+                       and isinstance(report.get("adopted"), str))
+    if not (failed_shape or published_shape):
         return None
     promoted = []
-    root = project / ARM_REL / "candidate_continuations"
-    for decision_path in sorted(root.glob("*/decision.json")):
-        decision = _load(decision_path)
-        if (decision.get("schema") ==
-                "vibeic.prr.candidate_finishing_decision.v1"
-                and decision.get("decision") == "PROMOTED"
-                and decision.get("adopted") == decision.get("candidate")):
-            promoted.append((decision_path, decision))
+    if published_shape:
+        decision_path = _resume_host_path(project, ctx, marker["decision_record"])
+        promoted.append((decision_path, _load(decision_path)))
+    else:
+        root = project / ARM_REL / "candidate_continuations"
+        for decision_path in sorted(root.glob("*/decision.json")):
+            decision = _load(decision_path)
+            if (decision.get("schema") ==
+                    "vibeic.prr.candidate_finishing_decision.v1"
+                    and decision.get("decision") == "PROMOTED"
+                    and decision.get("adopted") == decision.get("candidate")):
+                promoted.append((decision_path, decision))
     if not promoted:
         return None
     if len(promoted) != 1:
@@ -2218,11 +2227,13 @@ def _recover_retained_finished_promotion(
             "density": 0, "drc": (ready.get("pv") or {}).get("drc", {}).get("verdict"),
             "lvs": (ready.get("pv") or {}).get("lvs", {}).get("verdict"),
             "final_electrical": "MEASURED"},
-        retained_promotion_readback={
+        retained_promotion_readback={**(marker or {}),
             "ready_record": str(record), "ready_record_sha256": _ll.digest(record),
             "decision_record": str(decision_path),
             "decision_record_sha256": _ll.digest(decision_path),
-            "displaced_normal_report_sha256": _ll.digest(project / REPORT_REL)})
+            "displaced_normal_report_sha256": ((marker or {}).get(
+                "displaced_normal_report_sha256")
+                or _ll.digest(project / REPORT_REL))})
     _stamp_verdict(recovered)
     current = {
         "candidate": candidate, "repair_state": str(state_path),
@@ -2252,7 +2263,12 @@ def publish_retained_finished_readback(project: Path,
     marker = report.get("retained_promotion_readback") or {}
     current = project / REPORT_REL
     displaced = marker.get("displaced_normal_report_sha256")
-    if (not isinstance(displaced, str) or _ll.digest(current) != displaced
+    current_sha = _ll.digest(current)
+    already = _load(current) if current_sha != displaced else None
+    already_marker = ((already or {}).get("retained_promotion_readback") or {})
+    if (not isinstance(displaced, str)
+            or (current_sha != displaced and
+                already_marker.get("displaced_normal_report_sha256") != displaced)
             or report.get("verdict") != "PASS" or not report.get("adopted")):
         raise _ll.Refusal("LL_PRR_FINISHED_RECOVERY_STALE",
                           "displaced report or recovered promotion changed")
@@ -2278,9 +2294,52 @@ def publish_retained_finished_readback(project: Path,
         archived[name] = _ll.digest(target)
     report["retained_promotion_readback"]["displaced_history"] = {
         "folder": str(history), "sha256": archived}
-    write_json(current, report)
-    _publish_declared_repair(project, report, current)
+    if current_sha == displaced:
+        write_json(current, report)
+        _publish_declared_repair(project, report, current)
     return report["retained_promotion_readback"]["displaced_history"]
+
+
+def _promoted_live_subject_matches(project: Path, ctx: Dict[str, Any],
+                                   current: Dict[str, Any],
+                                   state: Dict[str, Any],
+                                   report: Dict[str, Any]) -> bool:
+    """Whether the live route is the already-handed retained candidate."""
+    import librelane_contract as _ll
+
+    try:
+        handoff = _load(project / "reports/phase3/librelane_postroute_repair_handoff.json")
+        promotion = _load(project / "reports/phase3/route_promotion.json")
+        state_path = _resume_host_path(project, ctx, current["repair_state"])
+        if (_resume_host_path(project, ctx, handoff["state"]) != state_path
+                or handoff.get("state_sha256") != _ll.digest(state_path)
+                or promotion.get("promoter") != "librelane_step32_after_route"):
+            return False
+        live = {"def": project / "phase3/stage3/pnr/routed.def"}
+        netlists = sorted((project / "phase3/stage3/pnr").glob("*_pnr.v"))
+        if len(netlists) != 1:
+            return False
+        live["nl"] = netlists[0]
+        for kind in ("def", "nl"):
+            row = (handoff.get("views") or {}).get(kind) or {}
+            source = _resume_host_path(project, ctx, state[kind])
+            if (_resume_host_path(project, ctx, row.get("source", "")) != source
+                    or _resume_host_path(project, ctx, row.get("dest", "")) != live[kind]
+                    or row.get("source_sha256") != _ll.digest(source)
+                    or row.get("dest_sha256") != _ll.digest(live[kind])
+                    or row.get("source_sha256") != row.get("dest_sha256")):
+                return False
+        owned = (report.get("candidates") or [{}])[0].get("repair_metrics") or {}
+        measured = promotion.get("measurement") or {}
+        return (promotion.get("promoted_def_sha256") == _ll.digest(live["def"])
+                and measured.get("antenna_nets") ==
+                    (report.get("final") or {}).get("antenna_nets")
+                and measured.get("antenna_pins") ==
+                    (report.get("final") or {}).get("antenna_pins")
+                and measured.get("unrouted_added") ==
+                    owned.get("vibeic__prr__unrouted__added"))
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
 
 
 def retained_finished_candidate_readback(project: Path) -> Optional[Dict[str, Any]]:
@@ -2306,7 +2365,13 @@ def retained_finished_candidate_readback(project: Path) -> Optional[Dict[str, An
         report = _load(report_path)
         finishing = report.get("candidate_finishing")
         recovery = None
-        if not isinstance(finishing, dict):
+        if report.get("retained_promotion_readback"):
+            recovery = _recover_retained_finished_promotion(project, report)
+            if recovery is None:
+                return None
+            report = recovery["report"]
+            finishing = report["candidate_finishing"]
+        elif not isinstance(finishing, dict):
             recovery = _recover_retained_finished_promotion(project, report)
             if recovery is None:
                 return None
@@ -2393,12 +2458,14 @@ def retained_finished_candidate_readback(project: Path) -> Optional[Dict[str, An
         live = ready.get("current_freshness")
         state = _load(_resume_host_path(project, ctx, current["repair_state"]))
         live_netlists = sorted((project / "phase3/stage3/pnr").glob("*_pnr.v"))
+        original_subject = (isinstance(live, dict) and len(live_netlists) == 1
+            and _ll.digest(project / "phase3/stage3/pnr/routed.def") ==
+                live.get("live_def_sha256")
+            and _ll.digest(live_netlists[0]) == live.get("live_nl_sha256"))
+        promoted_subject = _promoted_live_subject_matches(
+            project, ctx, current, state, report)
         if (not isinstance(live, dict)
-                or len(live_netlists) != 1
-                or _ll.digest(project / "phase3/stage3/pnr/routed.def") !=
-                   live.get("live_def_sha256")
-                or _ll.digest(live_netlists[0]) !=
-                   live.get("live_nl_sha256")
+                or not (original_subject or promoted_subject)
                 or _ll.digest(_resume_host_path(project, ctx, state["sdc"])) !=
                    live.get("adopted_sdc_sha256")):
             raise ValueError("normal front-door input route changed after finishing")
