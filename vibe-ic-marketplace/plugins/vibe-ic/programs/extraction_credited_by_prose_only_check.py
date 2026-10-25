@@ -49,10 +49,16 @@ one. Promote it to blocking when the published figure and this one agree.
 
 Chip-AGNOSTIC: the predicate is a field-name classification and a substring
 test. No protocol, chip class or layer vocabulary participates.
+
+An explicitly empty, well-formed declared literal census is NOT_APPLICABLE,
+with the opened census file and its hash as evidence. This says nothing about
+source completeness. Missing or unreadable census/L-doc inputs still refuse;
+positive prose-only findings keep the advisory policy described above.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -60,6 +66,7 @@ from typing import Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _atomic_artefact as _aa  # noqa: E402  (vibe-ic#1082)
+import _structural_absence as _sa  # noqa: E402
 
 #: Fields whose CONTENT is a copy of the input rather than a structured reading
 #: of it. Named individually, never by a pattern: a field earns a place here by
@@ -77,24 +84,41 @@ PROSE_CARRIER_FIELDS = frozenset({
 })
 
 
-def _denominator(project: Path) -> List[str]:
+def _unique_census_fields(pairs):
+    fields = {}
+    for name, value in pairs:
+        if name in fields:
+            raise ValueError(f"duplicate declared literal-census field {name!r}")
+        fields[name] = value
+    return fields
+
+
+def _denominator(project: Path) -> Tuple[List[str], Dict]:
     """The literals `extraction_patterns.json` declares as the denominator."""
     f = project / "phase1" / "extraction_patterns.json"
-    if not f.is_file():
-        return []
-    try:
-        doc = json.loads(f.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
+    raw = f.read_bytes()
+    doc = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_census_fields)
+    if not isinstance(doc, dict):
+        raise ValueError(f"{f}: the declared literal census must be an object")
     out: List[str] = []
-    for key, rows in (doc or {}).items():
-        if key.startswith("_") or not isinstance(rows, list):
+    groups = []
+    for key, rows in doc.items():
+        if key.startswith("_"):
             continue
+        if not isinstance(rows, list):
+            raise ValueError(f"{f}: public census scope {key!r} must be a list")
+        groups.append(key)
         for row in rows:
             lit = row.get("literal") if isinstance(row, dict) else row
-            if isinstance(lit, str) and lit.strip():
-                out.append(lit)
-    return out
+            if not isinstance(lit, str) or not lit.strip():
+                raise ValueError(f"{f}: invalid literal in census scope {key!r}")
+            out.append(lit)
+    return out, {
+        "path": f.relative_to(project).as_posix(),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "declared_source_groups": sorted(groups),
+        "declared_literal_count": len(out),
+    }
 
 
 def _haystacks(project: Path) -> Tuple[str, str]:
@@ -102,13 +126,13 @@ def _haystacks(project: Path) -> Tuple[str, str]:
     gd = project / "phase1" / "generated_docs"
     structured: List[str] = []
     prose: List[str] = []
-    for f in sorted(gd.glob("*.json")):
-        try:
-            doc = json.loads(f.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
+    files = sorted(gd.glob("*.json"))
+    if not files:
+        raise FileNotFoundError(f"{gd}: no generated document JSON inputs")
+    for f in files:
+        doc = json.loads(f.read_bytes().decode("utf-8"))
         if not isinstance(doc, dict):
-            continue
+            raise ValueError(f"{f}: generated document must be an object")
         for key, value in doc.items():
             blob = json.dumps(value).lower()
             (prose if key in PROSE_CARRIER_FIELDS else structured).append(blob)
@@ -116,7 +140,7 @@ def _haystacks(project: Path) -> Tuple[str, str]:
 
 
 def audit(project: Path) -> Dict:
-    lits = _denominator(project)
+    lits, scope = _denominator(project)
     structured, prose = _haystacks(project)
     prose_only, uncredited, structured_ok = [], [], []
     for lit in lits:
@@ -129,7 +153,7 @@ def audit(project: Path) -> Dict:
         else:
             uncredited.append(lit)
     total = len(lits)
-    return {
+    report = {
         "denominator": total,
         "structured": len(structured_ok),
         "prose_only": prose_only,
@@ -137,7 +161,22 @@ def audit(project: Path) -> Dict:
         "structured_pct": (round(100.0 * len(structured_ok) / total, 1)
                            if total else None),
         "prose_carrier_fields": sorted(PROSE_CARRIER_FIELDS),
+        "census_scope": scope,
     }
+    if not total:
+        # This file explicitly declares the census audited here. Opening and
+        # validating it establishes an empty CENSUS, never source completeness.
+        # A missing/invalid file or unreadable L-doc cannot reach this branch.
+        evidence = _sa.absence(
+            "declared literal-census file(s)", scanned=1, found=0,
+            names=[scope["path"]],
+            detail=("the validated declared census has no literal members; "
+                    "this is not a source-completeness verdict, and other "
+                    "D1 source-coverage and expert checks remain required"))
+        report.update({"verdict": "NOT_APPLICABLE",
+                       "reason": evidence["detail"]})
+        _sa.attach(report, evidence)
+    return report
 
 
 def main(argv=None) -> int:
@@ -153,17 +192,13 @@ def main(argv=None) -> int:
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
 
-    rep = audit(project)
-    n = rep["denominator"]
-    if not n:
-        # A zero denominator REFUSES rather than passing: "nothing to examine"
-        # and "everything examined and clean" are different facts (the house
-        # rule `gate_zero_denominator_refuses_check` enforces).
-        print("[CANNOT CHECK] extraction_credited_by_prose_only_check: "
-              "phase1/extraction_patterns.json declares no denominator, so "
-              "there is no coverage claim to audit. This is the ABSENCE of a "
-              "question, not a pass.")
-        return 2
+    try:
+        rep = audit(project)
+    except (OSError, ValueError) as exc:
+        rep = {"verdict": "NOT_MEASURED",
+               "reason_class": ("BLOCKED_BY_UPSTREAM" if isinstance(exc, FileNotFoundError)
+                                else "EXECUTION_ERROR"),
+               "reason": str(exc)}
 
     if args.json:
         out = Path(args.json)
@@ -171,6 +206,16 @@ def main(argv=None) -> int:
         # vibe-ic#1082: the declared destination appears under its final name
         # only once complete, so a reader never resolves a half-written report.
         _aa.write_text(out, json.dumps(rep, indent=2) + "\n")
+
+    if rep.get("verdict") == "NOT_MEASURED":
+        print("[CANNOT CHECK] extraction_credited_by_prose_only_check: "
+              + rep["reason"])
+        return 2
+    n = rep["denominator"]
+    if not n:
+        print("NOT_APPLICABLE: " + _sa.sentence(
+            rep[_sa.EVIDENCE_KEY], "extraction_credited_by_prose_only_check"))
+        return 2
 
     for lit in rep["prose_only"]:
         print(f"  [PROSE-ONLY] {lit!r} appears only in a field that carries the "

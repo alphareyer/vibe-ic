@@ -14,8 +14,11 @@ metric certified as extracted the number the extractor got wrong.
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 from pathlib import Path
+
+import pytest
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
 if str(_PROGRAMS) not in sys.path:
@@ -102,3 +105,138 @@ def test_a_zero_denominator_refuses(tmp_path):
     p = tmp_path / "empty"
     (p / "phase1" / "generated_docs").mkdir(parents=True)
     assert main([str(p)]) == 2
+
+
+def _native_census_clause(project):
+    from test_issue306_advisory_gate_slot import _adv, _flow, _records
+    command = ('extraction_credited_by_prose_only_check . --json '
+               'reports/phase1/extraction_credited_by_prose_only.json')
+    passed, reasons = _flow._evaluate_gate(project, _adv(command))
+    record, = _records(reasons)
+    return passed, record
+
+
+def test_explicit_empty_census_reaches_native_not_applicable(tmp_path):
+    p = _project(tmp_path, [], {}, {})
+    passed, record = _native_census_clause(p)
+    assert (record['verdict'], record['exit_code']) == ('NOT_APPLICABLE', 2), record
+    assert passed and record['reason_class'] == 'NOT_APPLICABLE_BY_STRUCTURE', record
+    report = json.loads((p / 'reports/phase1/extraction_credited_by_prose_only.json').read_text())
+    assert report['structured_pct'] is None
+    assert report['denominator'] == 0 and report['verdict'] == 'NOT_APPLICABLE'
+    scope = report['census_scope']
+    assert scope['path'] == 'phase1/extraction_patterns.json'
+    assert scope['sha256'] == hashlib.sha256((p / scope['path']).read_bytes()).hexdigest()
+    assert scope['declared_literal_count'] == 0
+    assert scope['declared_source_groups'] == ['design_description.txt']
+    assert report['structural_absence']['scanned'] == 1
+    assert report['structural_absence']['found'] == 0
+
+
+@pytest.mark.parametrize('damage', [
+    'missing_census', 'malformed_census', 'nonobject_census', 'duplicate_census',
+    'nonlist_scope', 'invalid_literal', 'missing_ldocs',
+    'malformed_ldoc', 'nonobject_ldoc', 'unreadable_ldoc',
+])
+def test_absent_or_invalid_census_inputs_never_become_not_applicable(tmp_path, monkeypatch, damage):
+    from extraction_credited_by_prose_only_check import main
+    p = _project(tmp_path, [], {}, {})
+    census = p / 'phase1/extraction_patterns.json'
+    doc = p / 'phase1/generated_docs/L8_RTL_CONSTANTS.json'
+    if damage == 'missing_census':
+        census.unlink()
+    elif damage == 'malformed_census':
+        census.write_text('{')
+    elif damage == 'nonobject_census':
+        census.write_text('[]')
+    elif damage == 'duplicate_census':
+        census.write_text('{"design_description.txt":["0x3F"],"design_description.txt":[]}')
+    elif damage == 'nonlist_scope':
+        census.write_text(json.dumps({'unknown_public_scope': {'count': 0}}))
+    elif damage == 'invalid_literal':
+        census.write_text(json.dumps({'design_description.txt': [{'literal': None}]}))
+    elif damage == 'missing_ldocs':
+        for path in doc.parent.glob('*.json'):
+            path.unlink()
+    elif damage == 'malformed_ldoc':
+        doc.write_text('{')
+    elif damage == 'nonobject_ldoc':
+        doc.write_text('[]')
+    else:
+        read_bytes = Path.read_bytes
+        def unreadable(path):
+            if path == doc:
+                raise OSError('neutral unreadable generated document')
+            return read_bytes(path)
+        monkeypatch.setattr(Path, 'read_bytes', unreadable)
+    report = p / 'reports/refused_census.json'
+    assert main([str(p), '--json', str(report)]) == 2
+    value = json.loads(report.read_text())
+    assert value['verdict'] == 'NOT_MEASURED', value
+    assert value['reason_class'] != 'NOT_APPLICABLE_BY_STRUCTURE', value
+    assert 'structural_absence' not in value
+
+
+def test_positive_prose_only_census_keeps_existing_advisory_policy(tmp_path):
+    from extraction_credited_by_prose_only_check import main
+    p = _project(tmp_path, ['0xDEADBEEF'], {}, {
+        'frs_sections': [{'content': 'The trim value is 0xDEADBEEF.'}]})
+    report = p / 'reports/positive_census.json'
+    assert main([str(p), '--json', str(report)]) == 0
+    value = json.loads(report.read_text())
+    assert value['denominator'] == 1 and value['prose_only'] == ['0xDEADBEEF']
+    assert value['structured_pct'] == 0.0
+    assert value.get('verdict') != 'NOT_APPLICABLE'
+    assert 'structural_absence' not in value
+
+
+@pytest.mark.parametrize('clocked', [False, True])
+def test_native_d1_accepts_declared_empty_census_without_false_checker_pass(tmp_path, clocked):
+    import execution_backend_gates as gates
+    from test_issue306_advisory_gate_slot import _native_extraction_project, _shipped_step
+    p = _native_extraction_project(tmp_path, clocked=clocked, literal=False)
+    result = gates.evaluate(p, _shipped_step('D1'))
+    (p / 'native_empty_census_d1.json').write_text(json.dumps(result, indent=2))
+    record, = [r for r in result['step']['advisory_gate_records']
+               if r['gate'] == 'extraction_credited_by_prose_only_check']
+    assert (record['verdict'], record['exit_code']) == ('NOT_APPLICABLE', 2), record
+    assert record['reason_class'] == 'NOT_APPLICABLE_BY_STRUCTURE', record
+    assert record['structured_verdict'] == 'NOT_APPLICABLE', record
+    assert result['status'] == 'PASS', result
+
+
+def test_empty_census_never_overrides_independent_current_d1_fact_loss(tmp_path):
+    import ai_signed_judgement as ai
+    import execution_backend_gates as gates
+    import phase1_expert_parse_track as track
+    from test_issue306_advisory_gate_slot import _native_extraction_project, _shipped_step
+    p = _native_extraction_project(tmp_path, literal=False)
+    doc = p / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json'
+    value = json.loads(doc.read_text())
+    for key in ('ports', 'top_ports', 'top_module_pins'):
+        value[key] = [row for row in value[key] if row['name'] != 'result_o']
+    doc.write_text(json.dumps(value))
+    answer = p / 'reports/audit/phase1/expert_parse_track_pack/l_doc_expectations.json'
+    answer.write_text(json.dumps({'expectations': [{
+        'id': 'neutral_source_output', 'layer': 'L9_INTEGRATION_SPEC',
+        'field_path': 'ports', 'requirement': 'Retain the declared result_o output.',
+        'expected_tokens': ['result_o'],
+        'evidence': ['input/docs/interface.md:2 output [5:0] result_o'],
+    }]}))
+    assert track.main([str(p), '--invoked-by', 'phase1_one_shot_runner']) == 0
+    reading = json.loads((p / 'reports/audit/phase1/expert_parse_track.json').read_text())
+    assert reading['ai_convergence']['disagreed'] == 1, reading
+    (p / 'reports/audit/ai_judgements/D1.json').write_text(json.dumps({
+        'schema': ai.SCHEMA, 'step_id': 'D1', 'verdict': 'FAIL',
+        'signed_by': 'independent neutral source reviewer',
+        'judgement': 'The source declares result_o, but the typed L9 interface lost it.',
+        'evidence_sha256': ai.evidence_sha256(p, 'D1'),
+    }))
+    assert ai.check(p, 'D1', expected_verdict='FAIL')[0]
+    result = gates.evaluate(p, _shipped_step('D1'))
+    record, = [r for r in result['step']['advisory_gate_records']
+               if r['gate'] == 'extraction_credited_by_prose_only_check']
+    assert record['verdict'] == 'NOT_APPLICABLE', record
+    assert result['status'] not in ('PASS', 'PASS_WITH_WAIVERS'), result
+    assert any('FAIL' in reason and 'judgement' in reason.lower()
+               for reason in result['step']['reasons']), result
