@@ -152,6 +152,12 @@ def _project(tmp_path: Path, name: str, *, l_docs: int = 28,
     # for "phase 1 already ran", so they carry the identity phase 1 stamps.
     # Without it the front door would -- correctly -- regenerate them.
     _p1_identity_fixture.stamp_current(p)
+    # A second-track-only retry also requires the first pass's summary to
+    # carry forward. L-doc presence alone does not establish that outcome.
+    _pass1_record(p).write_text(json.dumps({
+        "phase": 1, "mode": "docs", "verdict": "PASS",
+        "pass1": {"verdict": "PASS", "rc": 0},
+    }))
     return p
 
 
@@ -267,6 +273,59 @@ def test_an_operator_forced_skip_is_still_a_skip(tmp_path):
     assert ORCH._phase1_decision(p, force_skip=True) == (False, "")
 
 
+@pytest.mark.parametrize("prior", [
+    None, "{not json", "[]", "{}",
+    '{"mode":"expert_second_pass","verdict":"FAIL"}',
+    '{"mode":"docs","verdict":"PASS","pass1":{"verdict":"PASS","rc":false}}',
+])
+def test_missing_first_pass_recovery_reenters_docs_without_editing_inputs(
+        tmp_path, capsys, prior):
+    p = _project(tmp_path, "crashed_first_pass", answer=True)
+    record = _pass1_record(p)
+    if prior is None:
+        record.unlink()
+    else:
+        record.write_text(prior)
+    before = {f.relative_to(p): f.read_bytes() for folder in
+              (p / "input", _pl.generated_docs_dir(p), _answer_path(p).parent)
+              for f in folder.rglob("*") if f.is_file()}
+
+    assert ORCH._expert_answer_pending(p)[0] is True
+    assert ORCH._phase1_decision(p, False) == (True, "docs")
+    assert "RECOVER_PHASE1_FIRST_PASS" in capsys.readouterr().out
+    assert all((p / path).read_bytes() == raw for path, raw in before.items())
+    assert record.read_text() == prior if prior is not None else not record.exists()
+
+
+def test_missing_first_pass_recovery_does_not_override_skip(tmp_path):
+    p = _project(tmp_path, "crashed_but_skipped", answer=True)
+    _pass1_record(p).unlink()
+    assert ORCH._phase1_decision(p, True) == (False, "")
+
+
+def test_missing_first_pass_recovery_keeps_input_only_layers(tmp_path):
+    p = _project(tmp_path, "supplied_layers", answer=True)
+    _pass1_record(p).unlink()
+    (p / "input/docs/spec.md").unlink()
+    assert ORCH._design_input_present(p) is False
+    assert ORCH._phase1_decision(p, False) == (True, "expert_second_pass")
+
+
+def test_known_first_pass_failure_keeps_second_track_only(tmp_path):
+    p = _project(tmp_path, "failed_first_pass", answer=True)
+    _pass1_record(p).write_text(json.dumps({
+        "phase": 1, "mode": "docs", "verdict": "FAIL",
+        "pass1": {"verdict": "FAIL", "rc": 1},
+    }))
+    assert ORCH._phase1_decision(p, False) == (True, "expert_second_pass")
+
+
+def test_legacy_first_pass_summary_keeps_second_track_only(tmp_path):
+    p = _project(tmp_path, "legacy_first_pass", answer=True)
+    _pass1_record(p).replace(p / "reports/phase1_one_shot.json")
+    assert ORCH._phase1_decision(p, False) == (True, "expert_second_pass")
+
+
 # ── the second pass itself ────────────────────────────────────────────────
 
 def test_the_phase1_runner_accepts_second_track_only():
@@ -332,6 +391,10 @@ def test_a_delivered_answer_is_consumed_and_the_front_door_then_skips(tmp_path):
     for i in range(1, 29):
         (gd / f"L{i}_LAYER.json").write_text(json.dumps({"doc_id": f"L{i}"}))
     _p1_identity_fixture.stamp_current(p)      # FX_STALE_LDOCS, as `_project`
+    _pass1_record(p).write_text(json.dumps({
+        "phase": 1, "mode": "docs", "verdict": "PASS",
+        "pass1": {"verdict": "PASS", "rc": 0},
+    }))
 
     argv = [sys.executable, str(_PROGRAMS / "phase1_expert_parse_track.py"),
             str(p)]
@@ -692,6 +755,8 @@ def test_unknown_first_pass_cannot_become_pass(tmp_path, prior):
     p = _project(tmp_path, "unknown_pass1", answer=True)
     if prior is not None:
         _pass1_record(p).write_text(json.dumps(prior))
+    else:
+        _pass1_record(p).unlink()
     result = _invoke_lifecycle(p, "01_consumed")
     assert result["track"]["ai_subtrack"]["status"] == TRACK.AI_CONSUMED
     assert result["rc"] == 1

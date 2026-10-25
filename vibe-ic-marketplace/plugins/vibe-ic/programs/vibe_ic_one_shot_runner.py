@@ -558,6 +558,31 @@ def _phase1_decision(project: Path, force_skip: bool,
         # a state this project either is or is not in. Ask.
         pending, _why = _expert_answer_pending(project)
         if pending:
+            # A crash may leave L docs and an answer but no extraction outcome
+            # for the second pass to carry. In that case consume the design
+            # through the real first-pass producer; an expert-only retry would
+            # retain NOT_MEASURED forever. Keep known first-pass failures and
+            # valid legacy summaries on their ordinary second-track path.
+            path, _legacy = _pl.report_path_for_reading(project, "phase1_one_shot.json")
+            try:
+                summary = json.loads(path.read_text())
+                if not isinstance(summary, dict):
+                    raise ValueError("first-pass summary is not an object")
+                pass1 = summary.get("pass1")
+                verdicts = ("PASS", "PASS_WITH_WAIVERS", "FAIL")
+                if isinstance(pass1, dict):
+                    available = (pass1.get("verdict") in verdicts
+                                 and type(pass1.get("rc")) is int
+                                 and pass1["rc"] >= 0)
+                else:
+                    available = (summary.get("mode") != "expert_second_pass"
+                                 and summary.get("verdict") in verdicts)
+            except (OSError, ValueError):
+                available = False
+            if not available and _design_input_present(project):
+                print("[phase1] RECOVER_PHASE1_FIRST_PASS — no usable extraction "
+                      "summary to carry; running docs mode before expert consumption")
+                return (True, "docs")
             return (True, _P1_MODE_EXPERT_SECOND_PASS)
         # FX_STALE_LDOCS — and "the L documents exist" is not "they are what
         # the CURRENT producer would write". A skip keyed on existence is a
