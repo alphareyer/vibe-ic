@@ -25,12 +25,26 @@ from the new step ID; never use a position as a completed-step count.
 
 ## § 0.0 — FIRST RULE: IC path or IP path?
 
-Identify the **delivery route from the prompt before anything else**, before
-Phase 1. A request for a chip, IC, die, tapeout, shuttle, or "benchmark IC
-<name>" takes the **IC path** (`DIE`). A request for a block someone else
+This question applies when **physical delivery is in scope**. A bounded RTL
+generation, completion, modification, optimization, debug, or verification
+request does not require the user to choose a die or hardmacro package. Use
+`programs/task_nature_route.py` to determine its normal entry and evidence
+boundary from the visible input. Do not ask "IC path or IP path?" merely
+because the task uses this plugin or a benchmark enters Phase 1 for extraction.
+
+Open RTL evaluations, including CVDP, follow `benchmark_dispatch.py --solve`
+and the per-record `needs_ai_routing.jsonl` handoff. The dispatcher derives the
+execution route from each hash-bound semantic decision. Its RTL/IP evaluation
+label is not a claim of hardmacro readiness or an owner request for physical
+delivery. Never infer task nature from a benchmark name or problem ID.
+
+For a physical-delivery run, identify the **delivery route from the prompt
+before anything else**, before Phase 1. A request for a chip, IC, die, tapeout,
+shuttle, or "benchmark IC <name>" takes the **IC path** (`DIE`). A request for a block someone else
 integrates, IP, hard macro, macro, or "benchmark IP <name>" takes the **IP
-path** (`HARDMACRO`). If the prompt states neither route or states both, ask
-the person running it exactly one question: **"IC path or IP path?"** Wait for
+path** (`HARDMACRO`). If physical delivery is requested but its route is
+unclear or states both, ask the person running it exactly one question:
+**"IC path or IP path?"** Wait for
 the answer before Phase 1. One design may have both kinds of run; each run
 declares exactly one route.
 

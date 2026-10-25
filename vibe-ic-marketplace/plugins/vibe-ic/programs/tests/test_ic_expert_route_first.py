@@ -75,11 +75,16 @@ def test_direct_second_pass_records_its_explicit_route_before_reporting(
     assert summary["delivery_route"] == "IP"
 
 
-def test_expert_rule_is_first_and_names_both_routes():
+def test_expert_physical_delivery_rule_names_both_routes():
     page = (PLUGIN / "agents/ic-expert-agent.md").read_text()
-    first = next(line for line in page.splitlines() if line.startswith("## "))
-    assert "§ 0.0" in first and "IC path or IP path" in first
-    rule = page.split(first, 1)[1].split("\n## ", 1)[0]
+    # Reporting instructions may precede delivery admission. Inspect the
+    # declared route rule rather than treating the first display heading as it.
+    heading = next(line for line in page.splitlines()
+                   if line.startswith("## § 0.0"))
+    assert "IC path or IP path" in heading
+    rule = page.split(heading, 1)[1].split("\n## ", 1)[0]
+    assert "physical delivery is in scope" in rule
+    assert "bounded RTL" in rule and "task_nature_route.py" in rule
     for phrase in ("DIE", "HARDMACRO", "IC path or IP path?", "before Phase 1",
                    "answer_provenance.deliverable", "15.5ic", "26.5ic",
                    "37.5ic", "37.5ip"):
