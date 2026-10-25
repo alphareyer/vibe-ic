@@ -515,3 +515,300 @@ def test_cvdp_official_scorer_runs_only_on_complete_response_set(
     assert result["passed"] == 1
     assert result["total"] == 1
     assert result["pass_at_1"] == 1.0
+
+
+# Late-signed D1 reuse joins the canonical checkpoint consumer to this existing
+# benchmark front-door contract. The producer/consumer fixtures remain shared.
+import vibe_ic_one_shot_runner as front
+import step_output_collector as versions
+from programs.tests import test_fx_stale_ldocs_generated_docs_are_reused_only_when_current as identity_fixture
+from programs.tests.test_the_front_door_rollup_edges import (
+    _recorded_d1_checkpoint, _sign_d1_checkpoint,
+)
+
+
+@pytest.fixture
+def checkpoint_execution(monkeypatch):
+    from programs.tests.test_execution_receipt_chain import isolated_transport
+    yield from isolated_transport.__wrapped__(monkeypatch)
+
+
+def _benchmark_d1_checkpoint(tmp_path, monkeypatch):
+    # The public prompt exists before the original producer records its input
+    # generation; adding it after the fact would correctly invalidate reuse.
+    create = identity_fixture._project
+
+    def project_with_prompt(*args, **kwargs):
+        project = create(*args, **kwargs)
+        (project / 'input/phase1_prompt.md').write_text(
+            (project / 'input/docs/spec.md').read_text())
+        return project
+
+    monkeypatch.setattr(identity_fixture, '_project', project_with_prompt)
+    project, _, ready, knobs, original = _recorded_d1_checkpoint(
+        tmp_path, monkeypatch)
+    runner = PROGRAMS / 'vibe_ic_one_shot_runner.py'
+    budget = dispatch._RunnerBudget(1, 1, 1)
+    old_report = project / 'reports/orchestrator/phase1_one_shot.json'
+
+    def original_report(argv, **kwargs):
+        context = json.loads(kwargs['env'][dispatch._RUNNER_CONTEXT_ENV])
+        old_report.parent.mkdir(parents=True, exist_ok=True)
+        document = dispatch._bind_runner_report({
+            'project': str(project), 'verdict': 'NOT_MEASURED',
+            'reason_class': 'awaiting_signed_judgement',
+            'measurement_scope': 'NEUTRAL_CHECKPOINT_PRODUCER_PRECONDITION',
+        }, project, __file__, old_report.name, context=context)
+        old_report.write_text(json.dumps(document) + '\n')
+        return SimpleNamespace(returncode=1, stdout='', stderr='')
+
+    monkeypatch.setattr(dispatch.subprocess, 'run', original_report)
+    seed = budget.run(dispatch._solver_argv(runner, project, 'D1', 'D1', 'ic'))
+    assert seed.error is None, seed.error
+    assert seed.invocation['reports_after']['phase1_one_shot.json']['runner_binding']['invocation_id'] == seed.invocation_id
+    return project, ready, knobs, original, runner, budget, old_report
+
+
+def _benchmark_checkpoint_transport(project, knobs, monkeypatch, observations,
+                                    mutate=None):
+    """Use the actual complete D1 consumer, not a fabricated PASS result."""
+    def transport(argv, **kwargs):
+        context = json.loads(kwargs['env'][dispatch._RUNNER_CONTEXT_ENV])
+        accepted = front._revalidate_phase1_checkpoint(project, knobs)
+        observations.append(accepted)
+        current = project / 'reports/orchestrator/vibe_ic_one_shot.json'
+        current.parent.mkdir(parents=True, exist_ok=True)
+        document = dispatch._bind_runner_report({
+            'project': str(project), 'verdict': accepted['verdict'],
+            'phases': [{'name': 'phase1', 'verdict': accepted['verdict'], 'rc': 0}],
+            'phase1_checkpoint_review': {
+                'verdict': accepted['verdict'], 'producer_reused': True,
+                'canonical_acceptance': accepted,
+            },
+            'measurement_scope': 'NEUTRAL_CHECKPOINT_CANONICAL_CONSUMER',
+        }, project, __file__, current.name, context=context)
+        if mutate is not None:
+            mutate(project, document, accepted)
+        current.write_text(json.dumps(document) + '\n')
+        return SimpleNamespace(returncode=0 if accepted['verdict'] == 'PASS' else 1,
+                               stdout='', stderr='')
+
+    monkeypatch.setattr(dispatch.subprocess, 'run', transport)
+
+
+def test_late_signed_canonical_checkpoint_is_admitted_without_rewriting_producer(
+        tmp_path, monkeypatch, checkpoint_execution):
+    project, _, knobs, original, runner, budget, old_report = _benchmark_d1_checkpoint(
+        tmp_path, monkeypatch)
+    _sign_d1_checkpoint(project)
+    old_bytes = old_report.read_bytes()
+    docs_before = front._p1id.docs_snapshot(project)
+    observations = []
+    _benchmark_checkpoint_transport(project, knobs, monkeypatch, observations)
+    result = dispatch._ensure_phase1_frontdoor(
+        runner, project, budget, force_current=True, delivery_route='ic',
+        route_receipt={}, task_sha256='b' * 64, source_sha256='a' * 64,
+        ldoc_root_handle='c' * 64)
+
+    assert observations[0]['verdict'] == 'PASS', observations
+    accepted = versions.latest_pass(project, 'D1')
+    assert accepted['canonical_pass'] and accepted['current_inputs']
+    assert accepted['result']['checkpoint']['producer_started'] is False
+    assert accepted['result']['canonical_consumer']['status'] == 'PASS'
+    assert old_report.read_bytes() == old_bytes
+    assert front._p1id.docs_snapshot(project) == docs_before
+    assert {path: path.read_bytes() for path in original} == original
+    # The measured mismatch: a current successful canonical consumer is
+    # rejected because the untouched historical producer report is demanded.
+    assert result.get('d1_gate_error', 'CURRENT_D1_ADMITTED') == 'CURRENT_D1_ADMITTED', result
+    assert result['d1_gate']['verdict'] == 'PASS'
+
+
+def test_current_signature_cannot_override_a_failed_checkpoint_consumer(
+        tmp_path, monkeypatch, checkpoint_execution):
+    project, ready, knobs, _, runner, budget, old_report = _benchmark_d1_checkpoint(
+        tmp_path, monkeypatch)
+    _sign_d1_checkpoint(project)
+    ready.unlink()
+    old_bytes = old_report.read_bytes()
+    observations = []
+    _benchmark_checkpoint_transport(project, knobs, monkeypatch, observations)
+    result = dispatch._ensure_phase1_frontdoor(
+        runner, project, budget, force_current=True, delivery_route='ic',
+        route_receipt={}, task_sha256='b' * 64, source_sha256='a' * 64,
+        ldoc_root_handle='c' * 64)
+
+    assert observations[0]['verdict'] == 'FAIL', observations
+    assert versions.latest_pass(project, 'D1') is None
+    assert result.get('d1_gate', {}).get('verdict') != 'PASS'
+    assert old_report.read_bytes() == old_bytes
+
+
+def _checkpoint_admission_arguments(project):
+    prompt = (project / 'input/phase1_prompt.md').read_text()
+    route = general_route.route_decision_receipt(
+        prompt, nature='spec_generation', requested_evidence='lint_validated',
+        delivery_target='rtl')
+    return dict(route_receipt=route, source_sha256=route['source_sha256'],
+                task_sha256='b' * 64, ldoc_root_handle=dispatch._sha256_text(
+                    str((project / 'phase1/generated_docs').resolve())))
+
+
+def _seal_checkpoint_activation(project, result, arguments):
+    import route_decision as rd
+    pending = rd.write_d1_pending(
+        project / 'unused-pending-path',
+        route_receipt=arguments['route_receipt'],
+        source_sha256=arguments['source_sha256'],
+        task_sha256=arguments['task_sha256'])
+    activation = rd.activate_d1(
+        pending=pending, route_receipt=arguments['route_receipt'],
+        source_sha256=arguments['source_sha256'],
+        task_sha256=arguments['task_sha256'],
+        ldoc_root_handle=arguments['ldoc_root_handle'],
+        provenance=result['provenance'], d1_gate=result['d1_gate'])
+    dispatch._publish_current_receipt(
+        project, 'd1_activation', activation,
+        digest_field='activation_sha256', run_id='neutral-checkpoint-admission')
+    return activation
+
+
+@pytest.mark.parametrize('damage', [
+    'missing_acceptance', 'failed_acceptance', 'wrong_folder', 'untyped_pass',
+    'stale_invocation', 'changed_output', 'changed_input', 'failed_canonical_record',
+    'linked_canonical_record', 'escaped_folder',
+])
+def test_checkpoint_fallback_refuses_invalid_current_proof(
+        tmp_path, monkeypatch, checkpoint_execution, damage):
+    project, _, knobs, _, runner, budget, _ = _benchmark_d1_checkpoint(
+        tmp_path, monkeypatch)
+    _sign_d1_checkpoint(project)
+    observations = []
+
+    def mutate(project, document, accepted):
+        review = document['phase1_checkpoint_review']
+        if damage == 'missing_acceptance':
+            review.pop('canonical_acceptance')
+        elif damage == 'failed_acceptance':
+            review['canonical_acceptance'] = {**accepted, 'verdict': 'FAIL'}
+        elif damage == 'wrong_folder':
+            review['canonical_acceptance'] = {**accepted, 'folder': 'missing/version'}
+        elif damage == 'escaped_folder':
+            review['canonical_acceptance'] = {**accepted, 'folder': '../../outside'}
+        elif damage == 'untyped_pass':
+            document.pop('phase1_checkpoint_review')
+        elif damage == 'stale_invocation':
+            document['runner_binding']['invocation_id'] = 'previous-call'
+        elif damage == 'changed_output':
+            (project / 'phase1/generated_docs/L1_DOC.json').write_text('{"changed":true}')
+        elif damage == 'changed_input':
+            (project / 'input/docs/spec.md').write_text('changed after canonical acceptance')
+        else:
+            path = versions._versions_root(project) / accepted['folder'] / 'outputs.json'
+            if damage == 'failed_canonical_record':
+                record = json.loads(path.read_text())
+                record['result']['canonical_consumer']['status'] = 'FAIL'
+                path.write_text(json.dumps(record))
+            else:
+                target = path.with_suffix('.original')
+                path.rename(target)
+                path.symlink_to(target.name)
+
+    _benchmark_checkpoint_transport(
+        project, knobs, monkeypatch, observations, mutate=mutate)
+    result = dispatch._ensure_phase1_frontdoor(
+        runner, project, budget, force_current=True, delivery_route='ic',
+        **_checkpoint_admission_arguments(project))
+    assert observations[0]['verdict'] == 'PASS', observations
+    assert result.get('d1_gate', {}).get('verdict') != 'PASS', result
+    assert result.get('d1_gate_error') or result.get('status') == 'BLOCKED', result
+
+
+def _admitted_checkpoint(tmp_path, monkeypatch):
+    project, _, knobs, _, runner, budget, old_report = _benchmark_d1_checkpoint(
+        tmp_path, monkeypatch)
+    _sign_d1_checkpoint(project)
+    observations = []
+    _benchmark_checkpoint_transport(project, knobs, monkeypatch, observations)
+    arguments = _checkpoint_admission_arguments(project)
+    result = dispatch._ensure_phase1_frontdoor(
+        runner, project, budget, force_current=True, delivery_route='ic', **arguments)
+    assert result.get('d1_gate', {}).get('verdict') == 'PASS', result
+    activation = _seal_checkpoint_activation(project, result, arguments)
+    snapshot = dispatch._capture_d1_evidence(project)
+    assert snapshot.report[0] == dispatch._receipt_store_path(
+        project, 'd1_gate_report', result['d1_gate']['report_sha256'])
+    dispatch._validate_d1_snapshot(
+        snapshot, arguments['route_receipt'], activation, arguments['task_sha256'])
+    return project, knobs, runner, budget, old_report, arguments, activation, snapshot
+
+
+def test_checkpoint_archive_survives_a_normal_downstream_summary_overwrite(
+        tmp_path, monkeypatch, checkpoint_execution):
+    project, _, runner, budget, old_report, arguments, activation, snapshot = (
+        _admitted_checkpoint(tmp_path, monkeypatch))
+    original_report = old_report.read_bytes()
+    original_proof = snapshot.report[0].read_bytes()
+    current = project / 'reports/orchestrator/vibe_ic_one_shot.json'
+    before = current.read_bytes()
+    prior_folder = versions.latest_pass(project, 'D1')['folder']
+    # This is the normal bounded downstream runner invocation. Its transport
+    # executes the real complete D1 checkpoint consumer again and overwrites
+    # the live unified summary, just as the production front door does.
+    process = budget.run(dispatch._solver_argv(runner, project, '2', '2', 'ic'))
+    assert process.error is None, process.error
+    assert current.read_bytes() != before
+    assert versions.latest_pass(project, 'D1')['folder'] != prior_folder
+    assert old_report.read_bytes() == original_report
+    assert snapshot.report[0].read_bytes() == original_proof
+    dispatch._restore_d1_evidence(snapshot)
+    assert not dispatch._d1_invalidation_path(
+        project, activation['activation_sha256']).exists()
+    current_snapshot = dispatch._capture_d1_evidence(project)
+    dispatch._validate_d1_snapshot(
+        current_snapshot, arguments['route_receipt'], activation,
+        arguments['task_sha256'])
+
+
+@pytest.mark.parametrize('damage', ['prompt', 'ldoc', 'archived_report', 'report_directory'])
+def test_checkpoint_snapshot_still_refuses_bound_evidence_changes(
+        tmp_path, monkeypatch, checkpoint_execution, damage):
+    project, _, _, _, _, arguments, activation, snapshot = _admitted_checkpoint(
+        tmp_path, monkeypatch)
+    if damage == 'prompt':
+        path = project / 'input/phase1_prompt.md'
+    elif damage == 'ldoc':
+        path = project / 'phase1/generated_docs/L1_DOC.json'
+    else:
+        path = snapshot.report[0]
+    if damage == 'report_directory':
+        parent = path.parent
+        moved = parent.with_name(parent.name + '-original')
+        parent.rename(moved)
+        parent.mkdir()
+        (moved / path.name).rename(path)
+    else:
+        path.write_bytes(path.read_bytes() + b'\n')
+    with pytest.raises(ValueError, match='D1_SNAPSHOT_'):
+        dispatch._assert_d1_snapshot_current(snapshot)
+    dispatch._restore_d1_evidence(snapshot)
+    assert dispatch._d1_invalidation_path(
+        project, activation['activation_sha256']).is_file()
+
+
+def test_staged_checkpoint_clone_selects_original_sealed_report(
+        tmp_path, monkeypatch, checkpoint_execution):
+    import shutil
+    project, _, _, _, _, arguments, activation, snapshot = _admitted_checkpoint(
+        tmp_path, monkeypatch)
+    staged = tmp_path / 'staged-clone'
+    shutil.copytree(project, staged, symlinks=True)
+    # Absolute current-receipt pointers deliberately still identify the owner.
+    # Program regate supplies the already-admitted sealed report digest.
+    staged_snapshot = dispatch._capture_d1_evidence(
+        staged, report_sha256=activation['d1_gate']['report_sha256'])
+    assert staged_snapshot.report[1] == snapshot.report[1]
+    assert staged_snapshot.report[0].is_relative_to(staged)
+    dispatch._validate_d1_snapshot(
+        staged_snapshot, arguments['route_receipt'], activation,
+        arguments['task_sha256'], authority_project=project)

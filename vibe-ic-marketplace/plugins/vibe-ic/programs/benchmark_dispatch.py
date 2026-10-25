@@ -5387,6 +5387,100 @@ def _resume_solver_argv(runner: Path, proj: Path, supplied_rtl: bool,
     return _solver_argv(runner, proj, effective_entry, exit_step, delivery_route)
 
 
+def _d1_report_verdict(project: Path, report_name: str, report: dict, *,
+                       require_latest_checkpoint: bool = False) -> str | None:
+    """Read D1's typed verdict without relabelling historical producer data.
+
+    A late expert answer can be accepted by the unified runner's complete
+    checkpoint consumer without rerunning Phase 1. Its current aggregate is
+    usable only when it names that actual retained canonical D1 acceptance.
+    An aggregate PASS by itself is never D1 evidence.
+    """
+    if report_name == "phase1_one_shot.json":
+        verdict = report.get("verdict")
+        return verdict if isinstance(verdict, str) else None
+    if report_name != "vibe_ic_one_shot.json" or report.get("verdict") != "PASS":
+        return None
+    phases = report.get("phases")
+    if not isinstance(phases, list):
+        return None
+    phase1 = [row for row in phases if isinstance(row, dict)
+              and row.get("name") == "phase1"]
+    if len(phase1) != 1 or phase1[0].get("verdict") != "PASS":
+        return None
+    review = report.get("phase1_checkpoint_review")
+    if (not isinstance(review, dict) or review.get("verdict") != "PASS"
+            or review.get("producer_reused") is not True):
+        return None
+    acceptance = review.get("canonical_acceptance")
+    if (not isinstance(acceptance, dict) or acceptance.get("verdict") != "PASS"
+            or acceptance.get("producer_reused") is not True):
+        return None
+    import step_output_collector as versions          # noqa: PLC0415
+    import execution_backend_worker as worker        # noqa: PLC0415
+    import _flow_yaml                                 # noqa: PLC0415
+    try:
+        folder = acceptance["folder"]
+        if not isinstance(folder, str) or not folder:
+            return None
+        root = versions._versions_root(project)
+        path = root / folder / "outputs.json"
+        path.resolve(strict=True).relative_to(root.resolve())
+        for item in (path, *path.parents):
+            if item == project:
+                break
+            if item.is_symlink():
+                return None
+        accepted = _read_json_regular(path)
+        row = next(row for row in _flow_yaml.load()["steps"]
+                   if str(row["id"]) == "D1")
+        inputs = worker._declared_input_files(project, row.get("required_inputs", ()))
+        if not inputs or accepted.get("inputs") != inputs:
+            return None
+        for relative in inputs:
+            source = project / relative
+            source.resolve(strict=True).relative_to(project.resolve())
+            if any(item.is_symlink() for item in (source, *source.parents)
+                   if item != project and project in item.parents):
+                return None
+        if require_latest_checkpoint:
+            latest = versions.latest_pass(project, "D1")
+            if (not isinstance(latest, dict) or latest.get("folder") != folder
+                    or latest.get("current_inputs") is not True):
+                return None
+    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+        return None
+    if (accepted.get("status") != "PASS" or accepted.get("canonical_pass") is not True
+            or str(accepted.get("id")) != "D1" or accepted.get("folder") != folder):
+        return None
+    result = accepted.get("result") or {}
+    if not isinstance(result, dict):
+        return None
+    checkpoint = result.get("checkpoint") or {}
+    consumer = result.get("canonical_consumer") or {}
+    if (not isinstance(checkpoint, dict) or not isinstance(consumer, dict)
+            or result.get("site") != "phase1_checkpoint_revalidation"
+            or checkpoint.get("producer_reused") is not True
+            or checkpoint.get("producer_started") is not False
+            or consumer.get("status") != "PASS"):
+        return None
+    try:
+        outputs = accepted.get("outputs")
+        if not isinstance(outputs, list) or not outputs:
+            return None
+        for output in outputs:
+            path = project / output["rel"]
+            path.resolve(strict=True).relative_to(project.resolve())
+            linked = any(item.is_symlink() for item in (path, *path.parents)
+                         if item != project and project in item.parents)
+            if (linked or not path.is_file()
+                    or hashlib.sha256(path.read_bytes()).hexdigest() != output["sha256"]):
+                return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return "PASS"
+
+
 def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget,
                              *, force_current: bool = False,
                              route_receipt: dict | None = None,
@@ -5454,38 +5548,62 @@ def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget,
         # The report producer is the authority for D1's typed verdict.  A
         # digest and ``ran: true`` alone describe provenance, not gate success.
         import _path_layout as _pl                    # noqa: PLC0415
-        report_path = _pl.report_path(project, "phase1_one_shot.json")
-        try:
-            report_bytes = report_path.read_bytes()
-            report = _strict_json_loads(report_bytes.decode("utf-8"))
-        except (OSError, ValueError, TypeError) as exc:
-            return {**result, "d1_gate_error": f"D1_GATE_REPORT_UNREADABLE: {exc}"}
-        if not isinstance(report, dict) or not isinstance(report.get("verdict"), str):
-            return {**result, "d1_gate_error": "D1_GATE_REPORT_SCHEMA_INVALID"}
-        binding = report.get("runner_binding")
         invocation_id = str(process.invocation_id or "")
-        if (not invocation_id or not isinstance(binding, dict)
-                or binding.get("schema") != "vibeic.runner_report_binding.v1"
-                or binding.get("invocation_id") != invocation_id
-                or binding.get("project") != str(project)
-                or binding.get("report_name") != "phase1_one_shot.json"
-                or not isinstance(binding.get("argv"), list)
-                or any(not isinstance(arg, str) for arg in binding.get("argv"))
-                or not isinstance(binding.get("source"), dict)
-                or not isinstance(binding.get("producer"), dict)
-                or not isinstance(binding.get("material"), dict)):
-            return {**result, "d1_gate_error": "D1_GATE_REPORT_NOT_CURRENT_CALL"}
+        report_error = "D1_GATE_REPORT_NOT_CURRENT_CALL"
+        selected = None
+        for report_name in ("phase1_one_shot.json", "vibe_ic_one_shot.json"):
+            report_path = _pl.report_path(project, report_name)
+            try:
+                report_bytes = report_path.read_bytes()
+                report = _strict_json_loads(report_bytes.decode("utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            if not isinstance(report, dict):
+                continue
+            binding = report.get("runner_binding")
+            if (not invocation_id or not isinstance(binding, dict)
+                    or binding.get("schema") != "vibeic.runner_report_binding.v1"
+                    or binding.get("invocation_id") != invocation_id
+                    or binding.get("project") != str(project)
+                    or binding.get("report_name") != report_name
+                    or not isinstance(binding.get("argv"), list)
+                    or any(not isinstance(arg, str) for arg in binding.get("argv"))
+                    or not isinstance(binding.get("source"), dict)
+                    or not isinstance(binding.get("producer"), dict)
+                    or not isinstance(binding.get("material"), dict)):
+                continue
+            verdict = _d1_report_verdict(
+                project, report_name, report, require_latest_checkpoint=True)
+            if verdict is None:
+                report_error = "D1_GATE_CHECKPOINT_NOT_ACCEPTED"
+                continue
+            selected = report_bytes, report, verdict, report_name
+            break
+        if selected is None:
+            return {**result, "d1_gate_error": report_error}
+        report_bytes, report, verdict, report_name = selected
         if source_sha256 is None or task_sha256 is None or ldoc_root_handle is None:
             return {**result, "d1_gate_error": "D1_GATE_BINDING_INPUT_MISSING"}
+        report_sha = hashlib.sha256(report_bytes).hexdigest()
+        if report_name == "vibe_ic_one_shot.json":
+            # The unified summary is overwritten by every normal downstream
+            # span. Preserve these exact current bound bytes, without
+            # restamping the original Phase-1 producer or changing gate schema.
+            archive = _receipt_store_path(project, "d1_gate_report", report_sha)
+            archive.resolve().relative_to(project)
+            if any(path.is_symlink() for path in (archive, *archive.parents)
+                   if path != project and project in path.parents):
+                raise ValueError("D1_GATE_REPORT_ARCHIVE_LINKED")
+            _write_immutable_text(archive, report_bytes.decode("utf-8"))
         result["d1_gate"] = rd.make_d1_gate(
-            verdict=str(report.get("verdict") or ""),
+            verdict=verdict,
             route_receipt=route_receipt or {},
             provenance=provenance,
             source_sha256=source_sha256,
             task_sha256=task_sha256,
             ldoc_root_handle=ldoc_root_handle,
             invocation_id=invocation_id,
-            report_sha256=hashlib.sha256(report_bytes).hexdigest(),
+            report_sha256=report_sha,
             waiver_receipt=(report.get("waiver_receipt")
                             if isinstance(report.get("waiver_receipt"), dict)
                             else None))
@@ -5938,14 +6056,15 @@ def _d1_file_generation(path: Path) -> tuple:
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
-def _capture_d1_evidence(project: Path) -> _D1EvidenceSnapshot:
+def _capture_d1_evidence(project: Path, *,
+                         report_sha256: str | None = None) -> _D1EvidenceSnapshot:
     """Read each evidence file once; bytes and file generations are immutable."""
     import _path_layout as _pl                     # noqa: PLC0415
     project = Path(project).resolve()
     docs = project / "phase1" / "generated_docs"
     report_path = _pl.report_path(project, "phase1_one_shot.json")
     directories = []
-    for root in (docs, report_path.parent, project / "input"):
+    def retain_directories(root):
         for directory in (root, *root.parents):
             if directory == project.parent:
                 break
@@ -5955,6 +6074,8 @@ def _capture_d1_evidence(project: Path) -> _D1EvidenceSnapshot:
             generation = (st.st_dev, st.st_ino)
             if (directory, generation) not in directories:
                 directories.append((directory, generation))
+    for root in (docs, report_path.parent, project / "input"):
+        retain_directories(root)
     def capture(path):
         generation = _d1_file_generation(path)
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -5966,15 +6087,32 @@ def _capture_d1_evidence(project: Path) -> _D1EvidenceSnapshot:
         if generation != _d1_file_generation(path):
             raise ValueError("D1_SNAPSHOT_GENERATION_CHANGED")
         return (path, data, generation)
+    try:
+        activation = _read_current_receipt(project, "d1_activation")["receipt"]
+        activation_sha = activation["activation_sha256"]
+        if report_sha256 is None:
+            report_sha256 = activation["d1_gate"]["report_sha256"]
+    except (OSError, ValueError, KeyError, TypeError):
+        activation_sha = None
     prompt = capture(project / "input" / "phase1_prompt.md")
-    report = capture(report_path)
+    if report_sha256 is None:
+        report = capture(report_path)
+    else:
+        report = None
+        for path in (report_path,
+                     _receipt_store_path(project, "d1_gate_report", report_sha256)):
+            if not path.exists():
+                continue
+            retain_directories(path.parent)
+            candidate = capture(path)
+            if hashlib.sha256(candidate[1]).hexdigest() == report_sha256:
+                report = candidate
+                break
+        if report is None:
+            raise ValueError("D1_SNAPSHOT_GATE_REPORT_DIGEST_MISSING")
     ldocs = tuple(capture(p) for p in sorted(docs.glob("L*.json")))
     if not ldocs:
         raise ValueError('D1_SNAPSHOT_LDOCS_MISSING' + f": {docs}: glob L*.json yielded no D1 layer documents")
-    try:
-        activation_sha = _read_current_receipt(project, "d1_activation")["receipt"]["activation_sha256"]
-    except (OSError, ValueError, KeyError):
-        activation_sha = None
     digest = _receipt_sha256_json({
         "project": str(project),
         "files": [{"path": str(p), "sha256": hashlib.sha256(b).hexdigest(),
@@ -6033,16 +6171,25 @@ def _validate_d1_snapshot(snapshot: _D1EvidenceSnapshot, route_receipt: dict,
         raise ValueError("D1_CURRENT_LDOC_PROVENANCE_MISMATCH")
     report_bytes = snapshot.report[1]
     report = _strict_json_loads(report_bytes.decode("utf-8"))
-    if not isinstance(report, dict) or report.get("verdict") != "PASS":
+    binding = report.get("runner_binding") if isinstance(report, dict) else None
+    report_name = binding.get("report_name") if isinstance(binding, dict) else None
+    import _path_layout as _pl                     # noqa: PLC0415
+    expected_path = (_pl.report_path(snapshot.project, "phase1_one_shot.json")
+                     if report_name == "phase1_one_shot.json" else
+                     _receipt_store_path(snapshot.project, "d1_gate_report",
+                                         str(gate.get("report_sha256"))))
+    if snapshot.report[0] != expected_path:
+        raise ValueError("D1_CURRENT_REPORT_PATH_MISMATCH")
+    if (not isinstance(report, dict)
+            or _d1_report_verdict(snapshot.project, report_name, report) != "PASS"):
         raise ValueError("D1_CURRENT_REPORT_NOT_PASS")
     if hashlib.sha256(report_bytes).hexdigest() != gate.get("report_sha256"):
         raise ValueError("D1_CURRENT_REPORT_DIGEST_MISMATCH")
-    binding = report.get("runner_binding")
     if (not isinstance(binding, dict)
             or binding.get("schema") != "vibeic.runner_report_binding.v1"
             or binding.get("invocation_id") != gate.get("invocation_id")
             or binding.get("project") != str(project)
-            or binding.get("report_name") != "phase1_one_shot.json"):
+            or binding.get("report_name") != report_name):
         raise ValueError("D1_CURRENT_REPORT_INVOCATION_MISMATCH")
     _assert_d1_snapshot_current(snapshot)
 
@@ -9886,7 +10033,8 @@ def _apply_program_regate(bench: str, dataset: str | Path, run_p: Path,
         argv = _resume_solver_argv(
             runner, staged, True, admission["entry_step"],
             admission["exit_step"], admission["delivery_route"])
-        d1_snapshot = _capture_d1_evidence(staged)
+        d1_snapshot = _capture_d1_evidence(
+            staged, report_sha256=admission["activation"]["d1_gate"]["report_sha256"])
         process = _run_from_d1_snapshot(
             _RunnerBudget(1, 1, worker_threads), argv, d1_snapshot,
             admission["route_receipt"], admission["activation"],
