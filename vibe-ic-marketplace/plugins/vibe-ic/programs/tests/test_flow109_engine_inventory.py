@@ -1,4 +1,6 @@
 """Source inventory audit: engine scope is not native qualification."""
+import json
+
 import flow109
 
 
@@ -55,6 +57,33 @@ def test_gls_qualifies_both_compile_and_runtime():
     assert set(actual) == {'iverilog', 'vvp'}
     assert actual['iverilog']['native_steps'] == ['Icarus.Compile']
     assert actual['vvp']['native_steps'] == ['Icarus.Simulate']
+
+
+def test_d49_produces_sdf_while_d53_owns_simulator_annotation():
+    rows = {row['id']: row for row in flow109.load_registry()['rows']}
+    d49 = {item['id']: item for item in rows['D49']['obligations']}
+    d53 = {item['id']: item for item in rows['D53']['obligations']}
+
+    assert 'base_30.candidate_sdf_generation' in d49
+    assert 'base_30.candidate_sdf_annotation' not in d49
+    assert d49['base_30.candidate_sdf_generation']['expectation']['required_set_ref'] == (
+        'requirements/base_30/candidate_sdf_generation.json#/required_items')
+    assert set(d53) >= {
+        'base_38.candidate_sdf_annotation',
+        'base_38.candidate_gls_scenarios',
+        'base_38.gls_failures',
+    }
+
+    migrations = json.loads((flow109.REGISTRY.parent /
+                             'flow109-obligation-migrations.json').read_text())
+    migration = migrations['migrations'][0]
+    assert migration['row_id'] == 'D49'
+    assert migration['to']['id'] == 'base_30.candidate_sdf_generation'
+    assert migration['preserved_downstream_obligations'] == [
+        'base_38.candidate_sdf_annotation',
+        'base_38.candidate_gls_scenarios',
+        'base_38.gls_failures',
+    ]
 
 
 def test_all_dispatchable_profiles_cover_each_declared_operation_once():
