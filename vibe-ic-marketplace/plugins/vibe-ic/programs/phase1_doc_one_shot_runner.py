@@ -37978,6 +37978,109 @@ def _l6_state_evidence_source(state: Dict[str, Any]) -> str:
     return _L6_EVIDENCE_LABEL_SUFFIX_RE.sub("", ev).strip()
 
 
+def _fsm_state_definition_rows(text: str):
+    """Read a closed colon-definition list only under an explicit state heading.
+
+    Short legal state identifiers are meaningful in this grammar; the loose
+    prose walker's length floor must not discard them. A different section
+    or any non-definition content closes the list, so nearby opcode lists do
+    not become state catalogs.
+    """
+    active = False
+    heading = re.compile(
+        r"(?:\b(?:FSM|state\s+machine)\b[^\n]*\bstates|"
+        r"^(?:FSM\s+)?states|\bsummary\s+of\s+each\s+state)\s*:\s*$",
+        re.IGNORECASE)
+    row = re.compile(r"^\s*(?:[-*]\s+)?`?([A-Za-z_][A-Za-z0-9_]*)`?"
+                     r"\s*:\s*(\S.*)$")
+    for line in (text or "").splitlines():
+        if heading.search(line.strip().lstrip('#').strip()):
+            active = True
+            continue
+        if not active or not line.strip():
+            continue
+        match = row.match(line)
+        if not match:
+            active = False
+            continue
+        yield match.group(1), line.strip()
+
+
+def _fsm_explicit_catalog(text: str):
+    """Identifiers belong to an FSM only when their declaration says so.
+
+    Preserve source case, including identifiers differing only by case. Numeric
+    case-state prose publishes the literal value, never a fabricated enum name.
+    """
+    declared = list(_fsm_state_definition_rows(text))
+    for line in (text or "").splitlines():
+        match = re.fullmatch(
+            r"\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)+)\s*:\s*"
+            r"Enumeration\s+values\s+representing\s+different\s+states\b.*",
+            line, re.IGNORECASE)
+        if match:
+            for name in re.split(r"\s*,\s*", match.group(1)):
+                declared.append((name, line.strip()))
+        match = re.match(r"\s*If\s+(?:the\s+)?state\s+is\s+(\d+)\s*,", line,
+                         re.IGNORECASE)
+        if match:
+            declared.append((match.group(1), line.strip()))
+    names = {name for name, _ in declared}
+    for match in re.finditer(
+            r"\bparameter\s+([A-Za-z_]\w*)\s*=\s*\d+'\s*[bdho][0-9a-f_xz]+",
+            text or "", re.IGNORECASE):
+        if _fsm_parameter_has_state_owner(text, match, names):
+            declared.append((match.group(1), match.group(0)))
+    yield from declared
+
+
+def _fsm_definition_edges(text: str, source: str):
+    """Keep only a transition stated inside an explicitly owned state row.
+
+    The sentence is retained verbatim as a prose trigger, not translated into
+    executable logic. A state mention, an absent guard, or an unknown target
+    cannot manufacture behavior for the Phase-2 author.
+    """
+    transition = re.compile(
+        r"\b(?:transition(?:s|ing)?\s+to|remains?\s+in)\s+"
+        r"(?:the\s+)?([A-Za-z_]\w*)\s+state\b", re.IGNORECASE)
+    for name, literal in _fsm_state_definition_rows(text):
+        body = literal.split(":", 1)[1]
+        for sentence in re.split(r"(?<=[.!?])\s+", body.strip()):
+            for match in transition.finditer(sentence):
+                # Negating a guard ("if not ready") still declares an edge;
+                # only a negated transition relation is an absence statement.
+                if re.search(
+                        r"\b(?:not|never|no|cannot|can't|won't)"
+                        r"(?:\s+(?:ever|directly))?\s*$",
+                        sentence[:match.start()], re.IGNORECASE):
+                    continue
+                yield {"from": name, "to": match.group(1),
+                       "trigger": sentence.strip(), "source_literal": literal,
+                       "evidence": f"input/docs/{source} (explicit state transition)"}
+
+
+def _fsm_parameter_has_state_owner(text: str, match: "re.Match",
+                                   declared_names: Set[str]) -> bool:
+    """A generic RTL parameter is an encoding only with state ownership.
+
+    Width and capitalization also describe opcodes, masks and addresses. State
+    naming syntax, an explicit catalog, or a local state-encoding heading is
+    required; a distant FSM word elsewhere in the document is insufficient.
+    """
+    name = match.group(1)
+    if re.match(r"(?:STATE_|S_)", name, re.IGNORECASE) or name in declared_names:
+        return True
+    preceding = text[:match.start()].splitlines()
+    for line in reversed(preceding):
+        if not line.strip() or re.match(r"\s*parameter\b", line, re.IGNORECASE):
+            continue
+        return bool(re.fullmatch(
+            r"\s*[#* ]*(?:(?:FSM|state\s+machine)\s+)?state\s+"
+            r"(?:encodings?|parameters?)\s*:\s*", line, re.IGNORECASE))
+    return False
+
+
 def _l6_fsm_machine_id(state: Dict[str, Any]) -> str:
     """Identity of the state machine ONE extracted L6 state belongs to.
 
@@ -38059,12 +38162,23 @@ def _l6_attach_declared_transitions(
     by_name: Dict[str, Dict[str, Any]] = {}
     for st in fsm_states:
         if isinstance(st, dict) and isinstance(st.get("name"), str):
-            by_name[st["name"].upper()] = st
+            by_name[st["name"]] = st
+
+    def resolve(name: str) -> str:
+        if name in by_name:
+            return name
+        # Older prose walkers canonicalize inferred names to uppercase. Keep
+        # compatibility only when that spelling identifies exactly one state.
+        aliases = [key for key in by_name if key.upper() == name.upper()]
+        return aliases[0] if len(aliases) == 1 else ""
+
     attached = 0
     for e in edges:
-        src = str(e.get("from") or "").upper()
-        dst = str(e.get("to") or "").upper()
-        if not src or not dst or src == dst:
+        src = str(e.get("from") or "")
+        dst = str(e.get("to") or "")
+        if not e.get("source_literal"):
+            src, dst = resolve(src), resolve(dst)
+        if not src or not dst:
             continue
         if src not in by_name or dst not in by_name:
             continue
@@ -38073,15 +38187,19 @@ def _l6_attach_declared_transitions(
         if not isinstance(lst, list):
             lst = []
             st["transitions"] = lst
-        if any(isinstance(t, dict) and str(t.get("to", "")).upper() == dst
+        if any(isinstance(t, dict) and str(t.get("to", "")) == dst
+               and str(t.get("trigger") or "") == str(e.get("trigger") or "")
                for t in lst):
             continue
-        lst.append(_l6_transition_entry(
+        entry = _l6_transition_entry(
             by_name[src].get("name") or src,
             by_name[dst].get("name") or dst,
             str(e.get("trigger") or ""),
             str(e.get("evidence") or ""),
-        ))
+        )
+        if e.get("source_literal"):
+            entry["source_literal"] = e["source_literal"]
+        lst.append(entry)
         attached += 1
     return attached
 
@@ -38341,10 +38459,37 @@ def gen_l6_control_logic(project: Path,
         r"(?:->|=>|→)\s*([A-Z][A-Z0-9_]{3,30})\b",
     )
     seen_state_names: Set[str] = {s["name"] for s in extracted_states}
+    _l6_declared_names_by_source: Dict[str, Set[str]] = {}
+    for fname, text in extracted.items():
+        if _L6_FSM_SOURCE_DENY.search(fname or ""):
+            continue
+        declared = _l6_declared_names_by_source.setdefault(fname, set())
+        for name, literal in _fsm_explicit_catalog(text):
+            declared.add(name)
+            if name in seen_state_names:
+                continue
+            seen_state_names.add(name)
+            entry = {
+                "name": name, "transitions": [], "actions": [],
+                "evidence": f"input/docs/{fname} (explicit state definition)",
+                "extraction_strategy": "state_heading_definition",
+            }
+            if name.isdecimal():
+                entry["extraction_strategy"] = "numeric_case_state"
+                entry["encoding"] = name
+                entry["encoding_value"] = int(name)
+            elif re.match(r"parameter\b", literal, re.IGNORECASE):
+                entry["extraction_strategy"] = "state_owned_parameter"
+            extracted_states.append(entry)
+            evidence.setdefault(f"input/docs/{fname}", []).append({
+                "literal": literal, "label": "explicit FSM state definition"})
     # Edges observed by the state-to-state walker. Collected here, filtered
     # against the FINAL state set at emit time — see
     # `_l6_attach_declared_transitions`.
     _l6_edge_candidates: List[Dict[str, str]] = []
+    for fname, text in extracted.items():
+        if not _L6_FSM_SOURCE_DENY.search(fname or ""):
+            _l6_edge_candidates.extend(_fsm_definition_edges(text, fname))
 
     def _add_state(name: str, fname: str, label: str,
                    extraction_strategy: str = "") -> None:
@@ -38359,6 +38504,11 @@ def gen_l6_control_logic(project: Path,
         # field (default empty string keeps the legacy 3-arg signature
         # working for non-prose-walker callsites).
         if not name or len(name) < 4:
+            return
+        # A source declaration owns spelling. The older inference walkers may
+        # corroborate it, but must not add an uppercased duplicate.
+        if any(name.upper() == item.upper()
+               for item in _l6_declared_names_by_source.get(fname, set())):
             return
         # v1.6.96 (issue #28 Bug 3a) — operating-mode / power-domain
         # tokens scooped up by the `state: <NAME>` text regex must NOT
@@ -38507,6 +38657,9 @@ def gen_l6_control_logic(project: Path,
         inside the `evidence` substring before, which was invisible
         to dict-field readers."""
         if not name:
+            return
+        if any(name.upper() == item.upper()
+               for item in _l6_declared_names_by_source.get(fname, set())):
             return
         # ORGANIC #606 — reject register / address-map identifiers the prose
         # walker can latch from data-movement sentences ("write X to
@@ -38698,6 +38851,13 @@ def gen_l6_control_logic(project: Path,
         # regex already requires `FSM`/`state machine`/`state` in
         # the body so a window-anchor recheck is unnecessary.
         for m in _V1_6_484_FSM_INIT_RE.finditer(text):
+            # In "on reset, the state register is cleared", register is the
+            # object being reset, not the name of an initial state. An explicit
+            # "FSM is in REGISTER" remains legal.
+            if (m.group("state").lower() == "register"
+                    and re.search(r"\bstate\s*$", text[m.start():m.start("state")],
+                                  re.IGNORECASE)):
+                continue
             _v1_6_484_add_prose_state(
                 m.group("state"), fname,
                 "prose init v1.6.484",
@@ -38772,6 +38932,10 @@ def gen_l6_control_logic(project: Path,
                           (_prose_state_re_a, "prose 'in X state'"),
                           (_prose_state_re_b, "prose 'X state:'")):
             for m in rx.finditer(text):
+                if (rx is _verilog_state_re
+                        and not _fsm_parameter_has_state_owner(
+                            text, m, _l6_declared_names_by_source.get(fname, set()))):
+                    continue
                 _add_state(m.group(1), fname, label)
         # v1.6.254 — mask C-pointer-deref spans so the arrow regex
         # doesn't see them at all.
@@ -41473,12 +41637,59 @@ def _v1_6_434_normalize_port_basename(name) -> str:
     return stripped
 
 
+def _declared_input_clock_names(project, l9):
+    """Resolve clock roles against actual input ports and their own prose."""
+    ports = l9.get("top_ports") or l9.get("ports") or []
+    extracted = _load_extracted_docs_for_post_pass(project)
+    text = "\n".join(extracted.values())
+    names = []
+    for port in ports:
+        if not isinstance(port, dict):
+            continue
+        if str(port.get("direction") or port.get("mode") or "").lower() not in (
+                "input", "in"):
+            continue
+        name = str(port.get("name") or "").strip()
+        if not name:
+            continue
+        base = _v1_6_434_normalize_port_basename(name.lower())
+        conventional = (base in ("clk", "clock") or base.endswith("_clk")
+                        or bool(_V1_6_574_CLOCK_PORT_RE.fullmatch(name)))
+        # A port definition may state its role with an arbitrary identifier;
+        # a word containing "clock" or an unrelated clock mention cannot.
+        definition = re.compile(
+            r"^\s*" + re.escape(name) + r"\s*:\s*"
+            r"(?:[A-Za-z-]+\s+)?clock(?:\s+(?:signal|input)|[.,]|\s*$)",
+            re.IGNORECASE | re.MULTILINE)
+        if conventional or definition.search(text):
+            names.append(name)
+    return names
+
+
 def _emit_typed_clock_domains(project, clock_domains, timing_constants):
     """v1.6.88 (#20 Bug 4 P0 BLOCKER) — augment each existing
     `clock_domains[]` entry with the typed-shape required by
     l8_clock_domains_typed_check (name + freq + role/source). When
     `clock_domains` is empty, synthesise a default primary domain
     from L9.top_ports clk-shaped pins. Chip-AGNOSTIC."""
+    l9_doc = _try_load_l_doc(project, "L9_INTEGRATION_SPEC")
+    clk_pins = (_declared_input_clock_names(project, l9_doc)
+                if isinstance(l9_doc, dict) else [])
+    from _reset_input_semantics import clock_edge_semantics
+    event_sources = {
+        (str(fname) if str(fname).startswith("input/") else f"input/docs/{fname}"): text
+        for fname, text in _load_extracted_docs_for_post_pass(project).items()}
+    # The prose fmax walker calls an unnamed primary domain "clk". Bind that
+    # placeholder only when the design declares exactly one input clock.
+    # Never spread one frequency mention over several independent inputs.
+    for domain in clock_domains:
+        if (isinstance(domain, dict) and len(clk_pins) == 1
+                and domain.get("extraction_strategy") == "clock_domain_doc_prose_fmax"
+                and str(domain.get("name") or "").lower() in ("clk", "clock")
+                and domain.get("name") not in clk_pins):
+            domain["name"] = clk_pins[0]
+            domain["source_pin"] = clk_pins[0]
+            domain["domain_kind"] = "primary"
     # Augment existing entries.
     for d in clock_domains:
         if not isinstance(d, dict):
@@ -41505,96 +41716,36 @@ def _emit_typed_clock_domains(project, clock_domains, timing_constants):
             d["role"] = "master" if d.get("domain_kind") == "primary" else "derived"
         if "source_pin" not in d:
             d["source_pin"] = d.get("name")
-    # If empty AND L9 declares clk-shaped pins, synthesise a default.
-    if clock_domains:
-        return
-    l9_doc = _try_load_l_doc(project, "L9_INTEGRATION_SPEC")
+        if d.get("source_pin") in clk_pins:
+            stated = clock_edge_semantics(d["source_pin"], event_sources)
+            if (not d.get("edge") or
+                    (d.get("semantic_provenance") or {}).get("edge", {}).get("kind") == "convention" or
+                    d.get("source") == "synthesised-from-L9.top_ports"):
+                d.update(stated)
+    # Fill only declared input-clock identities missing from the existing
+    # evidence. Output clocks require their own generated-clock relation.
     if not isinstance(l9_doc, dict):
         return
-    top_ports = l9_doc.get("top_ports") or l9_doc.get("ports") or []
-    if not isinstance(top_ports, list):
-        return
-    clk_pins = []
-    #: Ports admitted ONLY by the C4 reach fix below — i.e. ports that on the
-    #: pre-fix code produce NO clock_domains record at all. Labelling changes
-    #: are confined to these, which is what keeps the fix strictly ADDITIVE:
-    #: no record that exists today can change its domain_kind/role/freq.
-    _c4_widened_pins: Set[str] = set()
-    for p in top_ports:
-        if not isinstance(p, dict):
-            continue
-        nm = (p.get("name") or "").strip()
-        if not nm:
-            continue
-        nm_l = nm.lower()
-        # v1.6.434 — for #311 P3 ORGANIC. Strip Verilog/SV port-name
-        # direction prefix (`i_`/`o_`) + suffix (`_i`/`_in`/`_input`/
-        # `_o`/`_out`/`_output`/`_ni`) BEFORE clock-shape matching so
-        # canonical lowRISC `clk_i` / `rst_ni` / Quartus-style `i_clk`
-        # ports also synthesise primary clock domains. The fmax /
-        # period derivation already works once the synthesizer picks
-        # up the port. Chip-AGNOSTIC: pure Verilog naming convention.
-        nm_base = _v1_6_434_normalize_port_basename(nm_l)
-        if nm_base == "clk" or nm_base.endswith("_clk") or nm_base == "clock":
-            clk_pins.append(nm)
-        elif _V1_6_574_CLOCK_PORT_RE.match(nm):
-            _c4_widened_pins.add(nm)
-            # C4/2026-07-31 — REACH fix, purely ADDITIVE. v1.6.574 widened
-            # the clock-port matcher "so analog multiphase ports (`CK1`..
-            # `CK6`) seed" — but the widening was applied ONLY to the
-            # sibling that fills `L8.clocks[]`. This function fills
-            # `L8.clock_domains[]`, which is the list `sdc_gen` and
-            # `l8_sta_clock_period_design_owned_check` actually read, and it
-            # kept the pre-v1.6.574 three-way string test. Measured
-            # consequence on a real cell: L9.top_ports held `ck4/ck5/ck6`,
-            # the sibling accepted all three, this test accepted none,
-            # `clock_domains` stayed `[]`, `_derive_primary_clk_freq_hz`
-            # (which resolves the design's own stated 1.0 MHz correctly) was
-            # never reached, and the emitted SDC carried the plugin's 50 MHz
-            # default — a 50x wrong period. Reusing the SIBLING'S predicate
-            # rather than restating it is what stops the two drifting again.
-            clk_pins.append(nm)
+    clock_input_count = len(clk_pins)
+    known = {str(d.get("source_pin") or d.get("name") or "")
+             for d in clock_domains if isinstance(d, dict)}
+    clk_pins = [name for name in clk_pins if name not in known]
     if not clk_pins:
         return
-    # Try to derive primary frequency from timing_constants (look for
-    # CLK_FREQ_HZ / FREQ_MHZ / similar). Fall back to 50 MHz default
-    # (the open-source benchmark consensus reference clock for
-    # FPGA-eval-driven AID-class designs; the gate accepts any freq
-    # so long as the entry is typed).
-    primary_freq_hz = _derive_primary_clk_freq_hz(timing_constants)
     for pin in clk_pins:
-        # Normalize via _v1_6_434_normalize_port_basename so `clk_i`
-        # / `i_clk` / `clk_in` are recognised as primary domains.
-        _pin_base = _v1_6_434_normalize_port_basename(pin.lower())
-        is_primary = (_pin_base == "clk" or _pin_base == "clock")
-        # Frequency stays gated on the CANONICAL name test: handing
-        # `primary_freq_hz` to every clock port would assert that they all run
-        # at the one timing constant the layer happens to carry, which is a
-        # fabrication on any genuinely multi-rate design. Evidence-bound
-        # frequencies arrive from `l8_doc_clock_freq_synth`, per document row.
-        freq_hz = primary_freq_hz if is_primary else None
-        # C4/2026-07-31 — domain_kind/role by PROPERTY, for widened pins only.
-        # `primary`/`master` vs `secondary`/`derived` was decided by whether
-        # the port is spelled `clk` — a PROXY. The property is: this loop
-        # synthesises domains from TOP-LEVEL PORTS, and a top-level clock port
-        # is not derived from anything; `derived` means generated from another
-        # clock (PLL / divider), which the code marks with `derived_from`.
-        # This matters concretely: `clock_contract.entry_is_derived` treats
-        # `role: derived` as OUT of the one-name-one-period contract, so
-        # `sdc_validator_check` skipped all three of this design's clocks and
-        # reported `1 SDC file(s) OK` having cross-checked ZERO of them — a
-        # VACUOUS PASS I produced myself and caught by reading its own count
-        # line. Confined to `_c4_widened_pins` so no record that exists on the
-        # pre-fix code can change label.
-        _c4_property_primary = (is_primary or pin in _c4_widened_pins)
+        # A sole input does not own every CLK-named constant. Require an
+        # exact source binding or an explicitly primary/input constant.
+        freq_hz = (_derive_primary_clk_freq_hz(timing_constants, pin)
+                   if clock_input_count == 1 else None)
         entry = {
             "name": pin,
             "source_pin": pin,
-            "domain_kind": "primary" if _c4_property_primary else "secondary",
-            "role": "master" if _c4_property_primary else "derived",
+            "domain_kind": "primary",
+            "role": "master",
             "source": "synthesised-from-L9.top_ports",
             "evidence": "L9.top_ports",
             "reset_strategy": "unspecified",
+            **clock_edge_semantics(pin, event_sources),
         }
         if freq_hz:
             entry["freq_hz"] = freq_hz
@@ -41709,33 +41860,48 @@ def _emit_secondary_clock_domains_from_docs(
             })
 
 
-def _derive_primary_clk_freq_hz(timing_constants):
-    """v1.6.88 (#20 Bug 4) — try to derive primary-clock frequency
-    from L8.timing_constants. Look for entries whose name contains
-    CLK + FREQ / HZ / MHZ. Returns Hz int or None.
-    Chip-AGNOSTIC: no chip-specific vocabulary."""
+def _derive_primary_clk_freq_hz(timing_constants, source_pin=None):
+    """Read only rates bound to this input, without choosing a conflict.
+
+    A frequency constant may name its exact source port, carry that typed
+    binding, or explicitly designate the primary/input clock. A substring
+    CLK in an output/derived constant supplies no such authority.
+    """
     if not isinstance(timing_constants, list):
         return None
+    rates = set()
     for entry in timing_constants:
         if not isinstance(entry, dict):
             continue
         nm = (entry.get("name") or "").upper()
-        if "CLK" not in nm:
+        bindings = [entry[key] for key in ("source_pin", "clock", "clock_name")
+                    if entry.get(key) not in (None, "")]
+        if bindings and any(value != source_pin for value in bindings):
             continue
+        if (entry.get("derived_from") or str(entry.get("role") or "").lower()
+                in ("output", "derived", "secondary")):
+            continue
+        if not bindings:
+            stem = re.sub(r"_(?:(?:FREQ|FREQUENCY)(?:_[MK]?HZ)?|[MK]?HZ)$", "", nm)
+            if (stem != str(source_pin or "").upper()
+                    and not re.fullmatch(r"(?:PRIMARY|INPUT)_(?:CLK|CLOCK)", stem)):
+                continue
         try:
             val = float(entry.get("value"))
         except (TypeError, ValueError):
             continue
+        if not 0 < val < float("inf"):
+            continue
         unit = (entry.get("unit") or "").lower()
         if "MHZ" in nm or unit == "mhz":
-            return int(val * 1_000_000)
-        if "KHZ" in nm or unit == "khz":
-            return int(val * 1_000)
-        if "HZ" in nm or unit == "hz":
-            return int(val)
-        if "FREQ" in nm and val > 1000:
-            return int(val)
-    return None
+            rates.add(int(val * 1_000_000))
+        elif "KHZ" in nm or unit == "khz":
+            rates.add(int(val * 1_000))
+        elif "HZ" in nm or unit == "hz":
+            rates.add(int(val))
+        elif "FREQ" in nm and val > 1000:
+            rates.add(int(val))
+    return next(iter(rates)) if len(rates) == 1 else None
 
 
 # v1.6.294 — for #177 ORGANIC. URL-aware sentence boundary + Markdown
@@ -44890,6 +45056,32 @@ def gen_l8_timing_waveform(project: Path,
             f"{p_name}"
             + (f" = {p_default}" if p_default is not None else ""),
             p_entry.get("extraction_strategy") or "")
+
+    # Headed prose is a declaration too, including a parameter whose source
+    # supplies no default. Keep its module owner; never flatten sibling scopes.
+    _prose_owner, _saw_prose_owner = _issue3234_explicit_parameter_owner(extracted)
+    _prose_defaults = {}
+    for fname, text in extracted.items():
+        for p_entry in _ppx.extract_prose_parameters(text or ''):
+            if not _issue3234_position_is_current(text, text.find(p_entry['literal'])):
+                continue
+            if _saw_prose_owner and _prose_owner is None:
+                raise ValueError('L8_PARAMETER_OWNER_UNRESOLVED: conflicting explicit top modules')
+            owner = p_entry.get('module_owner')
+            if owner is not None and _prose_owner is not None and owner != _prose_owner:
+                continue
+            p_name, p_default = p_entry['name'], p_entry.get('default')
+            scoped_name = (owner, p_name)
+            if scoped_name in _prose_defaults and _prose_defaults[scoped_name] != p_default:
+                raise ValueError('L8_PARAMETER_DEFAULT_CONFLICT: ' + p_name)
+            _prose_defaults[scoped_name] = p_default
+            key = (p_name.upper(), p_default if p_default is not None else '')
+            if key in _l8_param_seen:
+                continue
+            _l8_param_seen.add(key)
+            _l8_parameters.append(dict(p_entry, source=fname))
+            _v1_6_395_push_l8_evidence(evidence, fname, p_entry['literal'],
+                                     p_entry['extraction_strategy'])
 
     for fname, text in extracted.items():
         for p_entry in _v1_6_321_extract_design_parameters(text or ""):
@@ -49432,6 +49624,104 @@ def _doc_declares_not_applicable(text) -> bool:
     return m.group(1).strip().lower() in _DOC_STATUS_NOT_APPLICABLE
 
 
+def _memory_declared_geometry(text: str, kind: str) -> dict:
+    """Read explicit array ranges; preserve conflicting claims without choosing.
+
+    Associate a locally named memory kind, or the document's sole declared
+    kind. Range arithmetic uses the existing closed linear grammar, plus 2**N;
+    unresolved expressions remain source evidence rather than default sizes.
+    """
+    kind_re = {"rom": r"\bROM\b", "ram": r"\b(?:RAM|SRAM|DRAM)\b"}.get(kind)
+    if kind_re is None:
+        return {}
+    declared_kinds = {
+        _v1_6_426_normalise_kind(m.group("type"))
+        for m in _V1_6_426_RE_MEMORY_PROSE.finditer(text)
+        if _v1_6_426_normalise_kind(m.group("type")) in {"rom", "ram"}
+        and not _v0_1_62_analog_kw_negated(text, m.start(), m.end())}
+    def parameters(scope):
+        params, conflicts = {}, set()
+        for m in re.finditer(
+                r"(?im)^\s*(?:(?:localparam|parameter)\s+)?"
+                r"([A-Za-z_]\w*)\s*=\s*(\d{1,10})\s*;", scope):
+            if _v0_1_62_analog_kw_negated(scope, m.start(), m.end()):
+                continue
+            name, value = m.group(1), int(m.group(2))
+            if name in params and params[name] != value:
+                conflicts.add(name)
+            params[name] = value
+        for name in conflicts:
+            params.pop(name, None)
+        return params
+
+    # A document is one prose scope only when it declares no RTL modules.
+    # Within module-shaped input, defaults from a sibling never size an array.
+    module_scopes = list(re.finditer(
+        r"(?ms)^[ \t]*module\s+[A-Za-z_]\w*\b.*?\bendmodule\b", text))
+    params = parameters(text) if not module_scopes else {}
+
+    def term(raw):
+        expression = re.sub(r"\s+", "", raw)
+        power = re.match(r"^2\*\*([A-Za-z_]\w*|\d+)(.*)$", expression)
+        if power:
+            exponent = (int(power.group(1)) if power.group(1).isdigit()
+                        else params.get(power.group(1)))
+            if exponent is None or not 0 <= exponent <= 30:
+                return None
+            expression = str(2 ** exponent) + power.group(2)
+        value = _v1_11_91_eval_linear_term(expression, params)
+        return value if value is not None and 0 <= value <= 2 ** 31 else None
+
+    def extent(left, right):
+        a, b = term(left), term(right)
+        return abs(a - b) + 1 if a is not None and b is not None else None
+
+    arrays = re.compile(
+        r"\b(?:reg|logic)\s*\[([^\]\n:]+):([^\]\n]+)\]\s*"
+        r"([A-Za-z_]\w*)\s*\[([^\]\n:]+):([^\]\n]+)\]")
+    claims, names = [], set()
+    for m in arrays.finditer(text):
+        if _v0_1_62_analog_kw_negated(text, m.start(), m.end()):
+            continue
+        line = text[text.rfind("\n", 0, m.start()) + 1:
+                    text.find("\n", m.end()) if "\n" in text[m.end():] else len(text)]
+        if (declared_kinds != {kind}
+                and not re.search(kind_re, line, re.IGNORECASE)):
+            continue
+        if module_scopes:
+            owner = next((s for s in module_scopes
+                          if s.start() <= m.start() and m.end() <= s.end()), None)
+            params = parameters(owner.group(0)) if owner is not None else {}
+        claims.append({"width": extent(m.group(1), m.group(2)),
+                       "depth": extent(m.group(4), m.group(5)),
+                       "source_text": m.group(0), "kind": "array_declaration"})
+        names.add(m.group(3))
+        if len(claims) >= 32:
+            break
+    if not claims:
+        return {}
+    prose = re.compile(
+        kind_re + r"\s+with\s+(?:a\s+)?depth\s+of\s+(\d+)\s+and\s+"
+        r"(?:a\s+)?(?:bit\s+)?width\s+of\s+(\d+)\s*bits?", re.IGNORECASE)
+    for m in prose.finditer(text):
+        if not _v0_1_62_analog_kw_negated(text, m.start(), m.end()):
+            claims.append({"width": int(m.group(2)), "depth": int(m.group(1)),
+                           "source_text": m.group(0), "kind": "prose_geometry"})
+    pairs = {(c["width"], c["depth"]) for c in claims
+             if c["width"] is not None and c["depth"] is not None}
+    unresolved = any(c["width"] is None or c["depth"] is None for c in claims)
+    # Different named arrays may legitimately have different geometries.
+    # This document-wide association cannot select between them; preserve
+    # their declarations as unresolved rather than inventing a contradiction.
+    status = ("UNRESOLVED" if len(names) != 1 else
+              "SOURCE_CONFLICT" if len(pairs) > 1 else
+              "UNRESOLVED" if unresolved else "RESOLVED")
+    width, depth = next(iter(pairs)) if status == "RESOLVED" else (None, None)
+    return {"name": next(iter(names)) if len(names) == 1 else None,
+            "width": width, "depth": depth, "geometry_status": status,
+            "geometry_claims": claims}
+
+
 def _v1_6_426_extract_memories_from_text(
         text: str, source_fname: str,
         l9_top_module: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -49463,6 +49753,7 @@ def _v1_6_426_extract_memories_from_text(
         text = text[:5_000_000]
     out: List[Dict[str, Any]] = []
     seen: set = set()
+    declared_geometry = {}
     for m in _V1_6_426_RE_MEMORY_PROSE.finditer(text):
         # ORGANIC signal 2 (SENTENCE level) — reuse the analog path's own
         # negation predicate so this file has exactly ONE definition of
@@ -49542,6 +49833,12 @@ def _v1_6_426_extract_memories_from_text(
                 else:
                     name = back_name
                     name_origin_v1_6_468 = back_strategy
+        if kind not in declared_geometry:
+            declared_geometry[kind] = _memory_declared_geometry(text, kind)
+        geometry = declared_geometry[kind]
+        if geometry:
+            name = geometry.get("name") or name
+            depth, width = geometry["depth"], geometry["width"]
         key = (
             name.lower(),
             kind,
@@ -49570,6 +49867,9 @@ def _v1_6_426_extract_memories_from_text(
         if name_origin_v1_6_468:
             entry["name_origin"] = name_origin_v1_6_468
             entry["low_confidence"] = True
+        if geometry:
+            entry.update(geometry)
+            entry["low_confidence"] = geometry["geometry_status"] != "RESOLVED"
         out.append(entry)
         if len(out) >= 32:
             break
@@ -50172,6 +50472,10 @@ def _v1_6_441_is_useful_memory_entry(entry, staged_macro_names=None) -> bool:
     if not isinstance(entry, dict):
         return False
     if any(entry.get(k) for k in ("depth", "width", "port_count")):
+        return True
+    if entry.get("geometry_claims"):
+        # A contradictory or unresolved declaration is real source evidence.
+        # Its low_confidence marker retains the existing downstream refusal.
         return True
     name = entry.get("name")
     if name and _MEMORY_NAME_TOKEN_RE.search(str(name)):
@@ -50990,6 +51294,7 @@ def _v1_6_426_emit_memories(l9: dict, extracted: dict, project=None) -> None:
                     # artefact on disk.
                     if (not any(entry.get(k) for k in
                                 ("depth", "width", "port_count"))
+                            and not entry.get("geometry_claims")
                             and not _MEMORY_NAME_TOKEN_RE.search(
                                 str(entry.get("name") or ""))):
                         entry["promotion_evidence"] = (
@@ -51571,6 +51876,8 @@ def _czl9_prose_port_fallback(content: Dict[str, Any],
             entry["msb"], entry["lsb"] = row["msb"], row["lsb"]
         if "width_symbolic" in row:
             entry["width_symbolic"] = row["width_symbolic"]
+        if "width_unresolved" in row:
+            entry["width_unresolved"] = row["width_unresolved"]
         target.append(entry)
     content["top_module_pins_source"] = "prose_port_definition_list"
 
@@ -52038,6 +52345,30 @@ def gen_l9_integration_spec(project: Path,
                     break
             if len(submodules) >= 32:
                 break
+    # An explicit subject-name declaration is stronger than a mention in a
+    # library/example sentence. Keep the actual identifier and the existing
+    # requirement contract; do not invent instances or local interface ports.
+    for fname, text in extracted.items():
+        if not text or _is_vendor_tool_doc(fname):
+            continue
+        for match in re.finditer(
+                r"[`\"]([A-Za-z_][A-Za-z0-9_$]*)[`\"]\s+submodule\s+"
+                r"(?:is|shall\s+be|must\s+be)\s+"
+                r"(?:used|instantiated|implemented)\b", text, re.IGNORECASE):
+            name = match.group(1)
+            if name in seen_submods or not _is_codespan_submodule_name(name):
+                continue
+            from l9_l19_contract_carrythrough import submodule_requirement
+            entry = {
+                "name": name, "type": "explicit prose submodule declaration",
+                "role": "documented submodule",
+                "extraction_strategy": "explicit_named_submodule",
+                "evidence": f"input/docs/{fname}",
+            }
+            entry.update(submodule_requirement(text, name, f"input/docs/{fname}"))
+            submodules.append(entry)
+            seen_submods.add(name)
+
     # v1.0.38 — for #648. Strategy A0c — prose `X instantiates
     # [exactly] one|N `Y`` sentences + wrapper→child markdown
     # port-map tables. Integration / hierarchy docs declare the
@@ -55907,6 +56238,13 @@ def _harvest_vendor_short_literals(project: Path,
             (rx_short_hex, "short_hex"),
         ):
             for m in rx.finditer(text):
+                if (kind == "dimension" and m.group(2).lower() == "in"
+                        and re.match(r"\s+(?:(?:(?:that|this|the|each)\s+)?"
+                                     r"(?:clock\s+)?cycles?\b|"
+                                     r"(?:the|this|that|each|an?)\s+[A-Za-z])",
+                                     text[m.end():], re.IGNORECASE)):
+                    # English timing/location preposition, not an inch unit.
+                    continue
                 lit_full = m.group(0).replace(" ", "")
                 key = (lit_full, kind)
                 if key in seen:
@@ -55951,12 +56289,13 @@ def _harvest_vendor_short_literals(project: Path,
                     "source": fname,
                 })
 
-    if short_lits:
-        d["vendor_short_literals"] = short_lits[:512]
-        try:
-            _stamp.dump(l1, d)
-        except Exception:
-            pass
+    # Recomputing the same derived field must retire literals from an earlier
+    # input, including when the corrected source carries no short literals.
+    d["vendor_short_literals"] = short_lits[:512]
+    try:
+        _stamp.dump(l1, d)
+    except Exception:
+        pass
 
 
 # v1.6.81 — closes issue #12 follow-up. Sentinel signatures of the
@@ -61925,6 +62264,13 @@ def _post_emit_typed_clock_domains(project: Path) -> None:
         wfm = None
     if isinstance(wfm, dict):
         wfm_cd = wfm.get("clock_domains") or []
+        if isinstance(wfm_cd, list) and wfm_cd:
+            before_domains = json.dumps(wfm_cd, sort_keys=True)
+            _emit_typed_clock_domains(project, wfm_cd, timing_constants)
+            if json.dumps(wfm_cd, sort_keys=True) != before_domains:
+                wfm["clock_domains"] = wfm_cd
+                _stamp.dump(_pl.generated_docs_dir(project)
+                            / "L8_TIMING_WAVEFORM.json", wfm)
         if (isinstance(wfm_cd, list) and not wfm_cd
                 and clock_domains):
             wfm["clock_domains"] = list(clock_domains)
@@ -62736,17 +63082,32 @@ def _v1_6_369_emit_reset_domains(l9: dict, extracted: dict) -> None:
         polarity = _v1_6_369_classify_reset_polarity(
             _stem_v1_6_382.lower()) if m_reset else "unknown"
         from _reset_input_semantics import reset_semantics
-        explicit = reset_semantics(name, evidence_joined)
+        # Event-role definitions belong to their own input file. A reset in
+        # one document cannot lend its identity to unnamed events elsewhere.
+        declarations = [reset_semantics(name, text)
+                        for text in (extracted or {}).values()]
+        explicit = {}
+        for field in ("sync", "polarity"):
+            values = {row[field] for row in declarations if field in row}
+            if values:
+                explicit[field] = next(iter(values)) if len(values) == 1 else "unknown"
         polarity = explicit.get("polarity", polarity)
         sync = explicit.get("sync", "unknown")
-        from _reset_input_semantics import reset_domain_bindings
-        bindings = reset_domain_bindings(name, {
+        from _reset_input_semantics import reset_semantic_provenance
+        sources = {
             (str(fname) if str(fname).startswith("input/") else f"input/docs/{fname}"): text
-            for fname, text in (extracted or {}).items()})
+            for fname, text in (extracted or {}).items()}
+        provenance = reset_semantic_provenance(name, sources)
+        if "polarity" not in explicit and m_reset:
+            provenance["polarity"] = {
+                "kind": "convention", "rule": "reset_port_name_polarity"}
+        from _reset_input_semantics import reset_domain_bindings
+        bindings = reset_domain_bindings(name, sources)
         out.append({
             "name": name,
             "polarity": polarity,
             "sync": sync,
+            "semantic_provenance": provenance,
             "scan_prefixed": name.lower().startswith("scan_")
                 or _stem_v1_6_382.lower().startswith("scan_"),
             "direction_prefix": _dirpref_v1_6_382,
@@ -62914,6 +63275,17 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
     if not isinstance(l9, dict):
         return []
     changed = False
+    # The final prose-port fallback runs after the early reset-domain pass.
+    # Reuse the canonical explicit-reset reader on the final input interface;
+    # arbitrary declared reset names must not depend on a naming convention.
+    if not l9.get("reset_domains"):
+        _v1_6_369_emit_reset_domains(l9, _load_extracted_docs_for_post_pass(project))
+        changed = bool(l9.get("reset_domains"))
+    if isinstance(l9.get("clock_domains"), list) and l9["clock_domains"]:
+        before_domains = json.dumps(l9["clock_domains"], sort_keys=True)
+        _emit_typed_clock_domains(project, l9["clock_domains"], [])
+        changed = (json.dumps(l9["clock_domains"], sort_keys=True)
+                   != before_domains) or changed
     conflicts: List[Dict[str, Any]] = []
     l8_cds = (l8 or {}).get("clock_domains") or []
     if isinstance(l8_cds, list) and l8_cds:
@@ -63127,6 +63499,8 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
     top_ports = l9.get("top_ports") or []
     if isinstance(top_ports, list):
         resets: List[Dict[str, Any]] = []
+        declared_resets = {row.get("name"): row for row in
+                           l9.get("reset_domains", []) if isinstance(row, dict)}
         seen: Set[str] = set()
         for p in top_ports:
             if not isinstance(p, dict):
@@ -63139,7 +63513,8 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
             # lowRISC canonical `rst_ni` and `rstn_*` shapes; the
             # legacy `_RE_RESET_PORT_v1_6_311` (kept above as a
             # historical marker) missed `_ni` entirely.
-            if not _RE_RESET_PORT_v1_6_316.match(name_lc):
+            declared = declared_resets.get(name_raw)
+            if not declared and not _RE_RESET_PORT_v1_6_316.match(name_lc):
                 continue
             if name_raw in seen:
                 continue
@@ -63147,10 +63522,15 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
             # v1.6.316 — for #215 P3: explicit polarity helper
             # correctly resolves `rstn_i` → active_low (was
             # active_high under the v1.6.311 substring heuristic).
-            polarity = _v1_6_316_reset_polarity(name_lc)
+            polarity = (declared.get("polarity", "unknown") if declared
+                        else _v1_6_316_reset_polarity(name_lc))
             resets.append({
                 "name": name_raw,
                 "polarity": polarity,
+                **({"sync": declared.get("sync", "unknown"),
+                    "semantic_provenance": declared.get("semantic_provenance", {})}
+                   if declared else {"semantic_provenance": {"polarity": {
+                       "kind": "convention", "rule": "reset_port_name_polarity"}}}),
                 "extraction_strategy":
                     "l9_top_port_reset_derive",
             })
@@ -63219,14 +63599,20 @@ def _post_emit_derive_l9_clocks_v1_6_323(project: Path) -> None:
         if not isinstance(name_raw, str) or not name_raw:
             continue
         name_lc = name_raw.lower()
+        # A packed counter/data bus does not become a clock from its name.
+        if isinstance(p.get("width"), int) and p["width"] != 1:
+            continue
         if not _RE_CLOCK_PORT_v1_6_323.match(name_lc):
             continue
         if name_raw in seen:
             continue
         seen.add(name_raw)
+        from _reset_input_semantics import clock_edge_semantics
+        sources = {(str(fname) if str(fname).startswith("input/") else f"input/docs/{fname}"): text
+                   for fname, text in _load_extracted_docs_for_post_pass(project).items()}
         _entry: Dict[str, Any] = {
             "name": name_raw,
-            "edge": "posedge",
+            **clock_edge_semantics(name_raw, sources),
             "extraction_strategy":
                 "l9_top_port_clock_derive",
         }
@@ -63416,7 +63802,7 @@ def _post_emit_seed_l8b_clocks_from_l1_v1_6_571(project: Path) -> None:
             # says WHICH PORT this clock is on, and it is what lets a
             # consumer match a create_clock by target port when the names
             # differ only in case.
-            for _k in ("freq_hz", "freq_mhz", "period_ns",
+            for _k in ("freq_hz", "freq_mhz", "period_ns", "edge", "semantic_provenance",
                        "role", "source", "domain_kind", "source_pin"):
                 if _cd_src.get(_k) is not None and entry.get(_k) is None:
                     entry[_k] = _cd_src[_k]
@@ -63984,7 +64370,7 @@ def _v1_6_555_crosswalk_l9_ports_to_l1_pin_table(
             "extraction_strategy":
                 "cross_walk_from_l9_ports_v1_6_555",
         }
-        for key in ("type_ref", "width_symbolic"):
+        for key in ("type_ref", "width_symbolic", "width_unresolved"):
             if port.get(key) is not None:
                 row[key] = port[key]
         if _is_req_rsp_interface(port):
@@ -64014,6 +64400,8 @@ def _v1_6_555_crosswalk_l9_ports_to_l1_pin_table(
             row["width"] = _w
             row["msb"] = _w - 1
             row["lsb"] = 0
+        elif _w == 0 and port.get('width_unresolved'):
+            row['width'] = 0
         new_rows.append(row)
     if not new_rows:
         return False

@@ -33,7 +33,367 @@ import json
 
 import pytest
 
+
+def _semantic_project(tmp_path, text, ports=()):
+    """Stage ordinary input and final interface for late semantic emitters."""
+    source = tmp_path / 'input/docs/contract.txt'
+    source.parent.mkdir(parents=True)
+    source.write_text(text)
+    generated = tmp_path / 'phase1/generated_docs'
+    generated.mkdir(parents=True)
+    (generated / 'L9_INTEGRATION_SPEC.json').write_text(json.dumps({
+        'top_ports': list(ports), 'ports': list(ports),
+    }))
+    return generated
+
+
+def test_semantic_state_heading_catalog_from_intake(tmp_path):
+    from programs import phase1_doc_one_shot_runner as producer
+    from programs.tests._hostpaths import require_repo
+    fixture = require_repo('vibe-ic-marketplace', 'plugins', 'vibe-ic',
+                           'programs', 'tests', 'fixtures', 'phase1_local',
+                           'phase1_semantic_catalog_contract',
+                           'state_heading_catalog.txt')
+    result = producer.gen_l6_control_logic(tmp_path, {fixture.name: fixture.read_text()})
+    actual = json.loads(result.path.read_text())
+    names = {state['name'] for state in actual['fsm_states']}
+    assert names == {'IDLE', 'S1', 'S2', 'S3', 'S4'}, actual
+    assert actual['fsm_machines'][0]['state_count'] == 5, actual
+
+
+@pytest.mark.parametrize('text,expected', [
+    ('State machine has the following states:\n'
+     'A0: Waiting for request.\nA1: Capturing data.\n'
+     'Implementation:\nOP_ADD: Addition opcode.\n', {'A0', 'A1'}),
+    ('The controller has an FSM.\nALU operation codes:\n'
+     'A0: Addition opcode.\nA1: Subtraction opcode.\n', set()),
+])
+def test_semantic_state_heading_scope_is_finite(tmp_path, text, expected):
+    from programs import phase1_doc_one_shot_runner as producer
+    result = producer.gen_l6_control_logic(tmp_path, {'control.txt': text})
+    actual = json.loads(result.path.read_text())
+    assert {state['name'] for state in actual['fsm_states']} == expected, actual
+
+
+def test_semantic_explicit_submodule_reaches_actual_consumer(tmp_path):
+    from programs import phase1_doc_one_shot_runner as producer
+    from programs import l9_submodule_conformance_check as consumer
+    text = ('Module name:\n    NeutralTop\nInput ports:\n'
+            '    sample_i: Input data signal.\nOutput ports:\n'
+            '    sample_o: Output data signal.\nImplementation:\n'
+            'The `select_pair` submodule is used to select between two inputs.\n')
+    _semantic_project(tmp_path, text)
+    producer.gen_l1_datasheet(tmp_path, {'contract.txt': text})
+    producer.gen_l9_integration_spec(tmp_path, {'contract.txt': text}, {})
+    rtl = tmp_path / 'phase2/stage1/rtl'
+    rtl.mkdir(parents=True)
+    top = rtl / 'top.v'
+    top.write_text('module NeutralTop(input sample_i, output sample_o); '
+                   'assign sample_o=sample_i; endmodule\n')
+    missing, findings, census, _ = consumer.audit_report(tmp_path)
+    assert missing == 'FAIL', (missing, census, findings)
+    assert any(f.rule == 'SUBMODULE_FILE_MISSING' for f in findings), findings
+    (rtl / 'child.v').write_text('module select_pair(input d, output q); '
+                                'assign q=d; endmodule\n')
+    unbound, findings, _, _ = consumer.audit_report(tmp_path)
+    assert unbound == 'FAIL', findings
+    assert any(f.rule == 'SUBMODULE_NOT_INSTANTIATED' for f in findings), findings
+    top.write_text('module NeutralTop(input sample_i, output sample_o); '
+                   'select_pair u_select(.d(sample_i),.q(sample_o)); endmodule\n')
+    assert consumer.audit_report(tmp_path)[0] == 'PASS'
+
+
+def test_semantic_submodule_mention_is_not_a_structure_requirement(tmp_path):
+    from programs import phase1_doc_one_shot_runner as producer
+    text = ('Module name:\nNeutralTop\n'
+            'The library documentation mentions `select_pair` as an example.\n'
+            'The `select_pair` submodule is not used in this design.\n')
+    result = producer.gen_l9_integration_spec(tmp_path, {'overview.txt': text}, {})
+    actual = json.loads(result.path.read_text())
+    assert 'select_pair' not in {row['name'] for row in actual['submodules']}, actual
+
+
+def test_semantic_primary_clock_uses_actual_input_identity(tmp_path):
+    from programs import phase1_doc_one_shot_runner as producer
+    ports = [{'name': 'sample_clock', 'direction': 'input', 'width': 1},
+             {'name': 'shifted_clock', 'direction': 'output', 'width': 1}]
+    _semantic_project(tmp_path, 'Input ports:\n'
+                      'sample_clock: Input clock signal.\n', ports)
+    domains = [{'name': 'clk', 'freq_mhz': 80,
+                'extraction_strategy': 'clock_domain_doc_prose_fmax'}]
+    producer._emit_typed_clock_domains(tmp_path, domains, [])
+    assert [(d['name'], d['source_pin']) for d in domains] == [
+        ('sample_clock', 'sample_clock')], domains
+    assert domains[0]['period_ns'] == 12.5, domains
+
+
+def test_semantic_primary_binding_reaches_every_existing_view(tmp_path):
+    from programs import phase1_doc_one_shot_runner as producer
+    generated = _semantic_project(tmp_path, 'Input ports:\n'
+                      'sample_clock: Input clock signal.\n', [
+                          {'name': 'sample_clock', 'direction': 'input', 'width': 1}])
+    for layer in ('L8_RTL_CONSTANTS', 'L8_TIMING_WAVEFORM', 'L9_INTEGRATION_SPEC'):
+        path = generated / (layer + '.json')
+        data = json.loads(path.read_text()) if path.exists() else {}
+        data['clock_domains'] = [{'name': 'clk', 'freq_mhz': 80,
+            'extraction_strategy': 'clock_domain_doc_prose_fmax'}]
+        path.write_text(json.dumps(data))
+    producer._post_emit_typed_clock_domains(tmp_path)
+    producer._post_emit_mirror_clock_resets_to_l9_v1_6_311(tmp_path)
+    for layer in ('L8_RTL_CONSTANTS', 'L8_TIMING_WAVEFORM', 'L9_INTEGRATION_SPEC'):
+        data = json.loads((generated / (layer + '.json')).read_text())
+        assert [(d['name'], d['source_pin'], d['period_ns']) for d in
+                data['clock_domains']] == [('sample_clock', 'sample_clock', 12.5)], data
+
+
+def test_semantic_output_clock_does_not_become_primary_input(tmp_path):
+    from programs import phase1_doc_one_shot_runner as producer
+    _semantic_project(tmp_path, 'Output ports:\n'
+                      'out_clk: Output clock signal.\n', [
+                          {'name': 'out_clk', 'direction': 'output', 'width': 1}])
+    domains = []
+    producer._emit_typed_clock_domains(tmp_path, domains, [])
+    assert domains == [], domains
+
+
+def test_semantic_two_named_input_clocks_and_resets_stay_distinct(tmp_path):
+    from programs import phase1_doc_one_shot_runner as producer
+    text = ('Input ports:\n'
+            'load_tick: Write clock signal.\n'
+            'unload_tick: Read clock signal.\n'
+            'load_reset: Write reset signal, active low.\n'
+            'unload_reset: Read reset signal, active high.\n')
+    ports = [{'name': name, 'direction': 'input', 'width': 1}
+             for name in ('load_tick', 'unload_tick', 'load_reset', 'unload_reset')]
+    generated = _semantic_project(tmp_path, text, ports)
+    (generated / 'L8_RTL_CONSTANTS.json').write_text('{}')
+    (generated / 'L8_TIMING_WAVEFORM.json').write_text('{}')
+    producer._post_emit_typed_clock_domains(tmp_path)
+    producer._post_emit_mirror_clock_resets_to_l9_v1_6_311(tmp_path)
+    actual = json.loads((generated / 'L9_INTEGRATION_SPEC.json').read_text())
+    domains = actual.get('clock_domains', [])
+    assert {d['name'] for d in domains} == {'load_tick', 'unload_tick'}, actual
+    assert all(d['freq_hz'] is None and d['period_ns'] is None for d in domains), actual
+    assert {r['name']: r['polarity'] for r in actual.get('resets', [])} == {
+        'load_reset': 'active_low', 'unload_reset': 'active_high'}, actual
+
+
+@pytest.mark.parametrize('name,description,polarity', [
+    ('rst', 'Active low reset signal.', 'active_low'),
+    ('rst_n', 'Active high reset signal.', 'active_high'),
+    ('clear_request', 'Write reset signal. Defined as 0 for reset and 1 for reset signal inactive.', 'active_low'),
+])
+def test_semantic_explicit_reset_level_overrides_name(tmp_path, name, description, polarity):
+    from programs import phase1_doc_one_shot_runner as producer
+    text = f'Input ports:\n{name}: {description}\n'
+    generated = _semantic_project(tmp_path, text, [
+        {'name': name, 'direction': 'input', 'width': 1}])
+    producer._post_emit_mirror_clock_resets_to_l9_v1_6_311(tmp_path)
+    actual = json.loads((generated / 'L9_INTEGRATION_SPEC.json').read_text())
+    assert {r['name']: r['polarity'] for r in actual.get('resets', [])} == {
+        name: polarity}, actual
+
+
+def test_semantic_counter_named_clock_is_not_a_clock_view(tmp_path):
+    from programs import phase1_doc_one_shot_runner as producer
+    generated = _semantic_project(tmp_path, 'Output ports:\n'
+                      'clock [7:0]: Eight-bit cycle counter data.\n', [
+                          {'name': 'clock', 'direction': 'output', 'width': 8}])
+    producer._post_emit_derive_l9_clocks_v1_6_323(tmp_path)
+    actual = json.loads((generated / 'L9_INTEGRATION_SPEC.json').read_text())
+    assert actual.get('clocks', []) == [], actual
+
+
+@pytest.mark.parametrize('constant,expected_hz', [
+    ({'name': 'DIV_CLK_FREQ_MHZ', 'value': 25, 'unit': 'MHz',
+      'source': 'input/docs/clocking.txt: div_clk output'}, None),
+    ({'name': 'REF_TICK_FREQ_MHZ', 'value': 80, 'unit': 'MHz',
+      'source_pin': 'ref_tick'}, 80_000_000),
+    ({'name': 'PRIMARY_CLK_FREQ_MHZ', 'value': 40, 'unit': 'MHz'}, 40_000_000),
+    ({'name': 'PRIMARY_CLK_FREQ_MHZ', 'value': 25, 'unit': 'MHz',
+      'source_pin': 'div_clk'}, None),
+])
+def test_review_followup_clock_rate_stays_with_its_source(tmp_path, constant, expected_hz):
+    from programs import phase1_doc_one_shot_runner as producer
+    from programs import sdc_gen as consumer
+    text = ('Input ports:\nref_tick: Input clock signal.\n'
+            'Output ports:\ndiv_clk: Output clock signal.\n')
+    _semantic_project(tmp_path, text, [
+        {'name': 'ref_tick', 'direction': 'input', 'width': 1},
+        {'name': 'div_clk', 'direction': 'output', 'width': 1}])
+    domains = []
+    producer._emit_typed_clock_domains(tmp_path, domains, [constant])
+    assert [(d['name'], d['freq_hz']) for d in domains] == [
+        ('ref_tick', expected_hz)], domains
+    expected_mhz = expected_hz / 1_000_000 if expected_hz else None
+    assert consumer._clock_mhz_from_l8_domains({'clock_domains': domains}) == expected_mhz
+
+
+@pytest.mark.parametrize('suffix,role,verdict,rule', [
+    ('is used to select the sample.', 'required', 'FAIL', 'SUBMODULE_FILE_MISSING'),
+    ('is not used.', None, 'VACUOUS_PASS', None),
+    ('is used optionally.', 'optional', 'VACUOUS_PASS', None),
+    ('is used only when checksum mode is enabled.', 'conditional', 'FAIL',
+     'SUBMODULE_CONDITION_UNRESOLVED'),
+    ('is used only when top_module = NeutralTop.', 'conditional', 'FAIL',
+     'SUBMODULE_FILE_MISSING'),
+    ('is used only when top_module = OtherTop.', 'conditional', 'VACUOUS_PASS', None),
+])
+def test_review_followup_submodule_qualifier_reaches_actual_consumer(
+        tmp_path, suffix, role, verdict, rule):
+    from programs import phase1_doc_one_shot_runner as producer
+    from programs import l9_submodule_conformance_check as consumer
+    declaration = 'The "filter_cell" submodule ' + suffix
+    text = ('Module name:\nNeutralTop\nInput ports:\n'
+            'sample_i: Input data signal.\nOutput ports:\n'
+            'sample_o: Output data signal.\nImplementation:\n' + declaration + '\n')
+    _semantic_project(tmp_path, text)
+    producer.gen_l1_datasheet(tmp_path, {'contract.txt': text})
+    result = producer.gen_l9_integration_spec(tmp_path, {'contract.txt': text}, {})
+    doc = json.loads(result.path.read_text())
+    rtl = tmp_path / 'phase2/stage1/rtl'
+    rtl.mkdir(parents=True)
+    (rtl / 'top.v').write_text('module NeutralTop(input sample_i, output sample_o); '
+                              'assign sample_o=sample_i; endmodule\n')
+    actual, findings, census, _ = consumer.audit_report(tmp_path)
+    assert actual == verdict, (actual, findings, census, doc['submodules'])
+    if rule:
+        assert rule in {f.rule for f in findings}, findings
+    if role is None:
+        assert doc['submodules'] == []
+    else:
+        entry = next(row for row in doc['submodules'] if row['name'] == 'filter_cell')
+        assert entry.get('implementation_requirement', 'required') == role, entry
+        if role == 'conditional':
+            assert entry['requirement_evidence'][0]['evidence'] == declaration
+
 from programs.phase1_one_shot_runner import _ic_name_from_docs
+
+
+def test_memory_profile_public_prose_explicit_array(tmp_path):
+    """#3581: exercise the intake's real public bytes through ordinary L9."""
+    from programs import phase1_doc_one_shot_runner as producer
+    from _hostpaths import require_repo
+    fixture = require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
+        "fixtures", "phase1_local", "memory_profile_public_prose",
+        "memory_geometry.txt")
+    result = producer.gen_l9_integration_spec(
+        tmp_path, {fixture.name: fixture.read_text()}, {})
+    doc = json.loads(Path(result.path).read_text())
+    geometry = [(m.get("width"), m.get("depth")) for m in doc["memories"]]
+    assert geometry == [(16, 256)], doc
+    assert not doc["memory_candidates"], doc
+
+
+def test_memory_profile_public_prose_conflicting_geometry(tmp_path):
+    from programs import phase1_doc_one_shot_runner as producer
+    body = ("Implement a dual-port RAM with a depth of 12 and a bit width of 5 bits.\n"
+            "WIDTH = 5;\nDEPTH = 12;\n"
+            "RAM Array: reg [DEPTH - 1 : 0] bank [2**WIDTH-1:0];\n")
+    result = producer.gen_l9_integration_spec(tmp_path, {"array.md": body}, {})
+    memories = json.loads(Path(result.path).read_text())["memories"]
+    assert len(memories) == 1, memories
+    row = memories[0]
+    assert (row.get("width"), row.get("depth")) == (None, None), row
+    assert row.get("geometry_status") == "SOURCE_CONFLICT", row
+    assert {(v["width"], v["depth"]) for v in row["geometry_claims"]} == {(5, 12), (12, 32)}
+    assert all(v["source_text"] in body for v in row["geometry_claims"])
+    assert row["low_confidence"] is True
+
+
+def test_memory_profile_public_prose_array_control(tmp_path):
+    from programs import phase1_doc_one_shot_runner as producer
+    body = "A ROM stores lookup data.\nMemory Array:\nreg [11:0] values [47:0];"
+    result = producer.gen_l9_integration_spec(tmp_path, {"array.md": body}, {})
+    rows = json.loads(Path(result.path).read_text())["memories"]
+    assert [(m.get("width"), m.get("depth")) for m in rows] == [(12, 48)], rows
+
+
+@pytest.mark.parametrize("description, expected", [
+    ("Implement an ALU for a 32-bit MIPS-ISA CPU.", "digital_arithmetic_primitive"),
+    ("Implement an arithmetic logic unit for a RISC-V processor.", "digital_arithmetic_primitive"),
+    ("Implement a RISC-V CPU with an ALU, instruction fetch and program counter.", "processor_cpu"),
+])
+def test_memory_profile_public_prose_primary_subject(tmp_path, description, expected):
+    from programs.ic_class_profile import infer_ic_class_uncached
+    gd = tmp_path / "phase1/generated_docs"
+    gd.mkdir(parents=True)
+    (gd / "L1_DATASHEET.json").write_text(json.dumps({"description": description}))
+    (gd / "L2_FRS.json").write_text("{}")
+    assert infer_ic_class_uncached(tmp_path)["ic_class"] == expected
+
+
+def test_memory_profile_public_prose_temporal_in(tmp_path):
+    from programs import phase1_doc_one_shot_runner as producer
+    body = ("The waveform keeps 31 in that clock cycle.\n"
+            "The waveform keeps 0 in that clock cycle.\n"
+            "Package width is 2 in; package height is 4mm.\n")
+    producer.gen_l1_datasheet(tmp_path, {"notes.md": body})
+    producer._harvest_vendor_short_literals(tmp_path, {"notes.md": body})
+    doc = json.loads((tmp_path / "phase1/generated_docs/L1_DATASHEET.json").read_text())
+    dimensions = {r["literal"] for r in doc.get("vendor_short_literals", [])
+                  if r["kind"] == "dimension"}
+    assert dimensions == {"2in", "4mm"}, dimensions
+    producer._harvest_vendor_short_literals(
+        tmp_path, {"notes.md": "The waveform keeps 31 in that clock cycle."})
+    doc = json.loads((tmp_path / "phase1/generated_docs/L1_DATASHEET.json").read_text())
+    assert doc.get("vendor_short_literals") == [], doc
+
+
+def test_memory_profile_public_prose_multiple_arrays_are_not_a_conflict(tmp_path):
+    from programs import phase1_doc_one_shot_runner as producer
+    body = ("reg [7:0] first [0:15]: ROM data storage.\n"
+            "reg [15:0] second [0:31]: ROM metadata storage.\n")
+    result = producer.gen_l9_integration_spec(tmp_path, {"arrays.md": body}, {})
+    rows = json.loads(Path(result.path).read_text())["memories"]
+    assert rows and all(r["geometry_status"] == "UNRESOLVED" for r in rows), rows
+    assert all(r["width"] is None and r["depth"] is None for r in rows), rows
+    assert {c["source_text"] for r in rows for c in r["geometry_claims"]} == {
+        "reg [7:0] first [0:15]", "reg [15:0] second [0:31]"}
+
+
+@pytest.mark.parametrize("separator", [";", "；"])
+def test_memory_profile_followup_independent_processor_clause(tmp_path, separator):
+    from programs.ic_class_profile import infer_ic_class_uncached
+    gd = tmp_path / "phase1/generated_docs"
+    gd.mkdir(parents=True)
+    description = ("Implement an ALU for a RISC-V processor" + separator +
+                   " additionally implement a CPU with instruction fetch and a program counter.")
+    (gd / "L1_DATASHEET.json").write_text(json.dumps({"description": description}))
+    (gd / "L2_FRS.json").write_text("{}")
+    assert infer_ic_class_uncached(tmp_path)["ic_class"] == "processor_cpu"
+
+
+def test_memory_profile_followup_negated_array(tmp_path):
+    from programs import phase1_doc_one_shot_runner as producer
+    body = "Implement a ROM.\nDo not use reg [15:0] obsolete [0:31];\n"
+    result = producer.gen_l9_integration_spec(tmp_path, {"array.md": body}, {})
+    assert json.loads(Path(result.path).read_text())["memories"] == []
+    result = producer.gen_l9_integration_spec(
+        tmp_path, {"array.md": body.replace("Do not use", "Use")}, {})
+    rows = json.loads(Path(result.path).read_text())["memories"]
+    assert [(m["width"], m["depth"]) for m in rows] == [(16, 32)]
+
+
+@pytest.mark.parametrize("local_parameters", [False, True])
+def test_memory_profile_followup_module_parameter_scope(tmp_path, local_parameters):
+    from programs import phase1_doc_one_shot_runner as producer
+    body = ("module unrelated;\nparameter WIDTH = 9;\nparameter DEPTH = 13;\nendmodule\n"
+            "module storage;\n// ROM lookup storage\n")
+    if local_parameters:
+        body += "parameter WIDTH = 5;\nparameter DEPTH = 11;\n"
+    body += "reg [WIDTH-1:0] values [0:DEPTH-1];\nendmodule\n"
+    result = producer.gen_l9_integration_spec(tmp_path, {"array.md": body}, {})
+    rows = json.loads(Path(result.path).read_text())["memories"]
+    assert len(rows) == 1, rows
+    if local_parameters:
+        assert (rows[0]["width"], rows[0]["depth"]) == (5, 11), rows
+        assert rows[0]["low_confidence"] is False
+    else:
+        assert (rows[0]["width"], rows[0]["depth"]) == (None, None), rows
+        assert rows[0]["geometry_status"] == "UNRESOLVED", rows
+        assert rows[0]["low_confidence"] is True
 
 
 _FIXTURE_DIR = Path(__file__).parent / "phase1_fixtures"
