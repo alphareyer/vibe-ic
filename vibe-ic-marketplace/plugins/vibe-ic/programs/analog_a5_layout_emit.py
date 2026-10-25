@@ -235,6 +235,8 @@ class PdkFacts:
         self.m1_space_um: Optional[float] = None
         self.deck: Dict[str, Dict] = {}
         self.sources: Dict[str, str] = {}
+        self.width_prl_authority: dict = {
+            "status": "NOT_DECLARED", "rules": {}, "sources": {}}
         # WHAT A DRAWN TYPE IS, out of the technology file that declares it.
         # See `analog_a5_pdk_device_limits.layer_identity` for the defect
         # this closes; `read_pdk` refuses rather than leave it None.
@@ -262,6 +264,122 @@ class PdkFacts:
             wmin = fwmin if wmin is None else min(wmin, fwmin)
             src = self.sources.get("gencell_tcl", src)
         return lmin, wmin, src
+
+
+def _parse_width_prl_rules(configuration: str, source: str) -> dict:
+    """Read the supported native width/parallel-run spacing predicate.
+
+    This is deliberately not a Ruby evaluator.  The numeric declarations and
+    the exact KLayout construction must agree; changed predicates are refused
+    and remain under the native DRC authority.
+    """
+    config = json.loads(configuration).get("drc_rules", {})
+    if not isinstance(config, dict):
+        raise ValueError("native DRC rules must be an object")
+    source = "\n".join(line for line in source.splitlines()
+                       if not line.lstrip().startswith("#"))
+    lines = source.splitlines()
+
+    def statements(pattern: str) -> list:
+        return [match for line in lines
+                if (match := re.fullmatch(
+                    r"[ \t]*" + pattern + r"[ \t]*(?:#[^\r\n]*)?", line))]
+
+    layers = statements(r"mets_lay\s*=\s*\[([^]]+)\]")
+    assignments = r"\s*(?:[+\-*/%&|^]?=|<<)"
+    layer_writes = re.findall(
+        r"(?m)^[ \t]*mets_lay(?:\s*\[[^\n]*?\])?" + assignments, source)
+    if len(layers) != 1 or len(layer_writes) != 1:
+        raise ValueError("native metal layer declaration is unsupported")
+    metals = [re.fullmatch(r"metal(\d+)_drw", name.strip())
+              for name in layers[0][1].split(",")]
+    if not metals or any(match is None for match in metals):
+        raise ValueError("native metal layer declaration is unsupported")
+
+    result: dict = {}
+    for suffix in ("e", "f"):
+        stem, key = "mn_" + suffix, "Mn_" + suffix
+        required = [
+            rf"{stem}_value\s*=\s*drc_rules\['{key}'\]\.to_f",
+            rf"{stem}_width\s*=\s*drc_rules\['{key}_w'\]\.to_f\s*/\s*2\b",
+            rf"{stem}_length\s*=\s*drc_rules\['{key}_cr'\]\.to_f",
+            rf"{stem}_l1\s*=\s*met_lay\.sized\(-1\s*\*\s*{stem}_width\.um\)\.sized\({stem}_width\.um\)",
+            rf"(?:{stem}_l\s*=\s*)?met_lay\.sep\({stem}_l1,\s*{stem}_value\.um,\s*projection_limits\({stem}_length\.um\s*\+\s*0\.001\.um,\s*nil\)\)",
+        ]
+        if any(len(statements(pattern)) != 1 for pattern in required):
+            raise ValueError("unsupported native width/parallel predicate: " + key)
+        if any(len(re.findall(r"(?m)^[ \t]*" + stem + ending + assignments,
+                              source)) != 1
+               for ending in ("_value", "_width", "_length", "_l1")):
+            raise ValueError(
+                "native width/parallel predicate was reassigned: " + key)
+        values = [config.get(key + ending) for ending in ("", "_w", "_cr")]
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               or not math.isfinite(value) or value <= 0 for value in values):
+            raise ValueError(
+                "native width/parallel spacing values are absent or invalid")
+        rule = {"source_rule": key, "spacing_um": values[0],
+                "width_gt_um": values[1], "parallel_gt_um": values[2]}
+        for match in metals:
+            result.setdefault(int(match[1]), []).append(dict(rule))
+    return result
+
+
+def _read_width_prl_rules(stage: Stage, drc_source: str) -> dict:
+    """Read one co-located public JSON/deck pair with byte identities.
+
+    No pair means the selected PDK declares no supported conditional here.
+    A partial, ambiguous, changed, or hash-incoherent pair is a refusal: it
+    must not silently collapse to the unconditional spacing floor.
+    """
+    parts = Path(drc_source).parts
+    if "libs.tech" not in parts:
+        return {"status": "NOT_DECLARED", "rules": {}, "sources": {}}
+    root = Path(*parts[:parts.index("libs.tech") + 1]) / Path(
+        "klayout/tech/drc/rule_decks")
+    script = (
+        "import hashlib,json;from pathlib import Path;"
+        "r=Path(" + repr(str(root)) + ");"
+        "a=sorted(r.glob('*tech_default.json'));"
+        "b=sorted(r.glob('**/*metaln.drc'));p=a+b;"
+        "print(json.dumps({str(x):{'text':x.read_text(),"
+        "'sha256':hashlib.sha256(x.read_bytes()).hexdigest()}for x in p}))")
+    rc, output, error = stage.sh(
+        "python3 -c " + shlex.quote(script), timeout=120)
+    if rc:
+        return {"status": "REFUSED", "rules": {}, "sources": {},
+                "detail": "native conditional-spacing sources unreadable: "
+                          + (error or output).strip()[:160]}
+    if not output.strip():
+        return {"status": "NOT_DECLARED", "rules": {}, "sources": {}}
+    try:
+        files = json.loads(output)
+        if not isinstance(files, dict):
+            raise ValueError("native conditional-spacing payload is not an object")
+        configs = [(path, value) for path, value in files.items()
+                   if path.endswith("tech_default.json")]
+        decks = [(path, value) for path, value in files.items()
+                 if path.endswith("metaln.drc")]
+        if not configs and not decks:
+            return {"status": "NOT_DECLARED", "rules": {}, "sources": {}}
+        if len(configs) != 1 or len(decks) != 1:
+            raise ValueError(
+                "native conditional spacing requires exactly one JSON and one metaln deck")
+        for path, value in configs + decks:
+            if not isinstance(value, dict) or not isinstance(value.get("text"), str):
+                raise ValueError("native conditional-spacing source payload is malformed")
+            digest = hashlib.sha256(value["text"].encode()).hexdigest()
+            if value.get("sha256") != digest:
+                raise ValueError(
+                    "native conditional-spacing source hash does not match bytes: " + path)
+        rules = _parse_width_prl_rules(configs[0][1]["text"],
+                                       decks[0][1]["text"])
+        return {"status": "READ", "rules": rules,
+                "sources": {path: {"path": path, "sha256": value["sha256"]}
+                            for path, value in configs + decks}}
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        return {"status": "REFUSED", "rules": {}, "sources": {},
+                "detail": str(exc)}
 
 
 def _maxima_for(facts: "PdkFacts", model: str
@@ -381,6 +499,14 @@ def read_pdk(stage: Stage, pdk_root: str, family: str,
             return None, f"ENV_UNAVAILABLE: Magic technology context is unreadable: {exc}"
         facts.m1_space_um = _lim.m1_space_um(dtext, technology_text=context)
     facts.deck = _lim.deck_rules(dtext)
+    facts.width_prl_authority = _read_width_prl_rules(stage, dp)
+    if facts.width_prl_authority["status"] == "REFUSED":
+        return None, ("ENV_UNAVAILABLE: native width/parallel-run spacing "
+                      "authority is unusable: "
+                      + facts.width_prl_authority.get("detail", "unknown refusal"))
+    if facts.width_prl_authority["status"] == "READ":
+        facts.deck["metal_width_spacing_um"] = \
+            facts.width_prl_authority["rules"]
     if facts.m1_space_um is None:
         return None, (f"ENV_UNAVAILABLE: {dp} states no Metal1 minimum-space "
                       f"rule this program can read. The bulk-tap clearance "
@@ -1249,14 +1375,35 @@ class Geo:
             # via, because `pitch()` sizes its corridors from it.
             self.patch[k] = self.long_half[k]
 
-    def metal_space(self, layer: str) -> int:
+    def metal_space(self, layer: str, box=None, other=None) -> int:
         m = _METAL_RE.match(layer) or _VIA_RE.match(layer)
         if m:
             n = int(m.group(1))
             if _VIA_RE.match(layer) and not _METAL_RE.match(layer):
                 return self.rules_via_space(n)
-            return self.space.get(n, self.default_space)
+            distance = self.space.get(n, self.default_space)
+            if box is not None and other is not None:
+                width = max(min(box[2] - box[0], box[3] - box[1]),
+                            min(other[2] - other[0], other[3] - other[1])) / self.lam
+                parallel = max(0, min(box[2], other[2]) - max(box[0], other[0]),
+                               min(box[3], other[3]) - max(box[1], other[1])) / self.lam
+                for rule in self.rules.get("metal_width_spacing_um", {}).get(n, []):
+                    if (width > rule["width_gt_um"]
+                            and parallel > rule["parallel_gt_um"]):
+                        distance = max(
+                            distance,
+                            int(math.ceil(rule["spacing_um"] * self.lam - 1e-9)))
+            return distance
         return self.default_space
+
+    def spacing_reach(self, layer: str) -> int:
+        """Largest source-declared spacing that may apply on this layer."""
+        match = _METAL_RE.match(layer)
+        rules = (self.rules.get("metal_width_spacing_um", {}).get(
+            int(match.group(1)), []) if match else [])
+        return max([self.metal_space(layer)] + [
+            int(math.ceil(rule["spacing_um"] * self.lam - 1e-9))
+            for rule in rules])
 
     def rules_via_space(self, k: int) -> int:
         um = self.rules["via_space_um"].get(k)
@@ -1592,14 +1739,15 @@ def _clear_but(sites: "Sites", box: Sequence[int], layer: str,
 
     `joins`: this net's own rectangles the caller is joining in the same
     stroke (a patch drawn as two rectangles is checked one at a time)."""
-    s = sites.geo.metal_space(layer)
+    reach = sites.geo.spacing_reach(layer)
 
     def d2(a, b) -> int:
         dx = max(b[0] - a[2], a[0] - b[2], 0)
         dy = max(b[1] - a[3], a[1] - b[3], 0)
         return dx * dx + dy * dy
 
-    for r in sites.near(layer, box, s):
+    for r in sites.near(layer, box, reach):
+        s = sites.geo.metal_space(layer, box, r["box"])
         if "lcomp" in r and r.get("comp") in allowed:
             continue
         got = d2(box, r["box"])
@@ -1903,8 +2051,7 @@ class Sites:
         are rejected too. Refusing a legal position costs a lambda of travel;
         accepting an illegal one costs a violation."""
         for layer in layers:
-            s = self.geo.metal_space(layer)
-            rows = self.near(layer, box, s)
+            rows = self.near(layer, box, self.geo.spacing_reach(layer))
             merged = set()
             for r in rows:
                 if "lcomp" not in r:
@@ -1914,6 +2061,7 @@ class Sites:
                         and b[1] <= box[3] and box[1] <= b[3]:
                     merged.add(r["lcomp"])
             for r in rows:
+                s = self.geo.metal_space(layer, box, r["box"])
                 if "lcomp" not in r:
                     b = r["box"]
                     dx = max(b[0] - box[2], box[0] - b[2], 0)
@@ -3393,6 +3541,7 @@ def emit_block(project: Path, block: str, stage: Stage, magicrc: str,
                               "source": src}
     report["pdk_limits"] = limits_used
     report["pdk_sources"] = dict(facts.sources)
+    report["width_prl_authority"] = dict(facts.width_prl_authority)
     report["m1_space_um"] = facts.m1_space_um
 
     lam, cells = probe(stage, magicrc, devs, facts)
