@@ -1746,14 +1746,21 @@ def extract_spec_contract(text: str, is_json: bool = False,
                 source = 'none'                      # prose for "input/output" words
     # Module name: prefer the target `TopModule` when a spec embeds several module
     # headers (a reference/buggy example before the real target), else the first.
+    try:
+        from _hdl_code_text import strip_hdl_comments_and_strings
+    except ImportError:
+        from ._hdl_code_text import strip_hdl_comments_and_strings
+    name_text = strip_hdl_comments_and_strings(text)
     mod = None
-    names = re.findall(r'\bmodule\s+(\w+)', clean)
+    # `named` is a prose modifier only when followed by an identifier. HDL
+    # `module named(...)` / `module named;` still declares the literal name.
+    names = re.findall(r'\bmodule\s+(?:(?i:named)\s+)?`?(\w+)`?', name_text)
     if "TopModule" in names:
         mod = "TopModule"
     elif names:
         mod = names[0]
     else:
-        mm = re.search(r'module\s+named\s+`?(\w+)`?', text, re.I)
+        mm = re.search(r'module\s+named\s+`?(\w+)`?', name_text, re.I)
         if mm:
             mod = mm.group(1)
     mode, polarity, signal = _detect_reset(text)
