@@ -13909,10 +13909,80 @@ def step_crosslayer_rewrite_fidelity(project: Path) -> StepResult:
                       extras={"exit_code": rc})
 
 
-def step_rtl_lint_tool(project: Path, *, pdk_name: Optional[str] = None) -> Optional[StepResult]:
+def _step_rtl_hygiene_native(project: Path) -> StepResult:
+    """Consume the existing Step-2 project lint and its fresh native proof."""
+    t0 = time.time()
+    out_dir = project / "reports/phase2/lint"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    findings_path = out_dir / "rtl_hygiene.json"
+    before = set(out_dir.glob("native-elaboration-*/context.json"))
+    outputs = []
+    context = {}
+    status, detail = "NOT_MEASURED", "native RTL lint did not produce a current tool result"
+    try:
+        from _rtl_include_hub import silicon_rtl_selection
+        selected = [str(path.resolve()) for path in silicon_rtl_selection(_pl.rtl_dir(project))]
+        spec = json.loads((project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").read_text())
+        top = spec.get("top_module")
+        cmd = [
+            sys.executable, str(PROGRAMS_DIR / "rtl_hygiene_lint.py"),
+            "--project", str(project)]
+        if top in (None, ""):
+            # Reuse the existing structural resolver for an unnamed source top;
+            # keep the source document intact and refuse an ambiguous closure.
+            top = _v661_resolve_dut_module(project, "", None)
+            if not top:
+                raise ValueError("native RTL lint cannot resolve a unique selected top")
+            from catalog_synth_safe_params_check import top_synth_parameters
+            pinned = top_synth_parameters(project, top)
+            cmd = [sys.executable, str(PROGRAMS_DIR / "rtl_hygiene_lint.py"),
+                   *selected, "--top", top]
+            for parameter in (pinned[0] if pinned else []):
+                cmd += ["--parameter", parameter]
+        result = _pr.run(cmd + [
+            "--severity", "ERROR", "--json", str(findings_path)],
+            capture_output=True, text=True)
+        current = set(out_dir.glob("native-elaboration-*/context.json")) - before
+        if len(current) != 1:
+            raise ValueError("native RTL lint did not emit exactly one current elaboration context")
+        context_path, = current
+        context = json.loads(context_path.read_text())
+        if not isinstance(context, dict):
+            raise ValueError("native RTL lint context is not an object")
+        findings = json.loads(findings_path.read_text())
+        if (not top or context.get("top") != top
+                or context.get("files") != selected
+                or not isinstance(findings, list)):
+            raise ValueError("native RTL lint proof does not bind the selected top and files")
+        outputs = [str(findings_path), *[str(path) for path in context_path.parent.iterdir()
+                                       if path.is_file()]]
+        native_rc = context.get("native_returncode")
+        if (type(native_rc) is int
+                and context.get("transport_returncode") == native_rc):
+            if (native_rc == 0 and context.get("status") == "MEASURED"
+                    and result.returncode in (0, 1)):
+                status = "PASS" if result.returncode == 0 else "FAIL"
+            elif native_rc != 0 and result.returncode == 1:
+                status = "FAIL"
+        detail = ((result.stdout or "") + (result.stderr or ""))[-2000:]
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
+        detail = str(exc)
+    return StepResult(
+        "rtl_lint_tool", status, time.time() - t0, detail, outputs,
+        extras={"producer": "rtl_hygiene_lint", "step_id": "2",
+                "default_row_status": status, "completed": status == "PASS",
+                "native_context": context, "input_sha256": context.get("input_sha256", {})},
+        reason_class=(context.get("reason_class") or "inconclusive")
+        if status == "NOT_MEASURED" else "")
+
+
+def step_rtl_lint_tool(project: Path, *, pdk_name: Optional[str] = None,
+                       bounded_rtl: bool = False) -> Optional[StepResult]:
     """Flow Step 2 lint through the tool: LibreLane Verilator.Lint + its gate.
 
-    Default selects LibreLane with the PDK declared by Phase 2; the image is
+    A bounded RTL request with no PDK and no explicit implementation/step
+    choice uses the existing native project hygiene gate. Other requests
+    select LibreLane with the PDK declared by Phase 2; the image is
     `librelane_contract.resolve_image` and the PDK root `pdk_root_resolution`.
     An explicit `direct` selection returns None and
     the step is unchanged. `librelane` judges Verilator.Lint with
@@ -13933,7 +14003,16 @@ def step_rtl_lint_tool(project: Path, *, pdk_name: Optional[str] = None) -> Opti
     out_dir = project / "reports/phase2/lint"
     gate_json = out_dir / "verilator_lint_gate.json"
     try:
-        pdk, pdk_source = _ll.phase2_pdk(project, selected=pdk_name)
+        try:
+            pdk, pdk_source = _ll.phase2_pdk(project, selected=pdk_name)
+        except _ll.Refusal as exc:
+            switch = project / "phase3/librelane_switch.json"
+            if (exc.code == "LL_PHASE2_PDK_UNDECLARED" and bounded_rtl
+                    and pdk_name in (None, "auto")
+                    and mode == "librelane" and _ll.impl_step_modes(project) is None
+                    and "2" not in (_ll._load(switch).get("steps", {}) if switch.is_file() else {})):
+                return _step_rtl_hygiene_native(project)
+            raise
         image = _ll.resolve_image(project)
         l9 = _rcvar_l9_top_ports(project)
         top = l9[0] if l9 else None
@@ -26897,13 +26976,18 @@ def main() -> int:
     # declarations or the neighbouring CDC span. Consume the actual native
     # checker answer through this existing normal entry and report writer.
     import librelane_contract as _lint_contract
+    import task_nature_route as _lint_scope
+    _bounded_rtl_lint = (
+        args.skip_phase3 and str(args.entry_step) != "D1"
+        and _lint_scope.is_rtl_only_evidence(exit_step=args.exit_step))
     if (str(args.entry_step) == "2" and str(args.exit_step) == "2"
             and _lint_contract.selected_mode(project, "2") == "librelane"):
-        row = step_rtl_lint_tool(project, pdk_name=args.pdk)
+        row = step_rtl_lint_tool(project, pdk_name=args.pdk, bounded_rtl=_bounded_rtl_lint)
         raw_context = os.environ.get("VIBEIC_FLOW109_CONTEXT")
         if raw_context:
             row.extras["context_sha256"] = json.loads(Path(raw_context).read_text())["context_sha256"]
-        summary = {"project": str(project), "steps": [asdict(row)], "verdict": row.status,
+        summary = {"project": str(project),
+                   "steps": [asdict(_entry_sentinel("rtl_gen")), asdict(row)], "verdict": row.status,
                    "declared_window": {"entry_step": "2", "exit_step": "2",
                                        "dispatched_step_ids": ["2"]},
                    "bounded_disclosures": ["native lint only; whole flow not measured"]}
@@ -27162,7 +27246,7 @@ def main() -> int:
     elif _after_exit("rtl_validate"):
         plan.append(_exit_sentinel("rtl_lint_tool"))
     else:
-        _tool_lint = step_rtl_lint_tool(project, pdk_name=args.pdk)
+        _tool_lint = step_rtl_lint_tool(project, pdk_name=args.pdk, bounded_rtl=_bounded_rtl_lint)
         if _tool_lint is not None:
             plan.append(_tool_lint)
 

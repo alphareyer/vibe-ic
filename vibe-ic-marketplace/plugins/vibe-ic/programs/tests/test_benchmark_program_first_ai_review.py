@@ -1150,8 +1150,9 @@ def _write_ai_repair_record(run: Path, task: dict, challenge: dict) -> dict:
     repaired_hash = bd._sha256_text(bd._candidate_text(rtl_files))
     candidate = rtl_files[0].read_text()
     public = task["public_original_input"]
-    source_path = public["files"][0]["relative_path"]
-    original = (project / "input/public_original/files" / source_path).read_text()
+    source_path = public["files"][0]["relative_path"] if public["files"] else ""
+    original = ((project / "input/public_original/files" / source_path).read_text()
+                if source_path else "")
     author = {"kind": "AI", "model": "test-repair-model"}
     record = {
         "schema": bd._AI_REPAIR_RECORD_SCHEMA,
@@ -1191,13 +1192,15 @@ def _write_ai_repair_record(run: Path, task: dict, challenge: dict) -> dict:
                 "configurations": [{"name": "default"}]},
         },
     }
+    if not public["files"]:
+        record.pop("repair_contract")
     path = bd._repair_record_path(run, task)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record))
     return record
 
 
-def _dispatched_parent_task(tmp_path: Path) -> tuple[Path, dict, Path]:
+def _dispatched_parent_task(tmp_path: Path, *, supplied_source=True) -> tuple[Path, dict, Path]:
     """Build the review worklist shape emitted after a dispatched runner call."""
     run = tmp_path / "run"
     (run / "responses").mkdir(parents=True)
@@ -1207,7 +1210,8 @@ def _dispatched_parent_task(tmp_path: Path) -> tuple[Path, dict, Path]:
     rtl.write_text(
         "module dut(input wire a, output wire y); assign y = ~a; endmodule\n")
     prompt = (project / "input/phase1_prompt.md").read_text()
-    bio._stage_public_original("p1", prompt, {"dut.v": rtl.read_text()}, project)
+    bio._stage_public_original("p1", prompt,
+                               {"dut.v": rtl.read_text()} if supplied_source else {}, project)
     runner = tmp_path / "fixture-runner" / "vibe_ic_one_shot_runner.py"
     runner.parent.mkdir()
     runner.write_text('''import pathlib, sys
@@ -1263,7 +1267,8 @@ def _stub_dispatched_reentry(monkeypatch):
 
 def _issue_pending_route_fixture(run: Path, route: dict, *,
                                  nature: str = "spec_generation",
-                                 requested_evidence: str | None = None) -> dict:
+                                 requested_evidence: str | None = None,
+                                 benchmark: str = "rtllm") -> dict:
     """Run the normal route producer through its pending-D1 boundary."""
     import route_decision as rd
     from test_ai_first_route_handoff import _answer, _write_answer
@@ -1283,7 +1288,7 @@ def _issue_pending_route_fixture(run: Path, route: dict, *,
     }]
     _write_answer(route, answer)
     decision, reasons = bd._validate_ai_route(
-        route, run, benchmark="rtllm", dataset=Path("/unused"))
+        route, run, benchmark=benchmark, dataset=Path("/unused"))
     assert decision is not None, reasons
     project = Path(route["project"])
     receipt = decision["route_receipt"]
@@ -1327,12 +1332,14 @@ def _emit_d1_fixture_report(project: Path, context: dict, *,
 
 def _issue_active_route_fixture(run: Path, route: dict, *,
                                 nature: str = "spec_generation",
-                                requested_evidence: str = "lint_validated") -> dict:
+                                requested_evidence: str = "lint_validated",
+                                benchmark: str = "rtllm") -> dict:
     """Issue real coordinator authority around a narrowly mocked D1 producer."""
     from unittest.mock import patch
 
     receipt = _issue_pending_route_fixture(
-        run, route, nature=nature, requested_evidence=requested_evidence)
+        run, route, nature=nature, requested_evidence=requested_evidence,
+        benchmark=benchmark)
 
     def d1_producer(argv, **kwargs):
         assert "--entry-step" not in argv
@@ -1351,7 +1358,8 @@ def _issue_active_route_fixture(run: Path, route: dict, *,
 
 
 def _write_issued_run_envelope(run: Path, task: dict,
-                               extra_routes: list[dict] | None = None) -> list[dict]:
+                               extra_routes: list[dict] | None = None,
+                               benchmark: str = "rtllm") -> list[dict]:
     """Write the coordinator-owned envelope consumed by ``cmd_resume``.
 
     Direct review fixtures start after the real ``--solve`` route decision, so
@@ -1370,18 +1378,19 @@ def _write_issued_run_envelope(run: Path, task: dict,
                 and str(declaration.get("selection") or "").startswith("legacy"))):
         task["verification_execution"] = {
             "backend": "host", "selection": "explicit test host"}
+    fmt = bd._dispatch_format(benchmark)
     route = bd._make_ai_route_task(
         task["id"], Path(task["project"]),
         {"public_original_input": task["public_original_input"]},
-        ROUTING, run, "rtllm", benchmark="rtllm", dataset_path=Path("/unused"))
+        ROUTING, run, fmt, benchmark=benchmark, dataset_path=Path("/unused"))
     routes = [route, *(extra_routes or [])]
     bd._publish_route_input_anchor(
-        run, bd._route_input_anchor("rtllm", "rtllm", Path("/unused"), routes))
+        run, bd._route_input_anchor(benchmark, fmt, Path("/unused"), routes))
     bd._write_jsonl(run / bd._ROUTE_WORKLIST, routes)
     bd._atomic_write_json(run / ".bench_config.json", {
         "schema": "vibeic.benchmark.general_run.v1",
-        "bench": "rtllm",
-        "format": "rtllm",
+        "bench": benchmark,
+        "format": fmt,
         "dataset": str(Path("/unused").resolve()),
         "clean_room": True,
         "full_dataset": True,
@@ -1396,7 +1405,8 @@ def _write_issued_run_envelope(run: Path, task: dict,
 def _solve_report(run: Path, task: dict,
                   *, extra_routes: list[dict] | None = None,
                   active_route: bool = False, exit_step: str = "8",
-                  requested_evidence: str = "lint_validated") -> None:
+                  requested_evidence: str = "lint_validated",
+                  benchmark: str = "rtllm") -> None:
     result = {
         "id": task["id"], "ok": True, "candidate_ready": True,
         "accepted": False, "entry": "D1", "evidence": "RTL_SIM",
@@ -1417,7 +1427,7 @@ def _solve_report(run: Path, task: dict,
         evidence=result["evidence"], exit_step=result["exit"],
         artefact_collected=True)
     (run / "solve_report.json").write_text(json.dumps({
-        "bench": "rtllm", "format": "rtllm", "total": 1,
+        "bench": benchmark, "format": bd._dispatch_format(benchmark), "total": 1,
         "solved": 1, "accepted": 0,
         "acceptance_policy": {
             "required": True,
@@ -1426,10 +1436,12 @@ def _solve_report(run: Path, task: dict,
         },
         "results": [result],
     }))
-    routes = _write_issued_run_envelope(run, task, extra_routes=extra_routes)
+    routes = _write_issued_run_envelope(
+        run, task, extra_routes=extra_routes, benchmark=benchmark)
     if active_route:
         receipt = _issue_active_route_fixture(
-            run, routes[0], requested_evidence=requested_evidence)
+            run, routes[0], requested_evidence=requested_evidence,
+            benchmark=benchmark)
         assert receipt["verify_through"] == exit_step
         solve_path = run / "solve_report.json"
         solve = json.loads(solve_path.read_text())
@@ -1623,9 +1635,10 @@ def test_supplied_rtl_accepts_only_explicit_step2_reentry(tmp_path):
 
 
 @_NEEDS_SIMULATOR
+@pytest.mark.parametrize('supplied_source', [True, False])
 def test_ai_repair_reenters_at_validation_without_regeneration(
-        tmp_path, monkeypatch):
-    run, task, runner = _dispatched_parent_task(tmp_path)
+        tmp_path, monkeypatch, supplied_source):
+    run, task, runner = _dispatched_parent_task(tmp_path, supplied_source=supplied_source)
     project = Path(task["project"])
     task["verification_execution"] = {
         "backend": "host", "selection": "explicit test host"}
@@ -1640,6 +1653,7 @@ def test_ai_repair_reenters_at_validation_without_regeneration(
     repairs = bd._read_jsonl(run / bd._REPAIR_WORKLIST)
     assert repairs[0]["status"] == "AI_SEMANTIC_REPAIR_REQUIRED"
     assert repairs[0]["challenge_result"]["status"] == "FAIL"
+    assert ('repair_contract' in repairs[0]['repair_record_requirements']) == supplied_source
 
     working_rtl.write_text(
         "module dut(input wire a, output wire y); assign y = a; endmodule\n")
@@ -1701,6 +1715,27 @@ def test_ai_repair_reenters_at_validation_without_regeneration(
         "phases"]
     assert phases["phase4_debugging"]["ai_semantic_repair"]["actor"] == \
         "test-repair-model"
+
+
+@pytest.mark.parametrize('mutation', [
+    'prompt_sha256', 'parent_rtl_sha256', 'repaired_rtl_sha256',
+    'challenge_sha256', 'source_sha256', 'source_completion'])
+def test_prompt_only_repair_keeps_identity_and_source_completion_guards(tmp_path, mutation):
+    run, task, _ = _dispatched_parent_task(tmp_path, supplied_source=False)
+    challenge = {'sha256': 'c' * 64}
+    record = _write_ai_repair_record(run, task, challenge)
+    if mutation == 'source_sha256':
+        task['public_original_input']['source_sha256'] = '0' * 64
+    elif mutation == 'source_completion':
+        task['program_routing']['nature'] = 'rtl_completion'
+    else:
+        record[mutation] = '0' * 64
+    path = bd._repair_record_path(run, task)
+    path.write_text(json.dumps(record))
+    _, reasons = bd._validate_repair_record(
+        path, task, bd._sha256_text(bd._candidate_text(bd._rtl_files(Path(task['project'])))),
+        challenge)
+    assert reasons
 
 
 def test_dispatched_ai_repair_consumes_changed_rtl_before_regate(

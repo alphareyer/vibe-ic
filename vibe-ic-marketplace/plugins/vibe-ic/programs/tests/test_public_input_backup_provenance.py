@@ -29,7 +29,7 @@ def runtime_pair(monkeypatch):
     fixture._rt_pair.assume_matching_runtime_pair(monkeypatch)
 
 
-def _backup(tmp_path, monkeypatch):
+def _backup(tmp_path, monkeypatch, *, d1_verdict="PASS", gate_status="PASS"):
     dataset, run = tmp_path / "input-prompts", tmp_path / "run"
     fixture._write_dataset(dataset, {"opaque-task": PROMPT})
     real_run = bd.subprocess.run
@@ -42,6 +42,10 @@ def _backup(tmp_path, monkeypatch):
         if fixture._is_d1_frontdoor(argv):
             fixture._emit_phase1_docs(
                 project, fixture._runner_invocation_context(kwargs))
+            report = project / 'reports/orchestrator/phase1_one_shot.json'
+            document = json.loads(report.read_text())
+            document['verdict'] = d1_verdict
+            report.write_text(json.dumps(document))
             return SimpleNamespace(returncode=0)
         rtl = project / "phase2" / "stage1" / "rtl"
         rtl.mkdir(parents=True, exist_ok=True)
@@ -54,7 +58,9 @@ def _backup(tmp_path, monkeypatch):
     monkeypatch.setattr(bd.subprocess, "run", stage_only)
     assert fixture._solve_after_ai_route(
         "verilogeval-human", str(dataset), str(run)) == 2
-    item = fixture._read_jsonl(run / bd._BACKUP_WORKLIST)[0]
+    items = fixture._read_jsonl(run / bd._BACKUP_WORKLIST)
+    assert len(items) == 1, items
+    item = items[0]
     calls = []
 
     def regate(argv, **kwargs):
@@ -63,9 +69,9 @@ def _backup(tmp_path, monkeypatch):
             return real_run(argv, **kwargs)
         calls.append(list(argv))
         fixture._write_rtl_gen_report(
-            Path(argv[2]), "PASS",
+            Path(argv[2]), gate_status,
             context=fixture._runner_invocation_context(kwargs))
-        return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=0 if gate_status == 'PASS' else 1)
 
     monkeypatch.setattr(bd.subprocess, "run", regate)
     return dataset, run, item, calls
@@ -98,6 +104,75 @@ def _complete(item, *, changed=True):
     path = project / "phase2/stage1/ai_backup_author.json"
     path.write_text(json.dumps(record))
     return path, record
+
+
+@pytest.mark.parametrize('refusal', ['none', 'prompt', 'activation', 'ai', 'program'])
+def test_pending_d1_rtl_uses_ordinary_backup_resume_and_acceptance(
+        tmp_path, monkeypatch, refusal):
+    # The proof executes Icarus inside the canonical EDA test image using the
+    # product's existing explicitly declared host challenge transport.
+    monkeypatch.setenv('VIBEIC_CHALLENGE_BACKEND', 'host')
+    dataset, run, item, calls = _backup(
+        tmp_path, monkeypatch, d1_verdict='NOT_MEASURED',
+        gate_status='FAIL' if refusal == 'program' else 'PASS')
+    project = Path(item['project'])
+    assert not bd._receipt_current_pointer(project, 'd1_activation').exists()
+    _complete(item)
+    if refusal == 'prompt':
+        (project / 'input/phase1_prompt.md').write_text('A different request.\n')
+    elif refusal == 'activation':
+        bd._receipt_current_pointer(project, 'd1_activation').write_text('{"foreign": true}')
+    assert bd.cmd_resume('verilogeval-human', str(dataset), str(run)) == 2
+    if refusal in ('prompt', 'activation', 'program'):
+        assert len(calls) == (1 if refusal == 'program' else 0)
+        assert not (run / 'responses/opaque-task.json').exists()
+        return
+    assert len(calls) == 1
+    task, = fixture._read_jsonl(run / bd._REVIEW_WORKLIST)
+    review = review_fixture._valid_review(task)
+    review['routing']['ai_nature'] = task['program_routing']['nature']
+    proof = review['verification_test']
+    source = '''module vibeic_ai_challenge_tb;
+reg a; wire y; TopModule candidate(.a(a), .y(y));
+initial begin
+a=0; #1; if(y!==1) begin $display("VIBEIC_AI_CHALLENGE=FAIL"); $fatal(1); end
+a=1; #1; if(y!==0) begin $display("VIBEIC_AI_CHALLENGE=FAIL"); $fatal(1); end
+$display("VIBEIC_AI_CHALLENGE=PASS"); $finish;
+end endmodule
+'''
+    Path(proof['path']).write_text(source)
+    proof.update({'sha256': bd._sha256_text(source), 'prompt_evidence': [{
+        'excerpt': 'output y is the inversion of input a',
+        'supports': 'The test exhaustively verifies the stated scalar inversion.'}],
+        'expected_behavior': 'Output y is the inversion of input a.',
+        'rationale': 'Both possible scalar input values are exercised against the '
+                     'stated inversion requirement, without using any hidden oracle.'})
+    if refusal == 'ai':
+        review['semantic_review'].update({
+            'verdict': 'FAIL', 'findings': ['Independent reviewer refuses acceptance.']})
+    review_fixture._write_review(task, review)
+    status = bd.cmd_resume('verilogeval-human', str(dataset), str(run))
+    assert status == (0 if refusal == 'none' else 2)
+    acceptance = json.loads((run / bd._ACCEPTANCE_REPORT).read_text())
+    assert acceptance['accepted_ids'] == (['opaque-task'] if refusal == 'none' else [])
+    native = json.loads((project / 'reports/orchestrator/phase1_one_shot.json').read_text())
+    assert native['verdict'] == 'NOT_MEASURED'
+    assert not bd._receipt_current_pointer(project, 'd1_activation').exists()
+
+
+def test_source_only_admission_binds_the_live_prompt_independently(tmp_path, monkeypatch):
+    dataset, run, item, calls = _backup(tmp_path, monkeypatch, d1_verdict='NOT_MEASURED')
+    task, = fixture._read_jsonl(run / bd._ROUTE_WORKLIST)
+    receipt = bd._read_current_receipt(Path(item['project']), 'route_decision')['receipt']
+    (Path(item['project']) / 'input/phase1_prompt.md').write_text(
+        PROMPT + '\nAlso preserve every supplied identifier.\n')
+    observed = 'ADMITTED'
+    try:
+        bd._require_route_admission(run, task, receipt, require_d1=False)
+    except ValueError as exc:
+        observed = str(exc)
+    assert observed == 'ROUTE_ADMISSION_ORIGINAL_PROMPT_CHANGED'
+    assert calls == []
 
 
 @pytest.mark.parametrize("changed", [False, True], ids=["staged-original", "changed-without-completion"])

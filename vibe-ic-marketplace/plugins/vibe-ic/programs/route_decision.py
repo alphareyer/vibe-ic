@@ -91,7 +91,8 @@ def canonical_dag(path: Path | None = None) -> dict:
     if yaml is None:
         raise ValueError("PyYAML is required to parse the canonical flow")
     try:
-        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        import _flow_yaml
+        doc = _flow_yaml.load(path, encoding="utf-8")
     except (OSError, yaml.YAMLError) as exc:
         raise ValueError(f"canonical flow is unreadable: {exc}") from exc
     rows = (doc or {}).get("steps") if isinstance(doc, Mapping) else None

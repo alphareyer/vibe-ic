@@ -88,7 +88,8 @@ def _is_d1_frontdoor(argv: list[str]) -> bool:
     """The canonical D1-only Phase-1 pass: exit at D1, no routed entry."""
     return ("--exit-step" in argv
             and argv[argv.index("--exit-step") + 1] == "D1"
-            and "--entry-step" not in argv)
+            and ("--entry-step" not in argv
+                 or argv[argv.index("--entry-step") + 1] == "D1"))
 
 
 def _emit_phase1_docs(project: Path, context: dict) -> None:
@@ -149,15 +150,16 @@ def _phase1_dead_runner():
 
 
 @pytest.mark.parametrize(("damage", "reason"), [
-    ("missing", "D1_GATE_REPORT_UNREADABLE"),
-    ("invalid-json", "D1_GATE_REPORT_UNREADABLE"),
+    ("missing", "D1_GATE_REPORT_NOT_CURRENT_CALL"),
+    ("invalid-json", "D1_GATE_REPORT_NOT_CURRENT_CALL"),
     ("unbound", "RUNNER_REPORT_UNBOUND"),
     ("failed", "D1_ACTIVATION_GATE_NOT_PASS"),
 ])
 def test_d1_report_precondition_is_required_before_the_owning_loop(
         tmp_path, monkeypatch, damage, reason):
     dataset, run = tmp_path / "dataset", tmp_path / "run"
-    _write_dataset(dataset, {"generic_d1_control": _DEBUG_PROMPT})
+    _write_dataset(dataset, {"generic_d1_control": _DEBUG_PROMPT +
+                            '\nDeliver a complete chip as GDS.\n'})
     calls = []
 
     def producer(argv, **kwargs):
@@ -198,6 +200,37 @@ def _solve_after_ai_route(bench: str, dataset, run, **kwargs) -> int:
     assert bd.cmd_solve(bench, str(dataset), str(run), **kwargs) == 2
     return _ai_route.complete_ai_routes(bd, bench, dataset, run,
                                         jobs=kwargs.get("jobs", 1))
+
+
+def test_prompt_only_normal_entry_reaches_waive_before_d1_qualification(tmp_path, monkeypatch):
+    dataset, run = tmp_path / 'dataset', tmp_path / 'run'
+    _write_dataset(dataset, {'neutral_generation': _BUILD_PROMPT})
+    calls = []
+    real_run = bd.subprocess.run
+
+    def producer(argv, **kwargs):
+        if not any(Path(str(arg)).name == 'vibe_ic_one_shot_runner.py' for arg in argv):
+            return real_run(argv, **kwargs)
+        calls.append(list(argv))
+        project = Path(argv[2])
+        _emit_phase1_docs(project, _runner_invocation_context(kwargs))
+        path = project / 'reports/orchestrator/phase1_one_shot.json'
+        document = json.loads(path.read_text())
+        document['verdict'] = 'NOT_MEASURED'
+        path.write_text(json.dumps(document))
+        _write_rtl_gen_report(project, 'WAIVED', fallback_skill='spec-to-rtl',
+                              context=_runner_invocation_context(kwargs))
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(bd.subprocess, 'run', producer)
+    assert _solve_after_ai_route('verilogeval-human', dataset, run) == 2
+    assert [argv[argv.index('--exit-step') + 1] for argv in calls] == ['2']
+    task, = _read_jsonl(run / bd._BACKUP_WORKLIST)
+    assert task['handoff_source'] == 'rtl_gen_waive'
+    result, = json.loads((run / 'solve_report.json').read_text())['results']
+    assert result['effective_entry'] == 'D1'
+    assert result['phase1_frontdoor']['native_verdict'] == 'NOT_MEASURED'
+    assert result['d1_activation'] is None
 
 
 def test_solve_covers_program_and_declared_route_rows_exactly(tmp_path,
