@@ -65,7 +65,8 @@ def _formal(project: Path, obligation: str) -> dict:
     safe = obligation.replace(".", "_")
     sby = _put(project, f"formal/{safe}.sby", "[options]\nmode prove\n")
     log = _put(project, f"formal/{safe}.log", "SBY DONE (PASS, rc=0)\n")
-    proof = _put(project, f"formal/{safe}.sv", "module proof; endmodule\n")
+    proof = _put(project, f"formal/{safe}.sv",
+                 "module proof;\n  required_guard: assert (1'b1);\nendmodule\n")
     task = S.SECURITY_TASKS[obligation]
     result = _put(project, f"formal/{safe}.json", {
         "program": "formal_property_run", "verdict": "PASS", "all_proved": True,
@@ -79,8 +80,26 @@ def _formal(project: Path, obligation: str) -> dict:
 
 
 def _d17_case(project: Path):
+    text = "\n".join(f"| {item} | Required security condition. |" for item in S.SECURITY_IDS) + "\n"
+    source = _put(project, "input/docs/security.md", text)
+    requirements = [{"id": item, "sources": [{
+        "file": source, "line_start": index + 1, "line_end": index + 1,
+        "excerpt": text.splitlines()[index]}], "proof_binding": {
+            "legacy_id": item, "task": S.SECURITY_TASKS[item], "properties": ["required_guard"]}}
+        for index, item in enumerate(S.SECURITY_IDS)]
+    component = _put(project, "formal/component_property_contract.json", {"property_denominator": 3})
+    contract = _put(project, "input/flow109/property_contract.json", {
+        "property_denominator": 3, "catalogue_source": source,
+        "required_security_requirements": requirements})
     proofs = {item: _formal(project, item) for item in S.SECURITY_IDS}
+    for binding in proofs.values():
+        path = project / binding["result"]["path"]
+        result = json.loads(path.read_text())
+        result.update(property_contract=component["path"], property_contract_sha256=component["sha256"],
+                      property_denominator=3, authored_property_count=3, unresolved_obligations=[])
+        binding["result"] = _put(project, binding["result"]["path"], result)
     _put(project, S.MANIFESTS["D17"], {"schema": S.SCHEMA, "step_id": "D17",
+        "property_contract": contract, "component_contract": component,
         "required_security_requirements": list(S.SECURITY_IDS), "formal_results": proofs})
 
 
@@ -244,3 +263,37 @@ def test_d73_exposed_debug_port_is_measured_failure(tmp_path):
     result = S.execute(tmp_path, _context("D73"))
     assert result["component_status"] == "FAIL"
     assert result["reason"] == "D73_TEST_DEBUG_ACCESS_EXPOSED"
+
+
+
+def test_additional_source_required_unproved_property_blocks_completion(tmp_path):
+    _d17_case(tmp_path)
+    manifest_path = tmp_path / S.MANIFESTS["D17"]
+    manifest = json.loads(manifest_path.read_text())
+    doc = tmp_path / "input/docs/security.md"
+    extra = "| EXTRA.PROTECTION | Additional mandatory protection. |"
+    source = _put(tmp_path, "input/docs/security.md", doc.read_text() + extra + "\n")
+    path = tmp_path / manifest["property_contract"]["path"]
+    contract = json.loads(path.read_text())
+    contract["catalogue_source"] = source
+    for row in contract["required_security_requirements"]:
+        row["sources"][0]["file"] = source
+    # Omitting the newly documented requirement must refuse, not select only
+    # the old passing population.
+    manifest["property_contract"] = _put(tmp_path, str(path.relative_to(tmp_path)), contract)
+    manifest_path.write_text(json.dumps(manifest))
+    omitted = S.execute(tmp_path, _context("D17"))
+    assert omitted["component_status"] == "NOT_MEASURED"
+    assert omitted["reason"] == "D17_SOURCE_REQUIREMENT_POPULATION_INCOMPLETE"
+    contract["required_security_requirements"].append({"id": "EXTRA.PROTECTION",
+        "sources": [{"file": source, "line_start": 4, "line_end": 4, "excerpt": extra}],
+        "proof_binding": None, "reason": "No native proof exists."})
+    manifest["property_contract"] = _put(tmp_path, str(path.relative_to(tmp_path)), contract)
+    manifest_path.write_text(json.dumps(manifest))
+    result = S.execute(tmp_path, _context("D17"))
+    assert result["component_status"] == "NOT_MEASURED"
+    assert result["metrics"]["required_requirement_count"] == 4
+    assert result["metrics"]["proved_requirement_count"] == 3
+    assert result["metrics"]["unproved_requirement_count"] == 1
+    assert result["reason"] == "D17_SOURCE_REQUIRED_SECURITY_PROPERTIES_UNPROVED"
+    assert not result.get("completed")

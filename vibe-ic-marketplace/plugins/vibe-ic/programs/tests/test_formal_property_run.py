@@ -188,6 +188,9 @@ def test_completed_result_cites_denominator_sby_transcript_and_scope(tmp_path):
     FPR._attach_property_contract(result, formal, harness)
     assert result["property_denominator"] == 1
     assert result["authored_property_count"] == 1
+    import hashlib
+    assert result["property_contract_sha256"] == hashlib.sha256(
+        (formal / "property_contract.json").read_bytes()).hexdigest()
     assert result["elaborated_sby"] == result["sby"]
     assert result["proof_transcript"] == result["evidence"]
     assert result["bounded_vs_unbounded_scope"] == [

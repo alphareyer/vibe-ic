@@ -2264,6 +2264,8 @@ def _attach_property_contract(results: dict, formal_dir: Path,
     results["property_contract"] = (
         str(manifest_path.relative_to(formal_dir.parent.parent.parent))
         if manifest_path.is_file() else "derived from authored harness assertions")
+    results["property_contract_sha256"] = (
+        _sha256_file(manifest_path) if manifest_path.is_file() else None)
     results["elaborated_sby"] = results.get("sby")
     results["proof_transcript"] = results.get("evidence")
     results["bounded_vs_unbounded_scope"] = list(

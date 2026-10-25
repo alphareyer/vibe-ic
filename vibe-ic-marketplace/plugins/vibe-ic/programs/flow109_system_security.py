@@ -224,6 +224,7 @@ def _formal_result(project: Path, binding: object, obligation: str,
     proof_files = (result.get("proof_inputs") or {}).get("files")
     if not isinstance(proof_files, dict) or not proof_files:
         raise Refusal("D17_FORMAL_INPUTS_UNBOUND", obligation)
+    assertions = set()
     for name, digest in proof_files.items():
         if (not isinstance(name, str) or Path(name).is_absolute() or Path(name).name != name
                 or not re.fullmatch(r"[0-9a-f]{64}", str(digest))):
@@ -232,22 +233,82 @@ def _formal_result(project: Path, binding: object, obligation: str,
         if path.is_symlink() or not path.is_file() or _sha(path) != digest:
             raise Refusal("D17_FORMAL_INPUTS_STALE", f"{obligation}.{name}")
         inputs[str(path.resolve())] = digest
+        assertions.update(re.findall(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*assert\s*\(",
+                                     path.read_text(errors="replace")))
     return {"id": obligation, "proof_strength": result.get("proof_strength"),
-            "task": task, "property": selected}
+            "task": task, "property": selected, "assertions": sorted(assertions),
+            "property_contract": result.get("property_contract"),
+            "property_contract_sha256": result.get("property_contract_sha256"),
+            "property_denominator": result.get("property_denominator"),
+            "authored_property_count": result.get("authored_property_count"),
+            "unresolved_obligations": result.get("unresolved_obligations")}
 
 
 def _d17(project: Path, manifest: dict, inputs: dict[str, str]) -> dict:
+    # Retained tasks are component evidence, never the requirement denominator.
     required = manifest.get("required_security_requirements")
     proofs = manifest.get("formal_results")
     if required != list(SECURITY_IDS) or not isinstance(proofs, dict) or set(proofs) != set(SECURITY_IDS):
-        raise Refusal("D17_SECURITY_DENOMINATOR_INVALID", "exact supported AES set required")
+        raise Refusal("D17_SECURITY_DENOMINATOR_INVALID", "retained proof task identity")
     covered = [_formal_result(project, proofs[item], item, inputs) for item in SECURITY_IDS]
+    if not manifest.get("property_contract"):
+        raise Refusal("D17_PROPERTY_DENOMINATOR_MISSING", "complete document population required")
+    _contract_path, contract = _current_ref(project, manifest["property_contract"],
+                                             "complete property contract", inputs)
+    _proof_path, proof_contract = _current_ref(project, manifest.get("component_contract"),
+                                                "retained proof contract", inputs)
+    for proof in covered:
+        if (proof["property_contract_sha256"] != _sha(_proof_path)
+                or (project / str(proof["property_contract"])).resolve() != _proof_path):
+            raise Refusal("D17_PROPERTY_DENOMINATOR_UNPROVEN", "retained proof contract changed")
+    catalogue, digest = _bound(project, contract.get("catalogue_source"), "security catalogue")
+    if not catalogue.is_relative_to((project / "input/docs").resolve()):
+        raise Refusal("D17_REQUIREMENT_SOURCE_MISMATCH", "design documents required")
+    inputs[str(catalogue)] = digest
+    catalogue_ids = set(re.findall(
+        r"(?m)^\|\s*([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+)\s*\|", catalogue.read_text()))
+    requirements = contract.get("required_security_requirements")
+    if (not isinstance(requirements, list) or not requirements
+            or any(not isinstance(row, dict) or not row.get("id") for row in requirements)):
+        raise Refusal("D17_SECURITY_DENOMINATOR_INVALID", "required source population absent")
+    ids = [row["id"] for row in requirements]
+    if not catalogue_ids or len(set(ids)) != len(ids) or catalogue_ids - set(ids):
+        raise Refusal("D17_SOURCE_REQUIREMENT_POPULATION_INCOMPLETE",
+                      str(sorted(catalogue_ids - set(ids))))
+    population = []
+    by_id = {proof["id"]: proof for proof in covered}
+    for requirement in requirements:
+        citations = requirement.get("sources")
+        if not isinstance(citations, list) or not citations:
+            raise Refusal("D17_REQUIREMENT_SOURCE_MISMATCH", requirement["id"])
+        for source in citations:
+            path, digest = _bound(project, source.get("file"), "requirement source")
+            start, end = source.get("line_start"), source.get("line_end")
+            lines = path.read_text().splitlines()
+            if (not path.is_relative_to((project / "input/docs").resolve())
+                    or type(start) is not int or type(end) is not int
+                    or not 1 <= start <= end <= len(lines)
+                    or "\n".join(lines[start - 1:end]) != source.get("excerpt")):
+                raise Refusal("D17_REQUIREMENT_SOURCE_MISMATCH", requirement["id"])
+            inputs[str(path)] = digest
+        binding = requirement.get("proof_binding")
+        proof = by_id.get(binding.get("legacy_id")) if isinstance(binding, dict) else None
+        proved = (proof is not None and binding.get("task") == proof["task"]
+                  and isinstance(binding.get("properties"), list) and binding["properties"]
+                  and set(binding["properties"]).issubset(proof["assertions"]))
+        population.append({**requirement, "status": "PROVED" if proved else "NOT_MEASURED"})
+    unproved = [row for row in population if row["status"] != "PROVED"]
     return {"threat_requirements_coverage": covered,
+            "required_security_properties": population,
+            "required_requirement_count": len(population),
+            "proved_requirement_count": len(population) - len(unproved),
+            "unproved_requirement_count": len(unproved),
+            "unproved_security_requirements": unproved,
             "security_counterexample_failures": 0,
             "security_metric_targets": {"status": "NOT_MEASURED",
                 "reason": "no source-declared quantitative security bounds; physical threats excluded"},
-            "limitations": ["SecMasking=0 masking evaluation excluded",
-                            "power/EM/timing side-channel and physical fault resistance NOT_MEASURED"]}
+            "limitations": ["retained three-task component evidence is not complete AES security coverage",
+                            "no conditional or physical property is waived by this reader"]}
 
 
 def _d73(project: Path, manifest: dict, inputs: dict[str, str]) -> dict:
@@ -319,6 +380,11 @@ def execute(project, context):
             metrics = _d73(project, manifest, inputs)
         record.update(component_status="PASS", reason=None,
                       input_sha256=inputs, metrics=metrics)
+        if row_id == "D17" and metrics["unproved_requirement_count"]:
+            record.update(component_status="NOT_MEASURED",
+                          native_component_status="PASS",
+                          reason="D17_SOURCE_REQUIRED_SECURITY_PROPERTIES_UNPROVED",
+                          default_row_status="NOT_MEASURED", completed=False)
     except Refusal as exc:
         record.update(component_status=exc.status, reason=exc.code, detail=str(exc))
     write_json(attempt / "receipt.json", record)
