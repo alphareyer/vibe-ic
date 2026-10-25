@@ -2315,10 +2315,13 @@ def classify_sdf_errors(transcript: str, *, compile_log: str, sdf_text: str,
             unexplained.append(m.group(0))
     # Native stdout/stderr can fragment a diagnostic. Every raw error still
     # owes an explanation even if its filename/line grammar was damaged.
+    unparsed = 0
     for raw in _SDF_ERROR_RE.finditer(transcript or ""):
         if raw.start() not in covered:
+            unparsed += 1
             unexplained.append((transcript or "")[raw.start():].split("\n", 1)[0])
     return {"total": sum(by_class.values()) + len(unexplained),
+            "unparsed": unparsed,
             "by_class": by_class, "unexplained": len(unexplained),
             "unexplained_samples": unexplained[:5]}
 

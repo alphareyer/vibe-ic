@@ -552,6 +552,7 @@ def test_fragmented_and_well_formed_sdf_errors_are_each_counted_once():
     result = sgs.classify_sdf_errors(text, compile_log='', sdf_text=SDF_HEAD,
                                     explainer=sgs.SdfErrorExplainer('', {}))
     assert result['total'] == sgs.sdf_error_count(text) == 2
+    assert result['unparsed'] == 1
     assert result['unexplained'] == 2
 
 

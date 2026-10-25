@@ -412,9 +412,11 @@ class TestPatternReplay(Step):
                         text, compile_log=FilePath(compile_log).read_text(errors="replace"),
                         sdf_text=FilePath(timing["sdf"]).read_text(),
                         explainer=sgs._explainer_for(FilePath(netlist), manifest.get("models") or []))
-                    unclassified = max(0, annotation["sdf_errors"] - classes["total"])
+                    missing = max(0, annotation["sdf_errors"] - classes["total"])
+                    # Unparsed headers are already included in unexplained.
+                    unclassified = missing + classes.get("unparsed", 0)
                     annotation.update(sdf_errors_by_class=classes["by_class"],
-                                      sdf_errors_unexplained=classes["unexplained"] + unclassified,
+                                      sdf_errors_unexplained=classes["unexplained"] + missing,
                                       unclassified_sdf_errors=unclassified,
                                       unexplained_samples=classes["unexplained_samples"])
                     # Same explained-record policy as the existing GLS judge;
