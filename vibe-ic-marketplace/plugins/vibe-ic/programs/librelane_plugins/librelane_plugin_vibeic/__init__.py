@@ -274,26 +274,15 @@ class GateLevelSim(Step):
 
     @staticmethod
     def _run(argv, log: str, limit: int, cwd=None) -> int:
-        with open(log, "w") as sink:
-            try:
-                return subprocess.run(argv, stdout=sink, stderr=subprocess.STDOUT,
-                                      cwd=cwd, timeout=limit).returncode
-            except subprocess.TimeoutExpired:
-                sink.write(f"\nVIBEIC_GLS_TIMEOUT after {limit} s\n")
-                return 124
+        # Reuse complete-stream collection to keep GLS diagnostics source-bound.
+        return TestPatternReplay._run(argv, log, limit, cwd=cwd)
 
 
 @Step.factory.register()
 class TestPatternReplay(Step):
-    """Replay producer-owned test patterns on their bound implementation.
-
-    The producer supplies one self-checking testbench per pattern case.  This
-    step owns only native compile/simulation and the blocking readback: every
-    pattern file must still hash to the manifest, every process must exit zero,
-    and every transcript must name the exact case and vector population it
-    checked.  A later DFT producer can therefore feed this shared native step
-    directly without a row-specific adapter.
-    """
+    """Replay producer-owned self-checking testbenches for manifest-bound patterns.
+    Require matching hashes, zero exits and exact case/vector witnesses;
+    keep every raw SDF error accounted for until classified."""
 
     id = "Vibeic.TestPatternReplay"
     name = "Native test-pattern replay"
@@ -309,9 +298,8 @@ class TestPatternReplay(Step):
 
     @staticmethod
     def _run(argv, log: str, limit: int, cwd=None) -> int:
-        # Keep native stdout/stderr separate until complete lines are written.
-        # SDF diagnostics are emitted in fragments; sharing one fd can splice
-        # VPI stderr into an SDF ERROR and make its source record unparseable.
+        # Collect complete stdout/stderr separately so VPI fragments cannot splice
+        # into and corrupt the source-bound SDF error record.
         with open(log, "w") as stdout, open(log + ".stderr", "w") as stderr:
             try:
                 rc = subprocess.run(argv, stdout=stdout, stderr=stderr,
@@ -416,9 +404,11 @@ class TestPatternReplay(Step):
                         text, compile_log=FilePath(compile_log).read_text(errors="replace"),
                         sdf_text=FilePath(timing["sdf"]).read_text(),
                         explainer=sgs._explainer_for(FilePath(netlist), manifest.get("models") or []))
-                    unclassified = max(0, annotation["sdf_errors"] - classes["total"])
+                    missing = max(0, annotation["sdf_errors"] - classes["total"])
+                    # Unparsed headers are already included in unexplained.
+                    unclassified = missing + classes.get("unparsed", 0)
                     annotation.update(sdf_errors_by_class=classes["by_class"],
-                                      sdf_errors_unexplained=classes["unexplained"] + unclassified,
+                                      sdf_errors_unexplained=classes["unexplained"] + missing,
                                       unclassified_sdf_errors=unclassified,
                                       unexplained_samples=classes["unexplained_samples"])
                     # Same explained-record policy as the existing GLS judge;

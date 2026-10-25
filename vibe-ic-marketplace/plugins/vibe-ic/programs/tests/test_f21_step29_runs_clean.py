@@ -527,3 +527,43 @@ def test_statement_clock_binding_keeps_unmeasured_or_unrepresentable_clocks_refu
     with pytest.raises(ValueError, match=code):
         sgs.bind_bench_clock(text, 'dut', {
             'sdc': 'source-control.sdc', 'unit_source': 'declared SDC', 'clocks_s': clocks})
+
+
+def test_fragmented_sdf_error_remains_unexplained_and_blocks_the_tool_arm(tmp_path):
+    folder = tmp_path / 'native'
+    folder.mkdir()
+    stdout = write(folder / 'stdout.log',
+        'SDF INFO: x.sdf:1: Putting delay on a native path\n'
+        'SDF ERROR: /run/openroad-VPI error: interleaved native stderr\n'
+        '[TB functional] PASS\n')
+    compile_log = write(folder / 'compile.log', '')
+    put(folder / 'gls_runs.json', {'runs': [{'corner': 'tt', 'case': 'functional',
+        'sdf': str(write(folder / 'x.sdf', SDF_HEAD)), 'compile_rc': 0, 'sim_rc': 0,
+        'compile_log': str(compile_log), 'stdout': str(stdout)}]})
+    result = sgs.judge_tool_arm(folder, {'cases': [{'id': 'functional'}]})
+    assert result['corners']['tt']['sdf_errors'] == 1
+    assert result['corners']['tt']['sdf_errors_unexplained'] == 1
+    assert result['verdict'] == 'FAIL'
+
+
+def test_fragmented_and_well_formed_sdf_errors_are_each_counted_once():
+    text = ('SDF ERROR: truncated native header\n'
+            'SDF ERROR: x.sdf:3: unrecognized native record\n')
+    result = sgs.classify_sdf_errors(text, compile_log='', sdf_text=SDF_HEAD,
+                                    explainer=sgs.SdfErrorExplainer('', {}))
+    assert result['total'] == sgs.sdf_error_count(text) == 2
+    assert result['unparsed'] == 1
+    assert result['unexplained'] == 2
+
+
+def test_native_gls_collector_preserves_complete_stdout_and_stderr_lines(tmp_path):
+    from librelane_plugin_vibeic import GateLevelSim
+    log = tmp_path / 'native.log'
+    program = ('import sys;sys.stdout.write("SDF ERROR: x.sdf");sys.stdout.flush();'
+               'sys.stderr.write("native VPI stderr\\n");sys.stderr.flush();'
+               'sys.stdout.write(":3: complete error\\n");sys.stdout.flush()')
+    rc = GateLevelSim._run([sys.executable, '-c', program], str(log), 30)
+    assert rc == 0
+    assert log.read_text().splitlines() == [
+        'SDF ERROR: x.sdf:3: complete error', '', 'native VPI stderr']
+    assert (tmp_path / 'native.log.stderr').read_text() == 'native VPI stderr\n'
