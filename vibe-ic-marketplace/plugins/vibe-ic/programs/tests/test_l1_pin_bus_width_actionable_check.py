@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _HERE = Path(__file__).resolve().parent
 _PROG = _HERE.parent / "l1_pin_bus_width_actionable_check.py"
 
@@ -68,6 +70,28 @@ _GOOD_PINS = [
     {"name": "accum_bus", "mode": "output", "width": 16, "msb": 15, "lsb": 0},
     {"name": "ready_flag", "mode": "output", "width": 1, "msb": 0, "lsb": 0},
 ]
+
+
+@pytest.mark.parametrize('owner', ['state_word', 'internal_state'])
+def test_another_signals_range_does_not_bind_the_next_scalar(tmp_path, owner):
+    _write_input(tmp_path, 'docs/state_table.md',
+                 f'Present {owner}[5:0] | Next {owner}[5:0] ready_flag=0, '
+                 f'Next {owner}[5:0] ready_flag=1\n')
+    _write_l1(tmp_path, [{'name': 'ready_flag', 'mode': 'input', 'width': 1,
+                          'msb': 0, 'lsb': 0}])
+    rc, report = _run(tmp_path)
+    assert rc == 0, report
+    assert report['bus_confirmed'] == 0
+
+
+def test_a_real_range_before_a_declared_pin_still_requires_bus_width(tmp_path):
+    _write_input(tmp_path, 'rtl/ports.sv',
+                 'module neutral(input [5:0] ready_flag); endmodule\n')
+    _write_l1(tmp_path, [{'name': 'ready_flag', 'mode': 'input', 'width': 1,
+                          'msb': 0, 'lsb': 0}])
+    rc, report = _run(tmp_path)
+    assert rc == 1, report
+    assert report['bus_confirmed'] == 1
 
 
 # ------------------------------------------------- POSITIVE: well-formed

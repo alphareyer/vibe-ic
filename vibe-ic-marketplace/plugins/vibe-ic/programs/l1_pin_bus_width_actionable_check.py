@@ -137,7 +137,6 @@ _RANGE_ANY = re.compile(_RANGE_BODY)
 # precedes an unrelated token contributes nothing. Only spaces/tabs may
 # separate the two — allowing a newline would bind a range at the end of
 # one declaration to the identifier starting the next.
-_RANGE_THEN_NAME = re.compile(_RANGE_BODY + r"[ \t]*([A-Za-z_]\w*)")
 
 # Characters that, immediately before a pin name, mean the token is NOT a
 # standalone signal reference. Measured false positive: a real design's L8
@@ -146,6 +145,10 @@ _RANGE_THEN_NAME = re.compile(_RANGE_BODY + r"[ \t]*([A-Za-z_]\w*)")
 # 38-bit bus for an unrelated stub row. `.` is excluded for the same reason
 # (`struct.field[3:0]` / `pkg::x.y[3:0]` is a member, not the port).
 _LEFT_BOUNDARY = r"(?<![A-Za-z0-9_/.\\-])"
+# A range already attached to another signal is not an HDL declaration
+# of the next token (for example, a state vector beside a scalar table input).
+_RANGE_THEN_NAME = re.compile(
+    _LEFT_BOUNDARY + _RANGE_BODY + r"[ \t]*([A-Za-z_]\w*)")
 
 # HDL keywords can never be soundly matched by this derivation: the text
 # `output [Width-1:0]` is the DECLARATION SYNTAX of some other port, not a
