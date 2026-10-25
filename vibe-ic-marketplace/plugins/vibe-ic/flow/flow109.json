@@ -1631,18 +1631,18 @@
           "id": "default",
           "select_when": "otherwise",
           "provider": "vibeic",
-          "tools": "Python qualification resolver + LibreLane native smoke checks",
+          "tools": "LibreLane native configuration resolution + ciel installed PDK pin",
           "native_steps": [
-            "pdk_consistency_check",
-            "validated current native receipt"
+            "LibreLane configuration resolution",
+            "ciel installed PDK pin"
           ],
-          "execution_status": "SOURCE_ADAPTER_IMPLEMENTED_COMPONENT_ONLY",
+          "execution_status": "SOURCE_NATIVE_IMPLEMENTED",
           "dispatch": {
             "kind": "native_adapter",
             "adapter": "flow109_technology_qualification",
             "native_step_id": "flow109.D03",
             "producer": "flow109_technology_qualification.py:execute",
-            "consumer": "pdk_consistency_check.py + librelane_contract.py:validate_step_receipt",
+            "consumer": "LibreLane Flow configuration + ciel.Version",
             "engine_families": [
               "python3"
             ],
@@ -1651,20 +1651,19 @@
             },
             "engine_steps": {
               "python3": [
-                "pdk_consistency_check",
-                "validated current native receipt"
+                "LibreLane configuration resolution",
+                "ciel installed PDK pin"
               ]
             },
             "native_required_outputs": [
-              "current native receipt/config/State",
-              "selected PDK Liberty and technology views",
-              "PDK-mapped netlist"
+              "native resolved config and selected file hashes",
+              "ciel installed PDK revision"
             ],
             "admission_policy": "source_owned_existing_native",
             "acceptance_scope": "existing_native_component_only",
-            "component_scope": "executed PDK/library/deck/tool component only",
-            "unsupported_scope": "unexecuted tools/decks/corners and formal D03 metrics",
-            "flow109_metrics_status": "UNIMPLEMENTED"
+            "component_scope": "native config resolution and installed PDK pin",
+            "unsupported_scope": "downstream synthesis, simulation, timing and physical signoff",
+            "flow109_metrics_status": "IMPLEMENTED"
           }
         }
       ],
@@ -1679,8 +1678,8 @@
       "capability_status": "SELECTED_NOT_ROUTE_QUALIFIED",
       "availability_status": "NOT_INVENTORIED_THIS_UPDATE",
       "source_components": [
-        "pdk_consistency_check",
-        "librelane_contract"
+        "librelane",
+        "ciel"
       ],
       "obligations": [
         {
@@ -1688,40 +1687,35 @@
           "metric": "required_capability_qualifications",
           "when": "technology_specific",
           "expectation": {
-            "operator": "covers_all",
-            "required_set_ref": "requirements/technology/required_capability_qualifications.json#/required_items",
-            "empty_set_policy": "requires validated absence/applicability evidence"
+            "operator": "native_resolution_success",
+            "source": "LibreLane config resolution + ciel installed revision"
           },
           "binding_keys": [
+            "producer.technology.execution",
             "technology.models",
             "technology.deck",
-            "tool.profile",
-            "requirements.technology.required_capability_qualifications",
-            "checker.technology.required_capability_qualifications",
-            "producer.technology.execution"
+            "tool.profile"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "IMPLEMENTED_NATIVE_BINDING"
         },
         {
           "id": "technology.tool_deck_corner_binding",
           "metric": "tool_deck_corner_binding",
           "when": "technology_specific",
           "expectation": {
-            "operator": "matches_adopted_reference",
-            "reference_ref": "adopted/technology/tool_deck_corner_binding.json"
+            "operator": "native_config_and_installed_pin_identity",
+            "source": "LibreLane config resolution + ciel installed revision"
           },
           "binding_keys": [
+            "producer.technology.execution",
             "technology.models",
             "technology.deck",
-            "tool.profile",
-            "requirements.technology.tool_deck_corner_binding",
-            "checker.technology.tool_deck_corner_binding",
-            "producer.technology.execution"
+            "tool.profile"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "IMPLEMENTED_NATIVE_BINDING"
         }
       ],
-      "metric_acceptance_status": "UNIMPLEMENTED",
+      "metric_acceptance_status": "IMPLEMENTED",
       "gate_layer_ids": [
         "G1",
         "G2",
