@@ -46,8 +46,7 @@ def collect(run_dir: Path, mapping: Path, *, returncode: int,
                            "metrics": (state or {}).get("metrics", {}),
                            "config": str(config_file),
                            "scope": "Native step completion; native checkers own all thresholds."})
-    # A failed attempted step has a config but never emitted a completed State.
-    # Later unstarted rows remain NOT_RUN; rc zero alone never supplies a PASS.
+    # Missing State stays NOT_RUN except an attempted failure; rc0 supplies no PASS.
     incomplete = next((v for v in reversed(operations) if v["status"] == "NOT_RUN"), None)
     if returncode not in (0, 130, 137, 143) and incomplete is not None:
         incomplete["status"] = "FAIL"
@@ -93,6 +92,7 @@ def collect(run_dir: Path, mapping: Path, *, returncode: int,
 
 
 def main():
+    from _atomic_artefact import write_json
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("mapping", type=Path)
@@ -107,11 +107,11 @@ def main():
     result = collect(args.run_dir, args.mapping, returncode=args.returncode,
                      accepted_ids=ledger.get("pass_ids", []),
                      features=selection.get("features") if args.selection else None)
-    args.output.write_text(json.dumps(result, indent=2) + "\n")
+    write_json(args.output, result, ensure_ascii=True)
     if args.rows_dir:
         args.rows_dir.mkdir(parents=True, exist_ok=True)
         for row in result["rows"]:
-            (args.rows_dir / (row["step"] + ".json")).write_text(json.dumps(row, indent=2) + "\n")
+            write_json(args.rows_dir / (row["step"] + ".json"), row, ensure_ascii=True)
     print(json.dumps({key: result[key] for key in ("counts", "native_operation_counts")}))
 
 

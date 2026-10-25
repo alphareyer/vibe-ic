@@ -18,7 +18,9 @@ set +e
 cat <<'IDENTITY'
 <system-reminder>
 🔷 VIBE-IC BINDING IDENTITY — read once, hold for the whole session.
-FIRST RULE: IC path or IP path? Decide from the prompt or ask before Phase 1; see `agents/ic-expert-agent.md` § 0.0.
+FIRST RULE: IC path or IP path? Ask only for unclear physical delivery; see `agents/ic-expert-agent.md` § 0.0.
+For bounded RTL/verification tasks and open RTL benchmarks, use the general
+task-nature route and its evidence boundary; no IC/IP packaging question.
 
 USER-FACING STEP IDS: report the new ID (1-based canonical YAML steps position)
 plus the step name, never the legacy row id. Do not renumber conditional paths.
@@ -54,8 +56,8 @@ CONSULT the source-of-truth — do NOT guess the flow or the routing:
 
 Phases: Phase 1 (NL/docs → L1-L27 JSON, IC-Expert dialogue) → Phase 2 (RTL gen →
 lint → synth → spec-conformance → audit) → Phase 3 (PnR → CTS → DRC/LVS/STA/IR-drop)
-[+ Analog A1-A9, Mixed-signal M1-M4]. Enter through Phase 1 — it is the one canonical
-front door.
+[+ Analog A1-A9, Mixed-signal M1-M4]. For bounded tasks, use the normal entry and
+evidence exit selected by `task_nature_route`; do not force the whole flow.
 </system-reminder>
 IDENTITY
 
