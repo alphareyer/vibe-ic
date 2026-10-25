@@ -2290,7 +2290,9 @@ def classify_sdf_errors(transcript: str, *, compile_log: str, sdf_text: str,
             cells.append((idx, m.group(1)))
     by_class: Dict[str, int] = {}
     unexplained: List[str] = []
+    covered = set()
     for m in _SDF_ERROR_LINE_RE.finditer(transcript or ""):
+        covered.add(m.start())
         lineno, msg = int(m.group(2)), m.group(3)
         cls = None
         mp = _MODPATH_MSG_RE.match(msg)
@@ -2311,6 +2313,11 @@ def classify_sdf_errors(transcript: str, *, compile_log: str, sdf_text: str,
             by_class[cls] = by_class.get(cls, 0) + 1
         else:
             unexplained.append(m.group(0))
+    # Native stdout/stderr can fragment a diagnostic. Every raw error still
+    # owes an explanation even if its filename/line grammar was damaged.
+    for raw in _SDF_ERROR_RE.finditer(transcript or ""):
+        if raw.start() not in covered:
+            unexplained.append((transcript or "")[raw.start():].split("\n", 1)[0])
     return {"total": sum(by_class.values()) + len(unexplained),
             "by_class": by_class, "unexplained": len(unexplained),
             "unexplained_samples": unexplained[:5]}

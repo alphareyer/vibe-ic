@@ -274,13 +274,9 @@ class GateLevelSim(Step):
 
     @staticmethod
     def _run(argv, log: str, limit: int, cwd=None) -> int:
-        with open(log, "w") as sink:
-            try:
-                return subprocess.run(argv, stdout=sink, stderr=subprocess.STDOUT,
-                                      cwd=cwd, timeout=limit).returncode
-            except subprocess.TimeoutExpired:
-                sink.write(f"\nVIBEIC_GLS_TIMEOUT after {limit} s\n")
-                return 124
+        # The existing native pattern collector preserves both streams without
+        # splicing VPI stderr fragments into source-bound SDF diagnostics.
+        return TestPatternReplay._run(argv, log, limit, cwd=cwd)
 
 
 @Step.factory.register()
