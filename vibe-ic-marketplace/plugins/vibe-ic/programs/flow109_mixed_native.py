@@ -25,8 +25,6 @@ from _atomic_artefact import write_json
 SCHEMA = "vibeic.flow109.mixed-native.v1"
 INPUT_SCHEMA = "vibeic.flow109.mixed-native-input.v1"
 COMPLETION_SCHEMA = "vibeic.flow109.default-row-completion.v1"
-PINNED_IMAGE = ("ghcr.io/vibeic/vibeic-eda@sha256:"
-                "0fc30ecd1307a11bd7757d1c5710127cd88e245059f29eab8b52e38ba4d60406")
 ROWS = {
     "M06": {"legacy": "M3", "scope": "candidate", "obligations": (
         "base_M5.candidate_ams_scenarios", "base_M5.candidate_ams_performance")},
@@ -37,6 +35,12 @@ ROWS = {
     "M09": {"legacy": "M4", "scope": "signoff", "obligations": (
         "base_M7.mixed_requirement_evidence", "base_M7.mixed_model_final_geometry_identity")},
 }
+
+
+def _runtime_image(project):
+    """Resolve the exact execution image now; never store a release digest."""
+    import librelane_contract as librelane
+    return librelane.resolve_image(Path(project), record=False)
 
 
 class Refusal(RuntimeError):
@@ -136,7 +140,7 @@ def _final_parasitic_binding(project, manifest):
             "inputs": inputs}
 
 
-def _m09_prerequisites(project, manifest):
+def _m09_prerequisites(project, manifest, runtime_image=None):
     """Re-open the current M08 completion and every declared A19 block."""
     import analog_hardmacro_check as hardmacro
     import analog_native_flow as analog
@@ -167,12 +171,13 @@ def _m09_prerequisites(project, manifest):
     inputs = {str(m08_path.relative_to(project)): _sha(m08_path),
               str(request_path.relative_to(project)): _sha(request_path),
               str(status_path.relative_to(project)): _sha(status_path)}
+    runtime_image = runtime_image or _runtime_image(project)
     packages = {}
     for row in rows:
         block = row["block"]
         producer = row.get("producer_context") or {}
         in_views, out_views = row.get("input_views"), row.get("output_views")
-        if (row.get("status") != "PASS" or producer.get("image") != PINNED_IMAGE
+        if (row.get("status") != "PASS" or producer.get("image") != runtime_image
                 or producer.get("driver_sha256") != status.get("source_sha256")
                 or not isinstance(in_views, dict) or not in_views
                 or not isinstance(out_views, dict) or not out_views):
@@ -318,9 +323,10 @@ def _prepare(project, context):
         raise Refusal("MIXED_ROW_CONTEXT_MISMATCH", "source-owned dispatch required")
     manifest_path = project / "input/flow109" / (step + ".json")
     manifest = _read(manifest_path)
+    runtime_image = _runtime_image(project)
     if (manifest.get("schema") != INPUT_SCHEMA or manifest.get("step_id") != step
             or manifest.get("scope") != ROWS[step]["scope"]
-            or manifest.get("image") != PINNED_IMAGE
+            or manifest.get("image") != runtime_image
             or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", str(manifest.get("top") or ""))
             or not isinstance(manifest.get("pdk"), str) or not manifest["pdk"]):
         raise Refusal("MIXED_ROW_INPUT_INVALID", str(manifest_path))
@@ -332,7 +338,7 @@ def _prepare(project, context):
     if step != "M07" and manifest.get("geometry_sha256") != _sha(
             project / "phase3/mixed_signal/top_merged.gds"):
         raise Refusal("MIXED_ROW_GEOMETRY_IDENTITY_MISMATCH", step)
-    return manifest, current, operation_sources()
+    return manifest, current, operation_sources(), runtime_image
 
 
 def execute(project, context):
@@ -344,7 +350,7 @@ def execute(project, context):
               "component_status": "NOT_MEASURED", "native_started": False,
               "flow109_acceptance": "NOT_MEASURED", "whole_flow_acceptance": "NOT_MEASURED"}
     try:
-        manifest, inputs, sources = _prepare(project, context)
+        manifest, inputs, sources, runtime_image = _prepare(project, context)
         producer, gates = _command_plan(project, step, manifest, attempt)
         records = []
         for index, argv in enumerate([producer, *gates]):
@@ -361,7 +367,8 @@ def execute(project, context):
                    for path in attempt.rglob("*") if path.is_file()}
         result.update(component_status="PASS", reason="MIXED_ROW_EXISTING_NATIVE_CHAIN_PASS",
                       manifest=manifest, input_sha256=inputs, source_sha256=sources,
-                      commands=records, evidence=evidence, output_sha256=outputs)
+                      runtime_image=runtime_image, commands=records, evidence=evidence,
+                      output_sha256=outputs)
     except Refusal as exc:
         result.update(component_status=exc.status, reason=exc.code, detail=str(exc))
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -405,9 +412,10 @@ def consume_default_row_completion(project, context, component):
                     "component_receipt": {"path": str(path.relative_to(project)), "sha256": _sha(path)}}
         if raw.get("component_status") != "PASS":
             raise Refusal(raw.get("reason") or "MIXED_ROW_COMPLETION_NOT_MEASURED", "component did not pass")
-        manifest, inputs, sources = _prepare(project, context)
+        manifest, inputs, sources, runtime_image = _prepare(project, context)
         if raw.get("manifest") != manifest or raw.get("input_sha256") != inputs \
-                or raw.get("source_sha256") != sources:
+                or raw.get("source_sha256") != sources \
+                or raw.get("runtime_image") != runtime_image:
             raise Refusal("MIXED_ROW_COMPLETION_SOURCE_OR_INPUT_STALE", step)
         for name, expected in (raw.get("output_sha256") or {}).items():
             output = _local(project, name)

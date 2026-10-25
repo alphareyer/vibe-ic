@@ -12,6 +12,9 @@ import pytest
 import flow109_mixed_native as mixed
 
 
+TEST_IMAGE = "registry.example/vibeic-eda@sha256:" + "a" * 64
+
+
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -38,7 +41,7 @@ def project(tmp_path, step, *, wrong=False):
     manifest = {
         "schema": mixed.INPUT_SCHEMA, "step_id": step,
         "scope": mixed.ROWS[step]["scope"], "top": "chip_top", "pdk": "gf180mcuD",
-        "image": mixed.PINNED_IMAGE,
+        "image": TEST_IMAGE,
         "input_sha256": {"input.bin": ("0" * 64 if wrong else sha(source))},
         **({"required_scenarios": ["functional"]} if step in ("M06", "M08") else {}),
         **({"d69_receipt": {"path": "reports/flow109/D69/current/component.json"}}
@@ -52,6 +55,7 @@ def project(tmp_path, step, *, wrong=False):
 
 
 def install_fakes(monkeypatch):
+    monkeypatch.setattr(mixed, "_runtime_image", lambda _project: TEST_IMAGE)
     monkeypatch.setattr(mixed, "_current_inputs",
                         lambda project, _step, _top, _manifest=None:
                         {"input.bin": sha(project / "input.bin")})
@@ -108,6 +112,20 @@ def test_wrong_value_refuses_before_any_native_command_then_restoration_passes(m
     restored = mixed.execute(root, context("M06"))
     assert restored["component_status"] == "PASS"
     assert len(calls) == 2
+
+
+def test_manifest_image_must_match_runtime_resolution(monkeypatch, tmp_path):
+    install_fakes(monkeypatch)
+    calls = []
+    monkeypatch.setattr(mixed, "_run", lambda *args, **kwargs: calls.append(args))
+    root = project(tmp_path, "M07")
+    monkeypatch.setattr(mixed, "_runtime_image",
+                        lambda _project: "registry.example/vibeic-eda@sha256:" + "b" * 64)
+    refused = mixed.execute(root, context("M07"))
+    assert refused["component_status"] == "NOT_MEASURED"
+    assert refused["reason"] == "MIXED_ROW_INPUT_INVALID"
+    assert refused["native_started"] is False
+    assert calls == []
 
 
 def test_changed_consumed_input_refuses_completion_without_replay(monkeypatch, tmp_path):
@@ -248,7 +266,7 @@ def test_m09_reader_requires_current_m08_and_complete_current_a19(monkeypatch, t
         "native_package_summary": {"design_bound_blocks": ["adc"]}}))
     status = {"source_sha256": sha(Path(analog.__file__)), "steps": [{
         "step": "A19", "block": "adc", "status": "PASS",
-        "producer_context": {"image": mixed.PINNED_IMAGE,
+        "producer_context": {"image": TEST_IMAGE,
                              "driver_sha256": sha(Path(analog.__file__))},
         "input_views": {str(input_view): sha(input_view)},
         "output_views": {str(signoff): sha(signoff)}}]}
@@ -266,11 +284,11 @@ def test_m09_reader_requires_current_m08_and_complete_current_a19(monkeypatch, t
 
     monkeypatch.setattr(mixed, "consume_default_row_completion", lambda *_args: {
         "default_row_status": "PASS", "completed": True})
-    bound = mixed._m09_prerequisites(root, manifest)
+    bound = mixed._m09_prerequisites(root, manifest, TEST_IMAGE)
     assert set(bound["a19_packages"]) == {"adc"}
     input_view.write_text("stale analog source\n")
     with pytest.raises(mixed.Refusal, match="MIXED_ROW_A19_VIEW_STALE"):
-        mixed._m09_prerequisites(root, manifest)
+        mixed._m09_prerequisites(root, manifest, TEST_IMAGE)
 
 
 def test_registry_dispatch_is_narrowly_scoped_to_assigned_rows():
