@@ -11459,12 +11459,12 @@
           "status": "UNIMPLEMENTED_METRIC_BINDING"
         },
         {
-          "id": "base_30.candidate_sdf_annotation",
-          "metric": "candidate_sdf_annotation",
+          "id": "base_30.candidate_sdf_generation",
+          "metric": "candidate_sdf_generation",
           "when": "digital_physical",
           "expectation": {
             "operator": "covers_all",
-            "required_set_ref": "requirements/base_30/candidate_sdf_annotation.json#/required_items",
+            "required_set_ref": "requirements/base_30/candidate_sdf_generation.json#/required_items",
             "empty_set_policy": "requires validated absence/applicability evidence"
           },
           "binding_keys": [
@@ -11472,8 +11472,8 @@
             "parasitics.candidate",
             "netlist.logical",
             "mission.profile",
-            "requirements.base_30.candidate_sdf_annotation",
-            "checker.base_30.candidate_sdf_annotation",
+            "requirements.base_30.candidate_sdf_generation",
+            "checker.base_30.candidate_sdf_generation",
             "producer.base_30.execution"
           ],
           "status": "UNIMPLEMENTED_METRIC_BINDING"
