@@ -307,7 +307,21 @@ class TestPatternReplay(Step):
                  "Wall-clock limit for compile and replay, seconds.", default=900),
     ]
 
-    _run = staticmethod(GateLevelSim._run)
+    @staticmethod
+    def _run(argv, log: str, limit: int, cwd=None) -> int:
+        # Keep native stdout/stderr separate until complete lines are written.
+        # SDF diagnostics are emitted in fragments; sharing one fd can splice
+        # VPI stderr into an SDF ERROR and make its source record unparseable.
+        with open(log, "w") as stdout, open(log + ".stderr", "w") as stderr:
+            try:
+                rc = subprocess.run(argv, stdout=stdout, stderr=stderr,
+                                    cwd=cwd, timeout=limit).returncode
+            except subprocess.TimeoutExpired:
+                stdout.write(f"\nVIBEIC_GLS_TIMEOUT after {limit} s\n")
+                rc = 124
+        with open(log, "a") as sink:
+            sink.write("\n" + FilePath(log + ".stderr").read_text(errors="replace"))
+        return rc
 
     @staticmethod
     def _sha256(path: str) -> str:
@@ -339,6 +353,25 @@ class TestPatternReplay(Step):
             if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
                 errors.append(f"{case.get('id')}: invalid vector_count")
 
+        timing = manifest.get("timing")
+        netlist = str(state_in[DesignFormat.NETLIST])
+        if timing is not None:
+            if not isinstance(timing, dict):
+                errors.append("invalid timed replay binding")
+                timing = {}
+            sdf = str(timing.get("sdf") or "")
+            if not sdf or not os.path.isfile(sdf) or \
+                    TestPatternReplay._sha256(sdf) != timing.get("sdf_sha256"):
+                errors.append("SDF absent or digest changed")
+            if TestPatternReplay._sha256(netlist) != timing.get("netlist_sha256"):
+                errors.append("timed replay netlist digest changed")
+            for model in manifest.get("models") or []:
+                if not os.path.isfile(model) or TestPatternReplay._sha256(model) != \
+                        (timing.get("model_sha256") or {}).get(model):
+                    errors.append("timed replay model absent or digest changed")
+            for case in cases:
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.$]*", str(case.get("dut_instance") or "")):
+                    errors.append("timed replay DUT instance absent or invalid")
         runs = []
         if not errors:
             netlist = str(state_in[DesignFormat.NETLIST])
@@ -351,14 +384,22 @@ class TestPatternReplay(Step):
                 vvp = os.path.join(folder, f"{cid}.vvp")
                 compile_log = os.path.join(folder, "compile.log")
                 stdout = os.path.join(folder, "stdout.log")
+                bench = str(case["testbench"])
+                if timing is not None:
+                    import sdf_gate_sim as sgs
+                    bench = os.path.join(folder, "timed_tb.v")
+                    FilePath(bench).write_text(sgs.inject_sdf_annotation(
+                        FilePath(case["testbench"]).read_text(), str(case["module"]),
+                        str(case["dut_instance"]), str(timing["sdf"])))
                 argv = ["iverilog", *(manifest.get("compile_flags") or "-g2012").split(),
                         "-s", str(case["module"]), "-o", vvp,
-                        str(case["testbench"]), netlist,
+                        bench, netlist,
                         *map(str, manifest.get("models") or [])]
                 compile_rc = self._run(argv, compile_log, limit)
                 sim_rc = None
                 if compile_rc == 0:
-                    sim_rc = self._run(["vvp", vvp], stdout, limit, cwd=folder)
+                    sim_rc = self._run(["vvp", vvp, *(["-sdf-info"] if timing is not None else [])],
+                                       stdout, limit, cwd=folder)
                 text = FilePath(stdout).read_text(errors="replace") \
                     if os.path.isfile(stdout) else ""
                 marker = (f"VIBEIC_PATTERN_REPLAY PASS {cid} "
@@ -367,13 +408,34 @@ class TestPatternReplay(Step):
                 failed = bool(re.search(r"(?m)^VIBEIC_PATTERN_REPLAY FAIL\b", text))
                 verdict = ("PASS" if compile_rc == 0 and sim_rc == 0
                            and marker_count == 1 and not failed else "FAIL")
+                annotation = None
+                if timing is not None:
+                    annotation = sgs.sdf_annotation_census(text)
+                    annotation["sdf_errors"] = sgs.sdf_error_count(text)
+                    classes = sgs.classify_sdf_errors(
+                        text, compile_log=FilePath(compile_log).read_text(errors="replace"),
+                        sdf_text=FilePath(timing["sdf"]).read_text(),
+                        explainer=sgs._explainer_for(FilePath(netlist), manifest.get("models") or []))
+                    unclassified = max(0, annotation["sdf_errors"] - classes["total"])
+                    annotation.update(sdf_errors_by_class=classes["by_class"],
+                                      sdf_errors_unexplained=classes["unexplained"] + unclassified,
+                                      unclassified_sdf_errors=unclassified,
+                                      unexplained_samples=classes["unexplained_samples"])
+                    # Same explained-record policy as the existing GLS judge;
+                    # every raw refusal remains visible beside its source proof.
+                    if not annotation["annotated"] or annotation["sdf_errors_unexplained"]:
+                        verdict = "FAIL"
                 runs.append({"case": cid, "pattern": case["pattern"],
                              "pattern_sha256": case["pattern_sha256"],
                              "testbench_sha256": case["testbench_sha256"],
                              "vector_count": case["vector_count"],
                              "compile_rc": compile_rc, "sim_rc": sim_rc,
                              "marker_count": marker_count, "verdict": verdict,
-                             "compile_log": compile_log, "stdout": stdout})
+                             "compile_log": compile_log, "stdout": stdout,
+                             **({"sdf_annotation": annotation,
+                                 "sdf_sha256": timing["sdf_sha256"],
+                                 "netlist_sha256": timing["netlist_sha256"]}
+                                if timing is not None else {})})
         result = {"verdict": "PASS" if not errors and runs
                   and all(run["verdict"] == "PASS" for run in runs) else "FAIL",
                   "export_roundtrip_errors": errors, "runs": runs}

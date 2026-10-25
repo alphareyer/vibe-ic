@@ -16010,15 +16010,50 @@
         {
           "id": "default",
           "select_when": "otherwise",
-          "provider": "other",
-          "tools": "Icarus/vvp + Fault/Yosys pattern export/replay",
-          "native_steps": [],
-          "capability_status": "LIMITED_SDF_UNQUALIFIED",
-          "execution_status": "UNIMPLEMENTED"
+          "provider": "librelane",
+          "tools": "Vibeic.TestPatternReplay + native scan-carrier STA",
+          "native_steps": [
+            "Vibeic.TestPatternReplay.compile",
+            "Vibeic.TestPatternReplay.simulate_sdf"
+          ],
+          "capability_status": "SUPPORTED_BOUND_SDF_PATTERN_COMPONENT",
+          "execution_status": "SOURCE_NATIVE_IMPLEMENTED",
+          "dispatch": {
+            "kind": "native_adapter",
+            "adapter": "flow109_final_gls",
+            "native_step_id": "flow109.D72",
+            "producer": "flow109_final_gls.py:execute",
+            "consumer": "Vibeic.TestPatternReplay native readback",
+            "engine_families": [
+              "iverilog",
+              "vvp"
+            ],
+            "engine_executables": {
+              "iverilog": "iverilog",
+              "vvp": "vvp"
+            },
+            "engine_steps": {
+              "iverilog": [
+                "Vibeic.TestPatternReplay.compile"
+              ],
+              "vvp": [
+                "Vibeic.TestPatternReplay.simulate_sdf"
+              ]
+            },
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "component_scope": "source-declared scan-carrier pattern replay plus matching native SDF and STA setup/hold",
+            "flow109_metrics_status": "IMPLEMENTED_D72_RUNTIME",
+            "native_required_outputs": [
+              "pattern_replay_results.json",
+              "same-carrier native STA state",
+              "SDF annotation census"
+            ]
+          }
         }
       ],
       "complementary_tools": [],
-      "capability_status": "LIMITED_SDF_UNQUALIFIED",
+      "capability_status": "SUPPORTED_BOUND_SCAN_SDF_PATTERN_COMPONENT",
       "availability_status": "NOT_INVENTORIED_THIS_UPDATE",
       "source_components": [
         "fault_atpg_run",
@@ -16043,7 +16078,7 @@
             "checker.patterns_final.final_pattern_good_machine_errors",
             "producer.patterns_final.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "SOURCE_NATIVE_IMPLEMENTED"
         },
         {
           "id": "patterns_final.timed_pattern_sdf_identity",
@@ -16062,7 +16097,7 @@
             "checker.patterns_final.timed_pattern_sdf_identity",
             "producer.patterns_final.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "SOURCE_NATIVE_IMPLEMENTED"
         },
         {
           "id": "patterns_final.export_roundtrip_errors",
@@ -16082,10 +16117,10 @@
             "checker.patterns_final.export_roundtrip_errors",
             "producer.patterns_final.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "SOURCE_NATIVE_IMPLEMENTED"
         }
       ],
-      "metric_acceptance_status": "UNIMPLEMENTED",
+      "metric_acceptance_status": "IMPLEMENTED_D72_RUNTIME",
       "gate_layer_ids": [
         "G1",
         "G2",

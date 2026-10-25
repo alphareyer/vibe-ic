@@ -649,3 +649,38 @@ def test_native_blocking_exception_without_measured_fail_stays_infrastructure(tm
         DesignFormat.SDF: {'tt': 'tt.sdf'}}, {'cases': [{'id': 'functional'}]}, native_run=native)
     assert rows[0]['compile_rc'] == 125 and rows[0]['sim_rc'] is None
     assert rows[0]['runner_error']
+
+
+def _d72_context():
+    features = next(p['features'] for p in flow109.load_registry()['reference_profiles']
+                    if p['name'] == 'Digital hard-IP').copy()
+    features.update(requires_dft=True, requires_scan=True)
+    return flow109.execution_context(flow109.resolve_plan(features), 'D72', 'D72')
+
+
+def test_d72_registry_dispatches_existing_native_owner_and_keeps_obligations():
+    context = _d72_context()
+    row = context['resolved_row']
+    assert row['profile']['dispatch']['adapter'] == 'flow109_final_gls'
+    assert context['native_step_id'] == 'flow109.D72'
+    admission = flow109.source_owned_native_admission(context)
+    assert admission['admitted'] is True
+    assert admission['qualification_status'] == 'NOT_CLAIMED'
+    assert {o['metric'] for o in row['obligations']} == {
+        'final_pattern_good_machine_errors', 'timed_pattern_sdf_identity', 'export_roundtrip_errors'}
+
+
+def test_d72_absent_carrier_cannot_become_a_completed_row(tmp_path):
+    result = final_gls.execute(tmp_path, _d72_context())
+    row = flow109._selected_step_result(tmp_path, _d72_context(), result, final_gls)
+    assert row['default_row_status'] == 'NOT_MEASURED'
+    assert row['completed'] is False
+    assert row['native_started'] is False
+
+
+def test_d72_does_not_accept_a_scope_label_instead_of_bound_inputs(tmp_path):
+    _put(tmp_path, 'input/flow109/D72.json', {'scope': 'minimal', 'status': 'PASS'})
+    result = final_gls.execute(tmp_path, _d72_context())
+    assert result['component_status'] == 'NOT_MEASURED'
+    assert result['completed'] is False
+    assert result['native_started'] is False
