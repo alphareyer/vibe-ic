@@ -292,3 +292,93 @@ def test_pinned_encoding_reset_and_default(codes, tmp_path):
 def test_ambiguous_encoding_falls_through(constraint):
     prompt = _pinned_prompt(("2'b01", "2'b10")).split("Use one-hot encoding:")[0]
     assert M.synth(prompt + "Use encoding: " + constraint) is None
+
+
+@pytest.mark.skipif(not _HAVE_TOOLS, reason="iverilog/vvp not installed on this host")
+@pytest.mark.parametrize("codes", [None, 'free-onehot', 'free-onehot-hdl', 'free-onehot-state',
+    'free-onehot-three', ("2'b01", "2'b10"),
+    ("3'b010", "3'b100", "3'b001"), ("4'b0010", "4'b1000")])
+def test_declared_encoding_native_transition_output_and_recovery(codes, tmp_path):
+    """Observe the stated encoding AND function through the ordinary registry."""
+    import spec_artifact_registry as registry
+
+    free_directives = {
+        'free-onehot': 'Implement using a one-hot encoding.',
+        'free-onehot-hdl': 'Implement in Verilog using one-hot encoding.',
+        'free-onehot-state': 'Use a one-hot state encoding.',
+        'free-onehot-three': 'Use one-hot encoding.',
+    }
+    is_free = isinstance(codes, str) and codes in free_directives
+    explicit = codes if isinstance(codes, tuple) else ("2'b01", "2'b10")
+    if codes == 'free-onehot-three':
+        explicit = ("3'b010", "3'b100", "3'b001")
+    prompt = _pinned_prompt(explicit)
+    if codes is None:
+        prompt = prompt.split("Use one-hot encoding:")[0]
+    elif is_free:
+        prompt = prompt.split("Use one-hot encoding:")[0] + free_directives[codes] + '\n'
+    kind, rtl = registry.generate(prompt, "TopModule")
+    assert kind == "mealy_fsm_sequence"
+    assert rtl is not None
+    values = ([0, 1] if codes is None else [1 << i for i in range(len(explicit))] if is_free else
+              [int(code.split('b')[1], 2) for code in codes])
+    width = 1 if codes is None else len(explicit) if is_free else int(codes[0].split("'")[0])
+    checks = [f"rst_n=1;#1;rst_n=0;#1;"
+              f"if(dut.state !== {width}'d{values[1]}) $fatal(1,\"reset code\");rst_n=1;"]
+    for state in range(len(values)):
+        for bit in (0, 1):
+            nxt = (int(bool(bit)) if state in (0, 2) else
+                   2 if len(values) == 3 and not bit else 1)
+            output = bit if state in (0, 2) else 1 - bit
+            checks.append(
+                f"dut.state={width}'d{values[state]};payload={bit};#1;"
+                f"if(flag !== 1'b{output}) $fatal(1,\"Mealy output\");"
+                f"clock=1;#1;if(dut.state !== {width}'d{values[nxt]}) "
+                '$fatal(1,"transition code");clock=0;#1;')
+    if codes is not None:
+        for invalid in (0, (1 << width) - 1):
+            checks.append(f"dut.state={width}'d{invalid};#1;clock=1;#1;"
+                          f"if(dut.state !== {width}'d{values[1]}) "
+                          '$fatal(1,"invalid-state recovery");clock=0;#1;')
+    dut, tb, exe = (tmp_path / n for n in ('dut.sv', 'tb.sv', 'sim.vvp'))
+    dut.write_text(rtl)
+    tb.write_text('module tb;reg clock=0,rst_n=1,payload=0;wire flag;'
+                  'TopModule dut(.*);initial begin\n' + '\n'.join(checks) +
+                  '\n$display("ENCODING_AND_BEHAVIOR_PASS");$finish;end endmodule\n')
+    compile_result = subprocess.run(
+        ['iverilog', '-g2012', '-s', 'tb', '-o', str(exe), str(dut), str(tb)],
+        capture_output=True, text=True, timeout=30)
+    assert compile_result.returncode == 0, compile_result.stderr
+    result = subprocess.run(['vvp', str(exe)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'ENCODING_AND_BEHAVIOR_PASS' in result.stdout
+
+
+@pytest.mark.parametrize('suffix', [
+    "Use one-hot encoding. Use binary encoding.",
+    "Do not use one-hot encoding.",
+    "Use one-hot encoding. Idle: 2'b01, Wait: 2'b10.",
+    "Use one-hot encoding. state[0] corresponds to Wait.",
+    "Use one-hot encoding. Foreign=2'h1.",
+    "Use one-hot encoding. Idle: 2, Wait: 1.",
+    "Use one-hot encoding. Idle uses bit 1.",
+    "Use one-hot encoding. The code for Wait is 1.",
+    "Use one-hot encoding. Idle uses the least significant bit.",
+    "Use one-hot encoding. The state Wait has value 1.",
+    "Use one-hot encoding. Wait belongs to value 1.",
+    "Use one-hot encoding. Do not reset to state Wait.",
+    "Use one-hot encoding. If payload is high, reset to state Wait.",
+    "Use one-hot encoding. Reset state is Wait=1.",
+    "Use one-hot encoding. Reset to state Wait with value 1.",
+    "Use one-hot encoding. Reset state is Absent.",
+])
+def test_free_onehot_does_not_hide_other_encoding_constraints(suffix):
+    prompt = _pinned_prompt(("2'b01", "2'b10")).split('Use one-hot encoding:')[0]
+    assert M.synth(prompt + suffix) is None
+
+
+def test_free_onehot_keeps_unparsed_transition_tail_visible():
+    prompt = _pinned_prompt(("2'b01", "2'b10")).split('Use one-hot encoding:')[0]
+    prompt = prompt.replace('Wait --payload=0 (flag=1)--> Wait',
+                            'Wait --payload=0 (flag=1)--> Wait=1')
+    assert M.synth(prompt + 'Use one-hot encoding.') is None

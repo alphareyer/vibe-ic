@@ -146,17 +146,28 @@ def _direction_relation(text: str, outs: Sequence[str],
                         table_outs: Sequence[Tuple[str, ...]]) -> Optional[Tuple[str, str]]:
     """A single source-owned comparison and the output it explicitly asserts."""
     spare = set(outs) - {n for row in table_outs for n in row}
-    clauses = [s.strip() for s in re.split(r"[.;]|\n\s*\n", text) if re.search(r"\bprevious\b", s, re.I)]
+    # Descriptive mentions of an earlier sample are not conditions. Keep every
+    # comparative/normative previous-value clause, including unsupported forms,
+    # so an extra conflicting condition cannot disappear during extraction.
+    clauses = [s.strip() for s in re.split(r"[.;]|\n\s*\n", text)
+               if re.search(r"\bprevious\b", s, re.I) and (
+                   re.search(r"\b(?:current|present|now)\b", s, re.I)
+                   or re.search(r"\bprevious\b.*\b(?:lower|higher|less|greater|equal|different|same|above|below|larger|smaller)\b", s, re.I | re.S)
+                   or re.search(r"\b(?:lower|higher|less|greater|equal|same|above|below|larger|smaller)\s+(?:than|to|as)\s+(?:the\s+)?previous\b", s, re.I)
+                   or re.search(r"\b(?:should|must|shall)\b", s, re.I)
+                   or re.match(r"\s*(?:if|when|unless)\b", s, re.I))]
     if len(spare) != 1 or len(clauses) != 1:
         return None
     relation = re.fullmatch(
         r"If (?:the sensor change indicates that )?the previous (level|zone) "
         r"(?:was|is) (lower|higher) than the current \1, "
-        r"(?:the [\w ]+ \(controlled by (\w+)\)|(\w+)) should be (?:enabled|asserted)",
+        r"(?:(?:the [\w ]+ \(controlled by (\w+)\)|(\w+)) should be (?:enabled|asserted)"
+        r"|the [\w ]+ should be increased by opening the [\w ]+ \(controlled by (\w+)\))",
         " ".join(clauses[0].split()), re.I)
-    if relation is None or (relation[3] or relation[4]) not in spare:
+    output = (relation[3] or relation[4] or relation[5]) if relation else None
+    if output not in spare:
         return None
-    return (relation[3] or relation[4]), (">" if relation[2].lower() == "lower" else "<")
+    return output, (">" if relation[2].lower() == "lower" else "<")
 
 
 def _header_ports_verbatim(text: str) -> Optional[str]:

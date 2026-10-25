@@ -250,3 +250,30 @@ audit. This guarantees that different agents executing this same SKILL.md
 produce reports containing the same required elements, even when the prose
 inside each element differs. Missing elements are the single largest
 source of skill-execution non-determinism.
+
+### Skill: Match structural evidence to the claimed representation
+
+Separate functional behavior, source syntax, generic mapped cells and physical
+library cells. A binary truth-table test establishes function. A procedural-if
+requirement also needs its stated syntax and relevant four-state semantics.
+An explicit state encoding needs encoding/reset/transition evidence. A mux-only
+or minimum-cell claim needs an actual mapped graph in the declared cell model;
+universal X-propagation assertions over behavioral RTL do not prove topology.
+
+Freeze the source and retain the native command, tool identity and emitted
+netlist. Check cell types/counts and binary source/netlist equivalence
+separately. Prove a model-specific lower bound before claiming minimality;
+otherwise report only the observed mapped count. Do not relabel generic mux
+mapping as physical standard-cell qualification.
+
+If a requested native mapping target fails, preserve that failure and track
+the generating tool defect. Where the contract permits generic two-input-LUT
+decomposition, native Yosys `abc -lut 2; lut2mux; opt_expr; opt_clean` can supply
+an independently inspected mux graph. Its successful result neither repairs
+the failed target nor changes the allowed cell model. A bad review test is
+retained and corrected through the normal fresh-review/supersession mechanism;
+correct RTL is not rewritten merely to satisfy an invalid structural proxy.
+
+**Why not Bucket A:** existing native tools generate and inspect graphs;
+choosing the applicable representation and proving a lower bound require the
+current input's circuit model. No benchmark-specific structural oracle is added.

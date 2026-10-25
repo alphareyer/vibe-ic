@@ -74,8 +74,15 @@ module TopModule (
 
 @pytest.mark.parametrize("relation", ["lower", "higher"])
 @pytest.mark.parametrize("polarity", ["active-high", "active-low"])
-def test_native_direction_sequence(tmp_path, relation, polarity):
+@pytest.mark.parametrize("wording", ['direct', 'actuator'])
+def test_native_direction_sequence(tmp_path, relation, polarity, wording):
     prompt = LADDER.replace("was lower", "was " + relation).replace("active-high", polarity)
+    if wording == 'actuator':
+        prompt = prompt.replace(
+            'the boost converter (controlled by boost) should be enabled',
+            'the auxiliary feed should be increased by opening the reserve gate (controlled by boost)')
+        prompt = ('The nominal output between the upper and lower thresholds also uses '
+                  'the reading previous to the last sample.\n\n') + prompt
     kind, rtl = reg.generate(prompt, "TopModule")
     assert kind == "threshold_ladder"
     assert rtl is not None
@@ -142,3 +149,27 @@ def test_relation_is_independent_of_extreme_pin_and_output_spelling(old, new, ex
     assert rtl is not None
     assert "assist = direction_asserted;" in rtl
     assert expected in rtl
+
+
+@pytest.mark.parametrize('effect', [
+    'should not be increased by opening', 'should be decreased by opening',
+    'should be increased by closing',
+])
+def test_actuator_wording_does_not_infer_unsupported_polarity(effect):
+    prompt = LADDER.replace(
+        'the boost converter (controlled by boost) should be enabled',
+        'the auxiliary feed ' + effect + ' the reserve gate (controlled by boost)')
+    assert tl.synth(prompt) is None
+
+
+@pytest.mark.parametrize('extra', [
+    'If the previous level was lower than the present level, boost should not be enabled.',
+    'When the previous level was higher than now, boost is disabled.',
+    'The previous level must disable boost.',
+    'Unless the previous level was equal to the present level, boost is asserted.',
+    'The current level is lower than the previous level, boost is disabled.',
+    'The sensed level was lower than the previous level, boost is disabled.',
+    'The sensed level was equal to the previous level, boost is asserted.',
+])
+def test_unsupported_extra_previous_conditions_are_not_silently_dropped(extra):
+    assert tl.synth(LADDER + '\n' + extra) is None
