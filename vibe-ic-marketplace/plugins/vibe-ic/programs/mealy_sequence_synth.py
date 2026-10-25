@@ -6,8 +6,10 @@ WHY (§4.2 absorption, "bucket-② -> bucket-①"): a VerilogEval prompt that fu
 specifies a MEALY machine — one whose output depends on (state, input) rather than
 on state alone — determines the whole machine, blind, so a single-shot author only
 introduces variance. We RECOGNISE the spec and EMIT the RTL deterministically. Two
-written sub-shapes are accepted, both observable only through the OUTPUT (the TB
-never inspects the state register, so the internal encoding is FREE):
+written sub-shapes are accepted. Internal encoding is free only when the input
+does not constrain it. Explicit maps are preserved; a bare one-hot class request
+on an owned register may choose bit positions after all state references close.
+No assumption about which signals a testbench observes relaxes that contract.
 
   (a) Mealy transition+output table — the output annotation sits on the TRANSITION,
       i.e. `state --in=V (out=V)--> next` (Prob088_ece241_2014_q5b, the 2's
@@ -319,7 +321,7 @@ def _emit(top, clk, rst, in_name, out_name, states, trans, mout,
     port_lines = [f"input {clk}", f"input {rst}", f"input {in_name}",
                   f"output reg {out_name}"]
     lines = [
-        "// program-SOLVED Mealy FSM (free internal encoding); deterministic, no AI.",
+        "// program-SOLVED Mealy FSM; encoding follows the declared constraint.",
         f"module {top}(",
         "    " + ",\n    ".join(port_lines),
         ");",
@@ -353,6 +355,48 @@ def _emit(top, clk, rst, in_name, out_name, states, trans, mout,
     return "\n".join(lines)
 
 
+def _free_onehot_map(prompt, states):
+    """Choose codes only for a bare class constraint on our OWN state register.
+
+    Every named-state occurrence must belong to the already parsed complete
+    table or reset. Unparsed state annotations remain a handoff, regardless of
+    the verb or literal syntax used; the external-state decoder stays strict.
+    """
+    remaining = prompt
+    for match in reversed(list(_MEALY_ARROW_RE.finditer(prompt))):
+        tail = prompt[match.end():].split('\n', 1)[0]
+        if tail.strip():
+            return None
+        remaining = remaining[:match.start()] + remaining[match.end():]
+    clauses = [" ".join(s.split()) for s in re.split(r"[.;]", remaining)
+               if re.search(r"encod|one[-\s]+hot", s, re.I)]
+    if len(clauses) != 1 or not re.fullmatch(
+            r"(?:use|implement(?: in (?:SystemVerilog|Verilog))? using) "
+            r"(?:a |an )?one[-\s]+hot (?:state )?encoding", clauses[0], re.I):
+        return None
+    names = '|'.join(re.escape(s) for s in states)
+    parts = re.split(r'([.;])', remaining)
+    for index, part in enumerate(parts):
+        reset = re.fullmatch(
+            r'(?:resets? (?:into|to) state|reset state is) (\w+)'
+            r'(?: and (?:the )?reset is (?:asynchronous|synchronous) active[- ](?:high|low))?',
+            ' '.join(part.split()), re.I)
+        if reset:
+            if reset[1] not in states:
+                return None
+            parts[index] = ''
+    remaining = ''.join(parts)
+    if re.search(r'\breset\w*\b[^.;]*\b(?:into|to)\s+state\b|\breset\s+state\s+is\b',
+                 remaining, re.I):
+        return None
+    if re.search(rf"\b(?:{names})\b", remaining) or re.search(
+            r"\bstate\s*\[|\bcorrespond\w*|\bcodes?\b|\b(?:width|bitmask|LSB|MSB)\b"
+            r"|\b(?:least|most)[-\s]+significant\s+bit\b|\bbit\s+(?:position\s+)?\d+\b"
+            r"|\b\w+\s*[:=]\s*(?:\d+|0[bBxX])", remaining, re.I):
+        return None
+    return {s: 1 << k for k, s in enumerate(states)}, len(states)
+
+
 def _synth_table(prompt, top, clk, rst, in_name, out_name, level):
     parsed = _parse_mealy_table(prompt)
     if parsed is None:
@@ -363,6 +407,8 @@ def _synth_table(prompt, top, clk, rst, in_name, out_name, level):
     if reset_state is None:
         return None
     encoding = _parse_onehot_map(prompt, states, codes=True)
+    if encoding is None:
+        encoding = _free_onehot_map(prompt, states)
     if encoding is None:
         return None
     return _emit(top, clk, rst, in_name, out_name, states, trans, mout,

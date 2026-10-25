@@ -122,6 +122,27 @@ _Captured by benchmark-enhancement-capture 2026-10-15._
 
 _Captured by benchmark-enhancement-capture 2026-10-21._
 
+### Skill: State-local control independence
+
+**When to apply:** a protocol or FSM uses different controls in different
+phases. Derive a dependency table from the admitted input: which controls can
+change the next state, stored data and outputs in each phase?
+
+**What to do:** exercise both values of relevant controls and verify that
+irrelevant controls do not disturb progress. If unknown/high-impedance controls
+are legal in that phase, also drive X/Z on only the irrelevant controls while
+keeping relevant controls known. Include an unchanged binary control and a
+relevant-unknown negative/default control. Do not invent an initial state,
+reset, undefined-input output value or universal four-state requirement.
+For a complete explicit Moore table, state-local Boolean support reduction is
+enforced by `programs/moore_fsm_table_emit.py`; an incomplete table must still
+refuse emission. Apply the behavioral dependency checks to AI-authored RTL too.
+
+**Why not Bucket A:** the complete-table optimization is already a program.
+Determining legal unknown-input domains and dependencies in arbitrary prose
+requires source-bound judgment. A binary test or a port-reference coverage
+number alone does not establish phase independence.
+
 ## Optional reset-retention byte stimulus
 
 When a retention test needs a designer-chosen memory stimulus, declare

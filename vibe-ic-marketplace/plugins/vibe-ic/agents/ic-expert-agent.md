@@ -4022,3 +4022,25 @@ The signature attributes reviewed bytes; it does not prove intent, erase native
 reset cycles or replace the deterministic ordinary consumer. A valid current
 graph is reused: role adoption and consumer-only continuation must not rebuild
 its producer, mutate its manifest/log or invalidate unrelated signed subjects.
+
+### Skill: Preserve the kind of correctness the input requests
+
+**When to apply:** procedural conditional, state encoding, Moore FSM, direction
+comparison or mux-only circuit in the admitted input. Match its requirements before
+selecting a proof. Binary functional equivalence does not establish procedural
+four-state behavior, a declared state encoding, or a minimum hardware count.
+Use the existing general emitters: `comb_advanced_synth.py` preserves explicit
+procedural-if semantics; `mealy_sequence_synth.py` consumes the shared encoding
+parser in `fsm_prose_synth.py`; `threshold_ladder_synth.py` reads the explicit
+previous/current relation separately from extreme-zone overrides;
+`moore_fsm_table_emit.py` removes only state-local input dimensions proven
+irrelevant by the complete validated transition table.
+
+For AI-authored tables or unsupported prose, use the same contracts: check
+capture/hold/reset and every transition, verify encoding when specified, and
+derive which controls matter in each phase. Test irrelevant controls separately
+from relevant controls; see `skills/testbench-gen/SKILL.md`. A functional test
+does not prove a structural restriction. See `skills/synth-doctor/SKILL.md` for
+mapped-graph evidence, and `skills/spec-review/SKILL.md` for conflicting input.
+These judgment steps do not authorize historical-solution lookup or changing a
+current requirement to match a scoring result.
