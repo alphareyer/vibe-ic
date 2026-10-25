@@ -1267,7 +1267,8 @@ def _stub_dispatched_reentry(monkeypatch):
 
 def _issue_pending_route_fixture(run: Path, route: dict, *,
                                  nature: str = "spec_generation",
-                                 requested_evidence: str | None = None) -> dict:
+                                 requested_evidence: str | None = None,
+                                 benchmark: str = "rtllm") -> dict:
     """Run the normal route producer through its pending-D1 boundary."""
     import route_decision as rd
     from test_ai_first_route_handoff import _answer, _write_answer
@@ -1287,7 +1288,7 @@ def _issue_pending_route_fixture(run: Path, route: dict, *,
     }]
     _write_answer(route, answer)
     decision, reasons = bd._validate_ai_route(
-        route, run, benchmark="rtllm", dataset=Path("/unused"))
+        route, run, benchmark=benchmark, dataset=Path("/unused"))
     assert decision is not None, reasons
     project = Path(route["project"])
     receipt = decision["route_receipt"]
@@ -1331,12 +1332,14 @@ def _emit_d1_fixture_report(project: Path, context: dict, *,
 
 def _issue_active_route_fixture(run: Path, route: dict, *,
                                 nature: str = "spec_generation",
-                                requested_evidence: str = "lint_validated") -> dict:
+                                requested_evidence: str = "lint_validated",
+                                benchmark: str = "rtllm") -> dict:
     """Issue real coordinator authority around a narrowly mocked D1 producer."""
     from unittest.mock import patch
 
     receipt = _issue_pending_route_fixture(
-        run, route, nature=nature, requested_evidence=requested_evidence)
+        run, route, nature=nature, requested_evidence=requested_evidence,
+        benchmark=benchmark)
 
     def d1_producer(argv, **kwargs):
         assert "--entry-step" not in argv
@@ -1355,7 +1358,8 @@ def _issue_active_route_fixture(run: Path, route: dict, *,
 
 
 def _write_issued_run_envelope(run: Path, task: dict,
-                               extra_routes: list[dict] | None = None) -> list[dict]:
+                               extra_routes: list[dict] | None = None,
+                               benchmark: str = "rtllm") -> list[dict]:
     """Write the coordinator-owned envelope consumed by ``cmd_resume``.
 
     Direct review fixtures start after the real ``--solve`` route decision, so
@@ -1374,18 +1378,19 @@ def _write_issued_run_envelope(run: Path, task: dict,
                 and str(declaration.get("selection") or "").startswith("legacy"))):
         task["verification_execution"] = {
             "backend": "host", "selection": "explicit test host"}
+    fmt = bd._dispatch_format(benchmark)
     route = bd._make_ai_route_task(
         task["id"], Path(task["project"]),
         {"public_original_input": task["public_original_input"]},
-        ROUTING, run, "rtllm", benchmark="rtllm", dataset_path=Path("/unused"))
+        ROUTING, run, fmt, benchmark=benchmark, dataset_path=Path("/unused"))
     routes = [route, *(extra_routes or [])]
     bd._publish_route_input_anchor(
-        run, bd._route_input_anchor("rtllm", "rtllm", Path("/unused"), routes))
+        run, bd._route_input_anchor(benchmark, fmt, Path("/unused"), routes))
     bd._write_jsonl(run / bd._ROUTE_WORKLIST, routes)
     bd._atomic_write_json(run / ".bench_config.json", {
         "schema": "vibeic.benchmark.general_run.v1",
-        "bench": "rtllm",
-        "format": "rtllm",
+        "bench": benchmark,
+        "format": fmt,
         "dataset": str(Path("/unused").resolve()),
         "clean_room": True,
         "full_dataset": True,
@@ -1400,7 +1405,8 @@ def _write_issued_run_envelope(run: Path, task: dict,
 def _solve_report(run: Path, task: dict,
                   *, extra_routes: list[dict] | None = None,
                   active_route: bool = False, exit_step: str = "8",
-                  requested_evidence: str = "lint_validated") -> None:
+                  requested_evidence: str = "lint_validated",
+                  benchmark: str = "rtllm") -> None:
     result = {
         "id": task["id"], "ok": True, "candidate_ready": True,
         "accepted": False, "entry": "D1", "evidence": "RTL_SIM",
@@ -1421,7 +1427,7 @@ def _solve_report(run: Path, task: dict,
         evidence=result["evidence"], exit_step=result["exit"],
         artefact_collected=True)
     (run / "solve_report.json").write_text(json.dumps({
-        "bench": "rtllm", "format": "rtllm", "total": 1,
+        "bench": benchmark, "format": bd._dispatch_format(benchmark), "total": 1,
         "solved": 1, "accepted": 0,
         "acceptance_policy": {
             "required": True,
@@ -1430,10 +1436,12 @@ def _solve_report(run: Path, task: dict,
         },
         "results": [result],
     }))
-    routes = _write_issued_run_envelope(run, task, extra_routes=extra_routes)
+    routes = _write_issued_run_envelope(
+        run, task, extra_routes=extra_routes, benchmark=benchmark)
     if active_route:
         receipt = _issue_active_route_fixture(
-            run, routes[0], requested_evidence=requested_evidence)
+            run, routes[0], requested_evidence=requested_evidence,
+            benchmark=benchmark)
         assert receipt["verify_through"] == exit_step
         solve_path = run / "solve_report.json"
         solve = json.loads(solve_path.read_text())

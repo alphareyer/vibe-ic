@@ -9341,7 +9341,12 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             continue
         _atomic_write_json(Path(task["response_path"]), frozen_payload)
         accepted_ids.append(pid)
-        result.update({"accepted": True, "awaiting_ai": False,
+        # Readiness may have been withdrawn by a prior invocation refusal,
+        # and a review correction advances only the authoritative task.
+        # Synchronize the accepted result after all current proofs pass.
+        result.update({"ok": True, "candidate_ready": True,
+                       "review_task": task["review_path"],
+                       "accepted": True, "awaiting_ai": False,
                        "awaiting_ai_backup": False,
                        "awaiting_ai_review": False,
                        "ai_repair_required": False,
