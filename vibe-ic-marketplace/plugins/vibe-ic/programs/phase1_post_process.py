@@ -600,13 +600,16 @@ def _term_in(term: str, lowered_text: str) -> bool:
 #: changes the emitted document. This one answers a different question for a
 #: different consumer — `flow_compliance_check._l_doc_declares_absence`, which
 #: must cite an INPUT-level fact before it stands a step down — and changes no
-#: emitted byte. Same discipline, though: every term appears in the layer's own
-#: `_extraction_hints_for()` text, and a test holds it there, so the table
-#: cannot drift away from what the layer says it is looking for.
+#: emitted byte. L20 follows its extraction hints; L8/L10 name the subjects
+#: their strict period/case checkers consume. Any subject hint keeps those
+#: checkers active; an absence is admitted only over a readable input corpus.
 _DECLARATION_CORROBORATION_TERMS: Dict[str, Tuple[str, ...]] = {
     # 'Look for scan / DFT / BIST / JTAG sections.'
     # 'Look for ATPG / test mode / scan-enable sections.'
     "L20": ("scan", "DFT", "BIST", "JTAG", "ATPG", "test mode"),
+    "L8": ("clock", "clk", "oscillator", "posedge", "negedge", "frequency", "period"),
+    "L10": ("test case", "testcase", "test vector", "known-answer", "known answer",
+            "testbench", "oracle", "test plan", "verification plan"),
 }
 
 

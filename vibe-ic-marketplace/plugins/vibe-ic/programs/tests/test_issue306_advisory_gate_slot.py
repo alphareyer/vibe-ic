@@ -62,6 +62,228 @@ def _shipped_advisory_commands():
     return commands
 
 
+def _native_extraction_project(tmp_path, *, clocked=False, period=False, literal=True):
+    """Real document producer plus source-specific expert and current review."""
+    import subprocess
+    import phase1_expert_parse_track as track
+    import ai_signed_judgement as ai
+    project = tmp_path / 'neutral-extraction'
+    source = project / 'input/docs/interface.md'
+    source.parent.mkdir(parents=True)
+    controls = 'input clk_a, ' if clocked else ''
+    behavior = ('At each rising edge of clk_a, result_o captures operand_i.' if clocked
+                else 'result_o is the bitwise complement of operand_i.')
+    source.write_text('Module Name: NeutralUnit\n'
+                      f'module NeutralUnit ({controls}input [5:0] operand_i, '
+                      'output [5:0] result_o);\n' + behavior + '\n'
+                      + ('The datapath mask constant MASK is 0x3F.\n' if literal else '')
+                      + ('| Target clock period | 32 ns (31.25 MHz) |\n' if period else ''))
+    produced = subprocess.run(
+        [sys.executable, str(_PROGRAMS / 'phase1_doc_one_shot_runner.py'),
+         str(project), '--strict', '--ic-name', 'NeutralUnit'],
+        capture_output=True, text=True)
+    assert produced.returncode == 0, produced.stdout + produced.stderr
+    assert track.main([str(project), '--invoked-by', 'phase1_one_shot_runner']) in (0, 4)
+    answer = project / 'reports/audit/phase1/expert_parse_track_pack/l_doc_expectations.json'
+    answer.write_text(json.dumps({'expectations': [{
+        'id': 'neutral_source_top', 'layer': 'L9_INTEGRATION_SPEC',
+        'field_path': 'top_module', 'requirement': 'Preserve the stated module identifier.',
+        'expected_tokens': ['NeutralUnit'],
+        'evidence': ['input/docs/interface.md:1 Module Name: NeutralUnit'],
+    }]}))
+    assert track.main([str(project), '--invoked-by', 'phase1_one_shot_runner']) == 0
+    review = project / 'reports/audit/ai_judgements/D1.json'
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text(json.dumps({
+        'schema': ai.SCHEMA, 'step_id': 'D1', 'verdict': 'PASS',
+        'signed_by': 'independent neutral source reviewer',
+        'judgement': 'Reviewed the native interface, behavior and source constants. '
+                     + ('The stated 32 ns operating period is retained.' if period else
+                        'The source states no executable test plan or operating period.'),
+        'evidence_sha256': ai.evidence_sha256(project, 'D1')}))
+    return project
+
+
+def _shipped_step(step_id):
+    import _flow_yaml
+    return next(row for row in _flow_yaml.load()['steps'] if str(row['id']) == str(step_id))
+
+
+@pytest.mark.parametrize('clocked', [False, True])
+def test_native_d1_extraction_does_not_require_future_period_or_test_plan(tmp_path, clocked):
+    import execution_backend_gates as gates
+    project = _native_extraction_project(tmp_path, clocked=clocked)
+    result = gates.evaluate(project, _shipped_step('D1'))
+    (project / 'native_d1_consumer.json').write_text(json.dumps(result, indent=2))
+    assert result['status'] == 'PASS', result
+    assert not {record['gate'] for record in result['step']['advisory_gate_records']} & {
+        'l8_sta_clock_period_design_owned_check', 'l8_clock_period_actionability_check',
+        'l10_test_case_oracle_anchor_check'}
+
+
+def _relocated_clause(step_id, program):
+    clauses = _shipped_step(step_id)['gate']['all_of']
+    return next(clause for clause in clauses
+                if (clause.get('advisory_program_exit_zero') or {}).get('command', '').split(' ')[0] == program)
+
+
+def _declared_empty_subjects(project, text='The datapath complements a six-bit operand.\n'):
+    source = project / 'input/docs/interface.md'
+    source.parent.mkdir(parents=True)
+    source.write_text(text)
+    docs = project / 'phase1/generated_docs'
+    docs.mkdir(parents=True)
+    (docs / 'L8_RTL_CONSTANTS.json').write_text(json.dumps({
+        'clock_domains': [], 'clock_mhz': None,
+        'no_clock_mhz_in_input': True, 'no_clock_domains_in_input': True}))
+    (docs / 'L10_TEST_CASES.json').write_text(json.dumps({
+        'test_cases': [], 'no_test_cases_in_input': True}))
+    return docs
+
+
+@pytest.mark.parametrize('step_id,program', [
+    ('8', 'l8_sta_clock_period_design_owned_check'),
+    ('8', 'l8_clock_period_actionability_check'),
+    ('4', 'l10_test_case_oracle_anchor_check'),
+])
+def test_relocated_subject_absence_has_native_not_run_record(tmp_path, monkeypatch, step_id, program):
+    _declared_empty_subjects(tmp_path)
+    def no_execution(*args, **kwargs):
+        raise AssertionError('a corroborated absent subject must not invoke its checker')
+    monkeypatch.setattr(_flow, '_check_program_exit_zero', no_execution)
+    passed, reasons = _flow._evaluate_gate(tmp_path, _relocated_clause(step_id, program))
+    assert passed, reasons
+    record, = _records(reasons)
+    assert (record['verdict'], record['enforcement'], record['exit_code']) == (
+        'NOT_APPLICABLE', 'NOT_RUN_DECLARED', None)
+    assert record['applicability_evidence']['documents_scanned_count'] == 1
+    assert record['applicability_evidence']['documents_matching'] == 0
+
+
+def test_bus_vector_and_expected_output_are_not_a_verification_plan(tmp_path):
+    _declared_empty_subjects(tmp_path,
+        'The six-bit input vector carries data. The expected output complements that input.\n')
+    passed, reasons = _flow._evaluate_gate(tmp_path, _relocated_clause('4', 'l10_test_case_oracle_anchor_check'))
+    assert passed, reasons
+    record, = _records(reasons)
+    assert (record['verdict'], record['enforcement']) == ('NOT_APPLICABLE', 'NOT_RUN_DECLARED')
+
+
+@pytest.mark.parametrize('damage', ['positive_input', 'missing_input', 'unreadable_input', 'missing_doc', 'malformed_doc'])
+def test_relocated_absence_never_excuses_unexamined_or_contradicted_input(tmp_path, monkeypatch, damage):
+    docs = _declared_empty_subjects(tmp_path)
+    source = tmp_path / 'input/docs/interface.md'
+    if damage == 'positive_input':
+        source.write_text('The test vector must compare result_o with 0x3F.\n')
+    elif damage == 'missing_input':
+        source.unlink()
+    elif damage == 'unreadable_input':
+        read_text = Path.read_text
+        def refuse(path, *args, **kwargs):
+            if path == source:
+                raise OSError('neutral unreadable source')
+            return read_text(path, *args, **kwargs)
+        monkeypatch.setattr(Path, 'read_text', refuse)
+    elif damage == 'missing_doc':
+        (docs / 'L10_TEST_CASES.json').unlink()
+    else:
+        (docs / 'L10_TEST_CASES.json').write_text('{')
+    called = []
+    def refuse_checker(project, command):
+        called.append(command)
+        return False, 'the unchanged checker refuses this input'
+    monkeypatch.setattr(_flow, '_check_program_exit_zero', refuse_checker)
+    _flow._evaluate_gate(tmp_path, _relocated_clause('4', 'l10_test_case_oracle_anchor_check'))
+    assert called == ['l10_test_case_oracle_anchor_check .']
+
+
+@pytest.mark.parametrize('invalid', [False, True])
+def test_relocated_native_period_checker_still_refuses_missing_or_invalid_period(tmp_path, invalid):
+    docs = _declared_empty_subjects(tmp_path, 'The input clock clk_a triggers the register.\n')
+    clocks = [{'name': 'clk_a', 'source_pin': 'clk_a', 'role': 'master',
+               'domain_kind': 'primary', 'period_ns': None}]
+    if invalid:
+        clocks[0]['period_ns'] = 8
+        clocks.append({**clocks[0], 'period_ns': 16})
+    (docs / 'L8_RTL_CONSTANTS.json').write_text(json.dumps({'clock_domains': clocks}))
+    passed, reasons = _flow._evaluate_gate(tmp_path, _relocated_clause('8', 'l8_clock_period_actionability_check'))
+    assert passed is False, reasons
+    record, = _records(reasons)
+    assert (record['exit_code'], record['verdict'], record['enforcement']) == (1, 'FAIL', 'BLOCKING')
+
+
+def test_relocated_native_oracle_checker_still_refuses_a_declared_invalid_case(tmp_path):
+    docs = _declared_empty_subjects(tmp_path, 'Test case: drive a request and compare its response.\n')
+    (docs / 'L10_TEST_CASES.json').write_text(json.dumps({'test_cases': [{
+        'name': 'neutral_case', 'kind': 'functional_vector',
+        'stimulus': 'drive the request', 'expected': ''}]}))
+    passed, reasons = _flow._evaluate_gate(tmp_path, _relocated_clause('4', 'l10_test_case_oracle_anchor_check'))
+    assert passed is False, reasons
+    record, = _records(reasons)
+    assert (record['exit_code'], record['verdict'], record['enforcement']) == (1, 'FAIL', 'BLOCKING')
+
+
+@pytest.mark.parametrize('step_id', ['4', '8'])
+def test_subject_na_does_not_release_native_step_required_artifacts(tmp_path, step_id):
+    import execution_backend_gates as gates
+    _declared_empty_subjects(tmp_path)
+    result = gates.evaluate(tmp_path, _shipped_step(step_id))
+    assert result['status'] not in ('PASS', 'PASS_WITH_WAIVERS'), result
+    assert result['step']['reason_class'] == _flow._T.ReasonClass.MISSING_ARTEFACT.value, result
+    assert any(reason.startswith('no required_outputs found')
+               for reason in result['step']['reasons']), result
+
+
+def test_source_period_lost_remains_an_independent_current_d1_rejection(tmp_path):
+    import phase1_expert_parse_track as track
+    import execution_backend_gates as gates
+    import ai_signed_judgement as ai
+    project = _native_extraction_project(tmp_path, clocked=True, period=True)
+    docs = project / 'phase1/generated_docs'
+    l8 = docs / 'L8_RTL_CONSTANTS.json'
+    original = json.loads(l8.read_text())
+    assert any(row.get('period_ns') == 32 for row in original.get('clock_domains', [])), original
+    # Simulate a producer losing the stated typed period. Keeping the source
+    # prose elsewhere cannot satisfy the independently addressed L8 contract.
+    def lose_period(value):
+        if isinstance(value, dict):
+            for key in value:
+                if key in ('period_ns', 'freq_mhz', 'freq_hz', 'clock_mhz'):
+                    value[key] = None
+                else:
+                    lose_period(value[key])
+        elif isinstance(value, list):
+            for row in value:
+                lose_period(row)
+    for path in docs.glob('L8*.json'):
+        value = json.loads(path.read_text())
+        lose_period(value)
+        path.write_text(json.dumps(value))
+    import sdc_gen
+    assert sdc_gen._clock_mhz_from_l8_domains(json.loads(l8.read_text())) is None
+    answer = project / 'reports/audit/phase1/expert_parse_track_pack/l_doc_expectations.json'
+    answer.write_text(json.dumps({'expectations': [{
+        'id': 'neutral_source_period', 'layer': 'L8_RTL_CONSTANTS',
+        'field_path': 'clock_domains.period_ns', 'requirement': 'Retain the stated 32 ns period.',
+        'expected_tokens': ['32'], 'evidence': ['input/docs/interface.md:5 Target clock period 32 ns'],
+    }]}))
+    assert track.main([str(project), '--invoked-by', 'phase1_one_shot_runner']) == 0
+    reading = json.loads((project / 'reports/audit/phase1/expert_parse_track.json').read_text())
+    assert reading['ai_convergence']['disagreed'] == 1, reading
+    review = project / 'reports/audit/ai_judgements/D1.json'
+    review.write_text(json.dumps({
+        'schema': ai.SCHEMA, 'step_id': 'D1', 'verdict': 'FAIL',
+        'signed_by': 'independent neutral source reviewer',
+        'judgement': 'The source states 32 ns, but L8.clock_domains lost that operating period.',
+        'evidence_sha256': ai.evidence_sha256(project, 'D1')}))
+    assert ai.check(project, 'D1', expected_verdict='FAIL')[0]
+    result = gates.evaluate(project, _shipped_step('D1'))
+    assert result['status'] not in ('PASS', 'PASS_WITH_WAIVERS'), result
+    assert result['step']['reason_class'] == _flow._T.ReasonClass.AWAITING_SIGNED_JUDGEMENT.value, result
+    assert any(reason.startswith('awaiting_signed_judgement:')
+               for reason in result['step']['reasons']), result
+
+
 # ---------------------------------------------------------------- gate level
 
 def test_unstructured_advisory_failure_blocks(tmp_path, monkeypatch):
@@ -106,6 +328,8 @@ def test_malformed_advisory_spec_is_a_real_failure(tmp_path):
                 {"advisory_program_exit_zero": ["a", "list"]},
                 {"advisory_program_exit_zero": 7},
                 {"advisory_program_exit_zero": {}},
+                {"advisory_program_exit_zero": {"command": "x", "condition": {}}},
+                {"advisory_program_exit_zero": {"command": "x", "condition": {"files_exist": []}}},
                 {"advisory_program_exit_zero": {"command": "x",
                                                 "condition_files_exist": []}}):
         passed, reasons = _flow._evaluate_gate(tmp_path, bad)

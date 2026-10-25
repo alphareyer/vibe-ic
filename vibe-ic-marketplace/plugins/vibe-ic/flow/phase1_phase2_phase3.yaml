@@ -951,7 +951,7 @@ steps:
         - advisory_program_exit_zero:
               command: "phase1_expert_track_evidence_check ."
               advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
-        # vibe-ic#306/#381 — TEN per-layer contract gates, ADVISORY. Until the
+        # vibe-ic#306/#381 — per-layer contract gates, ADVISORY. Until the
         # advisory slot existed these ran NOWHERE but their own unit tests:
         # a fixture the author wrote proved the logic, no real L-doc was ever
         # judged. Measured on two published cells before wiring — they return
@@ -990,11 +990,6 @@ steps:
         - advisory_program_exit_zero:
               command: "l21_macro_supply_rail_declared_check ."
               advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 2 on a real spm run (2026-08-31): NOT CHECKED on that run — no input reached it, so the notch is unmeasured and this clause is not yet evidence of anything."
-        # L8 STA period is design-owned, never sdc_gen's hardcoded default.
-        # FAILs opentitan_aes, whose published SDC carries the default verbatim.
-        - advisory_program_exit_zero:
-              command: "l8_sta_clock_period_design_owned_check ."
-              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
         # The L22 projection is a producer declared on this step above. Issue
         # #1980 removes producers from the gate denominator; its runner adapter
         # remains the execution/disposition owner.
@@ -1038,10 +1033,6 @@ steps:
         - advisory_program_exit_zero:
               command: "l7_debug_access_grounding_check ."
               advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
-        # every clock period an L8 consumer resolves is unique and actionable
-        - advisory_program_exit_zero:
-              command: "l8_clock_period_actionability_check ."
-              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
         # ORPHANED, RE-HOMED. D1 EMITS L8_RTL_CONSTANTS.json (it is in this
         # step's own required_outputs and `rtl-constants-gen` is in its skills),
         # so D1 is the step that can be asked whether what it emitted holds
@@ -1066,10 +1057,6 @@ steps:
         - advisory_program_exit_zero:
               command: "l9_floorplan_contract_check . --json reports/phase1/gates/l9_floorplan_contract.json"
               advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 2 on a real spm run (2026-08-31): NOT CHECKED on that run — no input reached it, so the notch is unmeasured and this clause is not yet evidence of anything."
-        # every executable L10 case carries an oracle anchor
-        - advisory_program_exit_zero:
-              command: "l10_test_case_oracle_anchor_check ."
-              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 1 on a real spm run (2026-08-31): it REFUSES TODAY on real input, and that refusal ALREADY FAILS THE STEP. `flow_compliance_check._advisory_execution_record` maps a refusal verdict to enforcement=BLOCKING, and the one escape from it -- `_gate_is_two_source_advisory` -- requires the gate MODULE'S OWN docstring to declare `ENFORCEMENT: advisory`; this module does not, so it returns False and the step reports `advisory gate refusal`. Nothing is being swallowed. `advisory_program_exit_zero` names how the gate is INVOKED, not whether its refusal counts, and promoting the row to `program_exit_zero` would change the invocation, not the verdict. Corrected 2026-09-02 after this prose was read as a reason to patch the enforcement layer, which is correct as written. It reported: - [EXPECTED_RESTATES_STIMULUS] toggle_branch_coverage: expected text is byte-identical to the stimulus — restating the input is not a prediction, so t"
         # ORPHANED, RE-HOMED. Derives L10 oracle vectors from the L9 opcode
         # table D1 itself emits. No `--json` sink: it writes only when L9 yields
         # opcodes, so declaring the artefact unconditionally would redden every
@@ -1152,8 +1139,7 @@ steps:
         # stays quiet on all of them — the escape hatch is what 94% of the
         # corpus already does, not a filter invented to lower a count.
         #
-        # ADVISORY, for the same reason as l16/l17 and
-        # `l8_sta_clock_period_design_owned_check` above: the 5 are TRUE
+        # ADVISORY, for the same reason as l16/l17: the 5 are TRUE
         # positives on PUBLISHED roots (one of them is the very cell whose
         # published SDC carries `sdc_gen`'s hardcoded default period verbatim —
         # the fabricated number a starved timing layer produces), so BLOCKING
@@ -2388,6 +2374,17 @@ steps:
       - "reports/phase2/coverage/coverage_verilator.json"
     gate:
       all_of:
+        # Executable-case readiness belongs to its simulation consumer. D1
+        # preserves source intent and receives its own independent review.
+        - advisory_program_exit_zero:
+            command: "l10_test_case_oracle_anchor_check ."
+            advisory_reason: "Validate every declared executable case before simulation; a live invalid oracle remains blocking."
+            condition:
+              l_doc_declares:
+                l_doc: L10
+                all_absent:
+                  test_cases: []
+                  no_test_cases_in_input: true
         - files_exist: ["phase2/stage1/sim/results.xml", "phase2/stage1/sim/pass.flag"]
           any_of: true
         # vibe-ic#1975 — connectivity is CONNECTIVITY ONLY. The runner keeps
@@ -3062,6 +3059,8 @@ steps:
         path: "phase2/stage2/constraints/pvt_matrix.json"
       - from: D1
         path: "phase1/generated_docs/L8_TIMING_WAVEFORM.json"
+      - from: D1
+        path: "phase1/generated_docs/L8_RTL_CONSTANTS.json"
     closed_loop:
       fallback_to: 7
       trigger: "SDC syntax/semantic error"
@@ -3084,6 +3083,30 @@ steps:
       - "reports/phase2/sdc_check.json"
     gate:
       all_of:
+        # Full operating-period readiness is required where SDC is consumed,
+        # rather than when a source that may state no period is extracted.
+        - advisory_program_exit_zero:
+            command: "l8_sta_clock_period_design_owned_check ."
+            advisory_reason: "Report whether the STA period is design-owned; retain this checker's existing advisory enforcement."
+            condition:
+              l_doc_declares:
+                l_doc: L8
+                all_absent:
+                  clock_domains: []
+                  clock_mhz: null
+                  no_clock_mhz_in_input: true
+                  no_clock_domains_in_input: true
+        - advisory_program_exit_zero:
+            command: "l8_clock_period_actionability_check ."
+            advisory_reason: "The clock contract consumed by SDC must be resolvable and consistent; a live invalid period remains blocking."
+            condition:
+              l_doc_declares:
+                l_doc: L8
+                all_absent:
+                  clock_domains: []
+                  clock_mhz: null
+                  no_clock_mhz_in_input: true
+                  no_clock_domains_in_input: true
         - program_exit_zero: "sdc_syntax_check . --json reports/phase2/sdc_check.json"
         # v2.3 — exception-justification screen (advisory): every
         # false_path/multicycle must correlate with the design's own

@@ -13200,6 +13200,26 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
                            "string, or a dict with a `command`")
             return False, reasons
         cmd = spec.get("command")
+        condition = spec.get("condition")
+        if condition is not None:
+            if not isinstance(condition, dict) or set(condition) != {"l_doc_declares"}:
+                return False, ["advisory_program_exit_zero: condition must declare l_doc_declares"]
+            declaration = _l_doc_declares_absence(project, condition["l_doc_declares"])
+            if declaration is not None:
+                cited, detail, evidence = declaration
+                reasons.append(
+                    f"{_ADVISORY_HINT_PREFIX}n/a (design-declared; did not run): {cmd} — "
+                    f"{cited} records {detail}; input corroboration: "
+                    + json.dumps(evidence, sort_keys=True))
+                reasons.append(f"{_ADVISORY_RECORD_HINT_PREFIX}" + json.dumps({
+                    "gate": _gate_name(cmd), "command": cmd,
+                    "exit_code": None, "verdict": "NOT_APPLICABLE",
+                    "structured_verdict": None,
+                    "reason_class": _reason_taxonomy.DESIGN_DECLARED_NA,
+                    "enforcement": "NOT_RUN_DECLARED",
+                    "applicability_evidence": evidence,
+                }, sort_keys=True))
+                return True, reasons
         cond_files = spec.get("condition_files_exist")
         if cond_files is not None:
             if not isinstance(cond_files, list) or not cond_files:
