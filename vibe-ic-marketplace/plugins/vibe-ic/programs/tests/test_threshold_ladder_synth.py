@@ -6,51 +6,19 @@ output asserted by the DIRECTION of the last zone change.  Before
 every such prompt WAIVED to the AI backup and the answer depended on which way
 the authoring agent read one ambiguous sentence.
 
-The load-bearing claim is that the direction sense is NOT a judgement call: the
-bottom zone can only ever be ENTERED by a decrease, so a prompt that pins the
-direction output asserted in the bottom zone has fixed the sense.  The solver
-REQUIRES that pin (`test_no_bottom_pin_skips`) instead of guessing.
+The explicit previous/current relation owns intermediate direction. Extreme
+zone overrides and reset are separate from that relation.
 
 The fixture below is a synthetic battery-gauge ladder, not a benchmark prompt:
 the solver must fire on the SHAPE, never on a remembered design.
 """
-import sys
-from pathlib import Path
+import subprocess
 
-PROGRAMS = Path(__file__).parent.parent
-sys.path.insert(0, str(PROGRAMS))
-import threshold_ladder_synth as tl  # noqa: E402
-import spec_artifact_registry as reg  # noqa: E402
+import pytest
 
-LADDER = """
-A battery gauge drives three load-shedding outputs and one boost output. Three
-sensors are placed at equal charge intervals. When the charge is above the
-highest sensor c[3], no load shedding is required. When it is below the lowest
-sensor c[1], every load is shed and the boost converter is enabled.
-
-  Charge Level          | Sensors Asserted | Outputs to be Asserted
-  Above c[3]            | c[1], c[2], c[3] | None
-  Between c[3] and c[2] | c[1], c[2]       | shed1
-  Between c[2] and c[1] | c[1]             | shed1, shed2
-  Below c[1]            | None             | shed1, shed2, shed3
-
-If the sensor change indicates that the previous level was lower than the
-current level, the boost converter (controlled by boost) should be enabled.
-
-Also include an active-high synchronous reset that resets the state machine to
-a state equivalent to if the charge had been low for a long time (no sensors
-asserted, and all four outputs asserted).
-
-module TopModule (
-  input clk,
-  input reset,
-  input [3:1] c,
-  output reg shed3,
-  output reg shed2,
-  output reg shed1,
-  output reg boost
-);
-"""
+# Reuse the fixture and registry setup; that module never imports the owner.
+from test_threshold_ladder_registry_route import LADDER, reg
+import threshold_ladder_synth as tl
 
 
 def test_the_ladder_prompt_is_program_solved():
@@ -61,68 +29,26 @@ def test_the_ladder_prompt_is_program_solved():
     kind, reg_rtl = reg.generate(LADDER, "TopModule")
     assert kind == "threshold_ladder"
     assert reg_rtl == rtl
-
-
-def test_the_declared_bit_range_is_preserved():
-    """Rebuilding a port from (name, width) turned `[3:1] c` into `[2:0] c`
-    while the body still indexed c[3] — out of range."""
-    rtl = tl.synth(LADDER)
+    # The verbatim nonzero bus range is part of the interface contract.
     assert "input [3:1] c" in rtl
     assert "[2:0] c" not in rtl
+    # Extreme row overrides and the two independent interior rows remain checked.
+    assert "boost = 1'b1;" in _row(rtl, 0)
+    assert "boost = 1'b0;" in _row(rtl, 3)
+    assert all("boost = direction_asserted;" in _row(rtl, z) for z in (1, 2))
 
 
-def test_the_direction_output_is_pinned_in_the_bottom_zone():
-    """The sense-fixing fact: bottom zone asserts it unconditionally."""
-    rtl = tl.synth(LADDER)
-    bottom = [l for l in rtl.splitlines() if "2'd0:" in l]
-    assert bottom and "boost = 1'b1;" in bottom[0], rtl
-    top = [l for l in rtl.splitlines() if "2'd3:" in l]
-    assert top and "boost = 1'b0;" in top[0], rtl
-    interior = [l for l in rtl.splitlines() if "2'd1:" in l or "2'd2:" in l]
-    assert all("boost = went_down;" in l for l in interior), rtl
+def _row(rtl, zone):
+    return next(line for line in rtl.splitlines() if f"2'd{zone}:" in line)
 
 
-def test_the_zone_outputs_are_read_from_the_table():
+
+@pytest.mark.parametrize("cell,expected", [("shed1, shed2", 0), ("shed1, shed2, shed3", 1)])
+def test_the_zone_outputs_are_read_from_the_table(cell, expected):
     """MUTATION: move an output to a different zone; the RTL must follow."""
-    mutated = LADDER.replace("| shed1, shed2\n", "| shed1, shed2, shed3\n")
-    rtl = tl.synth(mutated)
+    rtl = tl.synth(LADDER.replace("| shed1, shed2\n", f"| {cell}\n"))
     assert rtl is not None
-    zone1 = [l for l in rtl.splitlines() if "2'd1:" in l][0]
-    assert "shed3 = 1'b1;" in zone1, rtl
-    base = [l for l in tl.synth(LADDER).splitlines() if "2'd1:" in l][0]
-    assert "shed3 = 1'b0;" in base
-
-
-def test_the_reset_polarity_is_read_from_the_prose():
-    """MUTATION: flip the stated polarity; the reset test must flip."""
-    rtl = tl.synth(LADDER)
-    assert "if (reset)" in rtl
-    flipped = tl.synth(LADDER.replace("active-high synchronous",
-                                      "active-low synchronous"))
-    assert flipped is not None and "if (!reset)" in flipped
-
-
-def test_no_bottom_pin_skips():
-    """MUTATION / the honesty case: without the pin the direction sense is a
-    coin flip, so the solver must WAIVE rather than guess."""
-    import re
-    no_pin = re.sub(r"\(no sensors\s+asserted,[^)]*\)", "(the quiescent state)",
-                    LADDER)
-    assert "no sensors" not in no_pin, "the mutation must actually remove the pin"
-    assert tl.synth(no_pin) is None
-
-
-def test_a_broken_inclusion_chain_skips():
-    """MUTATION: a non-thermometer sensor set is not this artifact."""
-    broken = LADDER.replace("| c[1], c[2]       |", "| c[2], c[3]       |")
-    assert tl.synth(broken) is None
-
-
-def test_a_second_unmatched_output_skips():
-    """Without a UNIQUE direction output the shape is not closed."""
-    ambiguous = LADDER.replace("  output reg boost\n",
-                               "  output reg boost,\n  output reg alarm\n")
-    assert tl.synth(ambiguous) is None
+    assert f"shed3 = 1'b{expected};" in _row(rtl, 1)
 
 
 def test_it_does_not_fire_on_another_family():
@@ -144,3 +70,75 @@ module TopModule (
 );
 """
     assert tl.synth(kmap) is None
+
+
+@pytest.mark.parametrize("relation", ["lower", "higher"])
+@pytest.mark.parametrize("polarity", ["active-high", "active-low"])
+def test_native_direction_sequence(tmp_path, relation, polarity):
+    prompt = LADDER.replace("was lower", "was " + relation).replace("active-high", polarity)
+    kind, rtl = reg.generate(prompt, "TopModule")
+    assert kind == "threshold_ladder"
+    assert rtl is not None
+    assert ("if (reset)" if polarity == "active-high" else "if (!reset)") in rtl
+    rising = int(relation == "lower")
+    falling = 1 - rising
+    # Includes hold after both directions, extremes, and reset from an interior.
+    sequence = [(1, 0, 15), (0, 1, 6 + rising), (0, 1, 6 + rising),
+                (0, 3, 2 + rising), (0, 1, 6 + falling),
+                (0, 1, 6 + falling), (0, 0, 15), (0, 7, 0),
+                (0, 3, 2 + falling), (1, 3, 15), (0, 1, 6 + rising)]
+    checks = []
+    for i, (reset, sensors, expected) in enumerate(sequence):
+        reset = reset if polarity == "active-high" else 1 - reset
+        checks.append(f"reset = {reset}; c = 3'd{sensors}; #5; clk = 1; #1; "
+                      f"if ({{shed3,shed2,shed1,boost}} !== 4'd{expected}) "
+                      f'$fatal(1, "step {i}: got %d expected {expected}", '
+                      "{shed3,shed2,shed1,boost}); #4; clk = 0;")
+    design = tmp_path / "design.v"
+    design.write_text(rtl)
+    tb = tmp_path / "tb.v"
+    tb.write_text("""module tb;
+reg clk = 0, reset = 0;
+reg [3:1] c = 0;
+wire shed3, shed2, shed1, boost;
+TopModule dut(clk, reset, c, shed3, shed2, shed1, boost);
+initial begin
+""" + "\n".join(checks) + '\n$display("SEQUENCE_PASS"); $finish; end\nendmodule\n')
+    for command in (["iverilog", "-g2012", "-s", "tb", "-o", str(tmp_path / "sim"),
+                     str(design), str(tb)], ["vvp", str(tmp_path / "sim")]):
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr
+    assert "SEQUENCE_PASS" in result.stdout
+
+
+
+_RELATION = next(p for p in LADDER.split("\n\n") if p.startswith("If ")).strip()
+
+
+@pytest.mark.parametrize("old,new", [
+    (_RELATION, ""),  # no relation, despite the extreme pin
+    (_RELATION, _RELATION + "\n" + _RELATION.replace("lower", "higher")),
+    *[(_RELATION, _RELATION.replace(old, new)) for old, new in [
+        ("lower", "equal"), ("controlled by boost", "controlled by foreign"),
+        ("should be enabled", "should not be enabled"),
+        ("previous level", "previous output"), ("current level", "current output"),
+        ("lower", "lower or higher")]],
+    ("| c[1], c[2]       |", "| c[2], c[3]       |"),  # broken inclusion chain
+    ("  output reg boost\n", "  output reg boost,\n  output reg alarm\n"),  # nonunique output
+], ids=["missing", "contradictory", "unsupported", "foreign-output", "negated",
+        "foreign-previous", "foreign-current", "ambiguous", "broken-chain", "extra-output"])
+def test_unowned_or_unclosed_ladder_refuses(old, new):
+    assert old in LADDER
+    assert tl.synth(LADDER.replace(old, new)) is None
+
+
+@pytest.mark.parametrize("old,new,expected", [
+    ("asserted, and all four outputs asserted", "asserted", "sensed > zone"),
+    (_RELATION, "If the previous zone is higher than the current zone, boost should be asserted.",
+     "sensed < zone"),
+])
+def test_relation_is_independent_of_extreme_pin_and_output_spelling(old, new, expected):
+    rtl = tl.synth(LADDER.replace(old, new).replace("boost", "assist"))
+    assert rtl is not None
+    assert "assist = direction_asserted;" in rtl
+    assert expected in rtl

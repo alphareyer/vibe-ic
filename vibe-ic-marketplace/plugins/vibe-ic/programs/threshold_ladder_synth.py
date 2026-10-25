@@ -18,17 +18,8 @@ every input combination as a row.
     Between s[2] and s[1] | s[1]             | fr1, fr2
     Below s[1]            | None             | fr1, fr2, fr3
 
-THE DIRECTION SENSE IS NOT A COIN FLIP.  Prose of the form "if the change
-indicates the previous zone was lower, assert X" reads two ways, because such
-specs use one word ("level") for both the sensed quantity and the response
-magnitude.  The spec settles it ITSELF, structurally: the BOTTOM zone can only
-ever be ENTERED by a decrease, so a sentence pinning the direction output
-ASSERTED in the bottom zone forces `direction output <=> the last change was a
-decrease`.  This solver REQUIRES that pin and SKIPs without it, rather than
-guessing.  (Measured on VerilogEval-Human Prob149_ece241_2013_q4, 2026-09-06,
-host 8hd-3: the pinned reading scores `Mismatches: 0 in 2040 samples` against
-the official golden; the opposite reading scores `1171 in 2040`, which is
-exactly the published v1.13.78 single-shot failure for that problem.)
+Direction comes from the explicit previous/current level or zone comparison
+and its named output. Extreme-zone output overrides do not set that convention.
 
 §4.05 NO-LEAK / EXACT-OR-NOTHING.  Every condition below must hold or the
 solver returns None, which is an honest waive to the AI backup:
@@ -40,7 +31,7 @@ solver returns None, which is an honest waive to the AI backup:
     decode;
   * exactly ONE declared output is named by the direction prose and by no table
     row;
-  * a bottom-zone pin sentence for that output;
+  * one explicit previous lower/higher than current relation asserting it;
   * a stated reset (mode + polarity) naming a declared port.
 chip-AGNOSTIC: no design, vendor, PDK or benchmark literal; every name, width,
 zone and output set is read from the prompt.
@@ -134,32 +125,6 @@ def _ladder(rows: List[List[str]], outs: Sequence[str]
     return bus, sets, [p[1] for p in parsed]
 
 
-def _bottom_pin(text: str, direction_out: str, n_outputs: int) -> bool:
-    """True when the prompt pins the direction output ASSERTED in the bottom zone.
-
-    Two structural forms are accepted, both of which say the same thing:
-      * a reset/bottom sentence asserting ALL N outputs while NO sensor is
-        asserted -- `(no sensors asserted, and all four outputs asserted)`;
-      * a bottom-zone sentence naming the direction output's valve/actuator as
-        opened/on at maximum -- the direction output's own name appearing in a
-        sentence that also states the maximum.
-    """
-    for sent in re.split(r"(?<=[.;])\s+|\n\s*\n", text):
-        low = sent.lower()
-        if "assert" not in low:
-            continue
-        if not re.search(r"\bno\s+sensors?\b", low):
-            continue
-        m = re.search(r"\ball\s+(\w+)\s+outputs?\b", low)
-        if not m:
-            continue
-        tok = m.group(1)
-        count = _NUMBER_WORD.get(tok, int(tok) if tok.isdigit() else None)
-        if count == n_outputs:
-            return True
-    return False
-
-
 def _reset(text: str, ins: Sequence[str]) -> Optional[Tuple[str, str, str]]:
     """(signal, mode, polarity) for the stated reset."""
     low = text.lower()
@@ -177,16 +142,21 @@ def _reset(text: str, ins: Sequence[str]) -> Optional[Tuple[str, str, str]]:
     return named[0], mode, polarity
 
 
-def _direction_output(text: str, outs: Sequence[str],
-                      table_outs: Sequence[Tuple[str, ...]]) -> Optional[str]:
-    """The one declared output no table row asserts and the prose names."""
-    tabled = {n for row in table_outs for n in row}
-    spare = [o for o in outs if o not in tabled]
-    if len(spare) != 1:
+def _direction_relation(text: str, outs: Sequence[str],
+                        table_outs: Sequence[Tuple[str, ...]]) -> Optional[Tuple[str, str]]:
+    """A single source-owned comparison and the output it explicitly asserts."""
+    spare = set(outs) - {n for row in table_outs for n in row}
+    clauses = [s.strip() for s in re.split(r"[.;]|\n\s*\n", text) if re.search(r"\bprevious\b", s, re.I)]
+    if len(spare) != 1 or len(clauses) != 1:
         return None
-    if not re.search(rf"\b{re.escape(spare[0])}\b", text):
+    relation = re.fullmatch(
+        r"If (?:the sensor change indicates that )?the previous (level|zone) "
+        r"(?:was|is) (lower|higher) than the current \1, "
+        r"(?:the [\w ]+ \(controlled by (\w+)\)|(\w+)) should be (?:enabled|asserted)",
+        " ".join(clauses[0].split()), re.I)
+    if relation is None or (relation[3] or relation[4]) not in spare:
         return None
-    return spare[0]
+    return (relation[3] or relation[4]), (">" if relation[2].lower() == "lower" else "<")
 
 
 def _header_ports_verbatim(text: str) -> Optional[str]:
@@ -227,11 +197,14 @@ def synth(prompt_text: str, top: str = "TopModule") -> Optional[str]:
     bus, sets, zone_outs = lad
     if bus not in in_names:
         return None
-    direction = _direction_output(prompt_text, scalar_outs, zone_outs)
-    if direction is None:
+    relation = _direction_relation(prompt_text, scalar_outs, zone_outs)
+    if relation is None:
         return None
-    if not _bottom_pin(prompt_text, direction, len(out_names)):
-        return None
+    direction, comparison = relation
+    counts = [str(len(out_names))] + [w for w, n in _NUMBER_WORD.items() if n == len(out_names)]
+    bottom_override = bool(re.search(
+        rf"no sensors?\s+asserted,? and all ({'|'.join(counts)}) outputs? asserted",
+        prompt_text, re.I))
     rst = _reset(prompt_text, in_names)
     if rst is None:
         return None
@@ -259,15 +232,13 @@ def synth(prompt_text: str, top: str = "TopModule") -> Optional[str]:
         assigns = []
         for o in out_names:
             if o == direction:
-                # Pinned at the extremes by the prompt: asserted in the bottom
-                # zone, and deasserted in the top zone when that zone asserts
-                # nothing at all.  Elsewhere it is the direction bit.
-                if k == 0:
+                # Explicit extremes override only their own rows.
+                if k == 0 and bottom_override:
                     assigns.append(f"{o} = 1'b1;")
                 elif k == n_zones - 1 and not zone_outs[k]:
                     assigns.append(f"{o} = 1'b0;")
                 else:
-                    assigns.append(f"{o} = went_down;")
+                    assigns.append(f"{o} = direction_asserted;")
             else:
                 assigns.append(f"{o} = 1'b%d;" % (1 if o in zone_outs[k] else 0))
         body.append(f"      {width}'d{k}: begin {' '.join(assigns)} end")
@@ -278,24 +249,21 @@ def synth(prompt_text: str, top: str = "TopModule") -> Optional[str]:
          for n, w in ins] +
         [f"  output reg {n}" for n in out_names])
     return f"""// Sensor threshold ladder with a change-direction output.
-// Zones are a thermometer decode of `{bus}`; `went_down` records the direction of
-// the last zone change.  The direction output is pinned asserted in the bottom
-// zone by the prompt, which is what fixes the direction sense.
+// Zones decode `{bus}`; direction follows the stated previous/current relation.
 module {top} (
 {ports}
 );
   reg [{width - 1}:0] zone;
-  reg went_down;
+  reg direction_asserted;
   wire [{width - 1}:0] sensed = {sensed};
 
   always @({sens}) begin
     if ({rst_test}) begin
       zone <= {width}'d0;
-      went_down <= 1'b1;
+      direction_asserted <= 1'b1;
     end else begin
       zone <= sensed;
-      if (sensed < zone)      went_down <= 1'b1;
-      else if (sensed > zone) went_down <= 1'b0;
+      if (sensed != zone) direction_asserted <= (sensed {comparison} zone);
     end
   end
 
