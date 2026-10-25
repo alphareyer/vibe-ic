@@ -14,7 +14,7 @@ import benchmark_io_adapter as bio
 WIRE = "module neutral(input a,output y); assign y=a; endmodule\n"
 
 
-def _fixture(tmp_path):
+def _fixture(tmp_path, *, retained=False):
     project = tmp_path / "run/projects/neutral"
     prompt = project / "input/phase1_prompt.md"
     prompt.parent.mkdir(parents=True)
@@ -24,11 +24,19 @@ def _fixture(tmp_path):
     rtl.parent.mkdir(parents=True)
     rtl.write_text(WIRE)
     runner = tmp_path / "vibe_ic_one_shot_runner.py"
+    retention = '''import runtime_program_tree as rpt
+tree = rpt.activate(p, pathlib.Path(%r),
+                    pathlib.Path(%r) / 'vibe_ic_one_shot_runner.py')
+if mode == 'retained-drift':
+    consumer = tree.programs_dir / 'benchmark_dispatch.py'
+    consumer.write_text(consumer.read_text() + '\\n# changed retained source\\n')
+''' % (str(PROGRAMS), str(PROGRAMS)) if retained else ""
     runner.write_text('''import json, pathlib, sys
 sys.path.insert(0, %r)
-import design_one_shot_runner as producer
 p = pathlib.Path(sys.argv[1]).resolve()
 mode = sys.argv[2]
+%s
+import design_one_shot_runner as producer
 q = p/'reports/orchestrator/phase2_one_shot.json'
 summary = {'project':str(p), 'verdict':'NOT_MEASURED',
            'steps':[{'name':'rtl_gen','status':'PASS','detail':'neutral current producer'}]}
@@ -52,7 +60,7 @@ if mode in {'generation','source','options','material','drop'}:
 print('neutral completed stdout')
 print('REFUSED: NEUTRAL_DOWNSTREAM after current report', file=sys.stderr)
 raise SystemExit(1)
-''' % (str(PROGRAMS), WIRE))
+''' % (str(PROGRAMS), retention, WIRE))
     return project, runner
 
 
@@ -138,6 +146,41 @@ def test_actual_runner_bytes_and_frozen_options_are_checked_on_reentry(tmp_path)
     runner.write_text("import sys\nraise SystemExit(2)\n")
     assert "RUNNER_SOURCE_UNBOUND" in bd._runner_reentry_reason(task, {})
     assert receipt.read_bytes() == old
+
+
+def test_retained_native_writer_binds_the_issued_dispatcher_source(tmp_path, monkeypatch):
+    from _hostpaths import require_repo
+    # Exercise the real installed source through the runtime-retention seam,
+    # rather than a second hand-written implementation of report binding.
+    assert require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+        "runtime_program_tree.py").is_file()
+    monkeypatch.delenv("VIBEIC_RETAINED_PLUGIN_ROOT", raising=False)
+    monkeypatch.delenv("VIBEIC_RETAINED_PLUGIN_MANIFEST", raising=False)
+    project, runner = _fixture(tmp_path, retained=True)
+    process, got = _run(project, runner)
+
+    assert got["ok"] is True, (process.stderr, got)
+    report = json.loads((project / "reports/orchestrator/phase2_one_shot.json").read_text())
+    binding = report["runner_binding"]
+    assert binding["source"] == process.invocation["source_before"]
+    assert binding["source"]["consumer"]["path"] == str(Path(bd.__file__).resolve())
+    retained_programs = Path(binding["producer"]["path"]).parent
+    assert retained_programs != PROGRAMS
+    assert hashlib.sha256((retained_programs / "benchmark_dispatch.py").read_bytes()).hexdigest() == (
+        binding["source"]["consumer"]["sha256"])
+    assert bd._runner_reentry_reason(_task(tmp_path, project, process, got), {}) is None
+
+
+def test_changed_retained_binding_helper_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.delenv("VIBEIC_RETAINED_PLUGIN_ROOT", raising=False)
+    monkeypatch.delenv("VIBEIC_RETAINED_PLUGIN_MANIFEST", raising=False)
+    project, runner = _fixture(tmp_path, retained=True)
+    process, got = _run(project, runner, "retained-drift")
+
+    assert got["ok"] is False
+    assert "RUNNER_REPORT_UNBOUND: producer context/source differs" in process.stderr
+    assert not (project / "reports/orchestrator/phase2_one_shot.json").exists()
 
 
 def test_standalone_native_writer_retains_its_existing_format(tmp_path, monkeypatch):

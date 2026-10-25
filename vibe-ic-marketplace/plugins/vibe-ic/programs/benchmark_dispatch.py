@@ -173,7 +173,7 @@ _RUNNER_REPORT_NAMES = ("phase1_one_shot.json", "phase2_one_shot.json",
 _RUNNER_CONTEXT_ENV = "VIBEIC_RUNNER_INVOCATION_CONTEXT"
 
 
-def _runner_source_snapshot(argv: list[str]) -> dict:
+def _runner_source_snapshot(argv: list[str], *, consumer: str | None = None) -> dict:
     """Identity of the executable and actual script, including invocation options.
 
     The dispatcher is a consumer, not a substitute for argv[1]'s producer.
@@ -186,7 +186,7 @@ def _runner_source_snapshot(argv: list[str]) -> dict:
 
     executable = shutil.which(argv[0]) or argv[0]
     return {"argv": list(argv), "executable": source(executable),
-            "runner": source(argv[1]), "consumer": source(__file__)}
+            "runner": source(argv[1]), "consumer": source(consumer or __file__)}
 
 
 def _bind_runner_report(summary: dict, project: Path, producer: str,
@@ -206,7 +206,14 @@ def _bind_runner_report(summary: dict, project: Path, producer: str,
     project = Path(project).resolve()
     if context["project"] != str(project):
         return summary  # an internal isolated child has its own report subject
-    if (context["source"] != _runner_source_snapshot(context["argv"])
+    # Runtime retention imports this helper from a byte-identical copy. The
+    # consumer is still the dispatcher that issued this invocation, not the
+    # copy's location. Revalidate the issued source AND the imported helper's
+    # bytes; relocating a helper must not admit a different implementation.
+    consumer = context["source"]["consumer"]
+    if (context["source"] != _runner_source_snapshot(
+                context["argv"], consumer=consumer["path"])
+            or hashlib.sha256(Path(__file__).read_bytes()).hexdigest() != consumer["sha256"]
             or report_name not in _RUNNER_REPORT_NAMES):
         raise ValueError("RUNNER_REPORT_UNBOUND: producer context/source differs")
     producer_path = Path(producer).resolve(strict=True)
