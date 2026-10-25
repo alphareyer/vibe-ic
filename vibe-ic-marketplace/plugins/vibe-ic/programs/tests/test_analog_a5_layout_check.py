@@ -727,3 +727,69 @@ def test_the_two_blocking_rules_are_reported_separately(tmp_path: Path) -> None:
     rules = sorted(f["rule"] for f in
                    json.loads((tmp_path / "report.json").read_text())["findings"])
     assert rules == ["A5_DEVICE_ABOVE_PDK_MAXIMUM", "A5_LAYOUT_DRAWN_SHORT"]
+
+
+def test_documented_die_bounds_actual_gds_and_rejects_long_row(tmp_path):
+    import pytest
+    import analog_a5_layout_check as gate
+    from test_analog_lef_gds_outline_check import build_gds
+    project = tmp_path
+    docs = project / 'phase1/generated_docs'
+    docs.mkdir(parents=True)
+    (docs / 'L19_CONSTRAINTS_PDK.json').write_text(json.dumps(
+        {'fields': {'die_area_budget_um': [1300, 1300]}}))
+    _block_list(project, ['cell'])
+    _layout_full(project, 'cell')
+    gds = project / 'phase3/analog/cell/cell.gds'
+    gds.write_bytes(build_gds(1300, 1300))
+    assert gate.die_fit(project, 'cell')['status'] == 'PASS'
+    gds.write_bytes(build_gds(16327, 902))
+    fit = gate.die_fit(project, 'cell')
+    assert fit['status'] == 'FAIL'
+    assert fit['footprint_um'] == pytest.approx([16327, 902])
+    status, findings, _ = gate._check_block(project, 'cell')
+    assert status == 'FAIL'
+    assert 'A5_LAYOUT_EXCEEDS_DOCUMENTED_DIE' in {f['rule'] for f in findings}
+    gds.write_bytes(build_gds(1000, 1300.001))
+    assert gate.die_fit(project, 'cell')['status'] == 'FAIL'
+    # A small footprint still fails if its actual coordinates leave the die.
+    gds.write_bytes(build_gds(1000, 900, origin_um=(-1, 0)))
+    assert gate.die_fit(project, 'cell')['status'] == 'FAIL'
+    gds.write_bytes(build_gds(1000, 900, origin_um=(301, 0)))
+    assert gate.die_fit(project, 'cell')['status'] == 'FAIL'
+
+
+def test_die_size_conflict_and_nonfinite_dimensions_are_not_accepted(tmp_path):
+    import pytest
+    import analog_a5_layout_check as gate
+    docs = tmp_path / 'phase1/generated_docs'
+    docs.mkdir(parents=True)
+    l19 = docs / 'L19_CONSTRAINTS_PDK.json'
+    l1 = docs / 'L1_DATASHEET.json'
+    l19.write_text(json.dumps({'fields': {'die_area_budget_um': [1300, 1300]}}))
+    l1.write_text(json.dumps({'tapeout_metadata': {'die_size_um': [2000, 2000]}}))
+    with pytest.raises(ValueError, match='conflicting'):
+        gate.documented_die_size(tmp_path)
+    l1.unlink()
+    l19.write_text(json.dumps({'fields': {'die_area_budget_um': [float('inf'), 1300]}}))
+    with pytest.raises(ValueError, match='invalid'):
+        gate.documented_die_size(tmp_path)
+
+
+def test_existing_a5_consumer_cannot_accept_a_layout_larger_than_source_die(tmp_path):
+    import analog_a5_layout_check as gate
+    from test_analog_lef_gds_outline_check import build_gds
+    docs = tmp_path / 'phase1/generated_docs'
+    docs.mkdir(parents=True)
+    (docs / 'L19_CONSTRAINTS_PDK.json').write_text(json.dumps(
+        {'fields': {'die_area_budget_um': [1300, 1300]}}))
+    _block_list(tmp_path, ['cell'])
+    _layout_full(tmp_path, 'cell')
+    gds = tmp_path / 'phase3/analog/cell/cell.gds'
+    gds.write_bytes(build_gds(16327, 902))
+    status, findings, _ = gate._check_block(tmp_path, 'cell')
+    assert status == 'FAIL'
+    assert any(f['rule'] == 'A5_LAYOUT_EXCEEDS_DOCUMENTED_DIE' for f in findings)
+    gds.write_bytes(build_gds(1000, 900))
+    status, _, _ = gate._check_block(tmp_path, 'cell')
+    assert status == 'PASS'

@@ -197,6 +197,56 @@ from _analog_a_check_common import (
 )
 import _analog_layout_matching as _lm
 
+
+def documented_die_size(project: Path):
+    """Read explicit source-derived dimensions; never infer a larger die."""
+    import hashlib
+    import math
+    choices = []
+    for rel, key in (("phase1/generated_docs/L19_CONSTRAINTS_PDK.json", "die_area_budget_um"),
+                     ("phase1/generated_docs/L1_DATASHEET.json", "die_size_um")):
+        path = project / rel
+        if not path.is_file():
+            continue
+        doc = json.loads(path.read_text())
+        value = (doc.get("fields") or {}).get(key)
+        field = "fields." + key
+        if value is None and key == "die_size_um":
+            value = (doc.get("tapeout_metadata") or {}).get(key)
+            field = "tapeout_metadata." + key
+        if value is None:
+            continue
+        if not (isinstance(value, list) and len(value) == 2
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                        and math.isfinite(v) and v > 0 for v in value)):
+            raise ValueError(f"invalid documented die dimensions: {rel} fields.{key}")
+        choices.append((list(map(float, value)), {"path": rel, "field": field,
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}))
+    if not choices:
+        return None, []
+    if any(size != choices[0][0] for size, _ in choices):
+        raise ValueError("conflicting documented die dimensions")
+    return choices[0][0], [source for _, source in choices]
+
+
+def die_fit(project: Path, block: str):
+    """Require the actual hierarchical GDS bbox inside the source-sized die."""
+    from analog_lef_gds_outline_check import parse_gds_bbox_extent
+    size, sources = documented_die_size(project)
+    if size is None:
+        return {"status": "NOT_MEASURED", "reason": "documented die dimensions absent"}
+    path = project / "phase3/analog" / block / (block + ".gds")
+    extent = parse_gds_bbox_extent(path.read_bytes()) if path.is_file() else None
+    if extent is None:
+        return {"status": "FAIL", "reason": "actual GDS extent unavailable", "sources": sources}
+    footprint = [extent[2] - extent[0], extent[3] - extent[1]]
+    inside = (extent[0] >= 0 and extent[1] >= 0
+              and extent[2] <= size[0] and extent[3] <= size[1])
+    return {"status": "PASS" if inside else "FAIL",
+            "bbox_um": list(extent), "footprint_um": footprint,
+            "die_size_um": size, "sources": sources,
+            "placement": "actual bbox within [0, 0, die_width, die_height]; no assumed translation, rotation or scaling"}
+
 GATE = "analog_a5_layout_check"
 SKILL = "analog-layout"
 MIN_LAYOUT_BYTES = 200
@@ -377,6 +427,13 @@ def _check_block(project: Path, block: str
     # THE PRODUCER'S OWN RECORD, for the ONE thing in it that is not a
     # clearance prediction. See the module docstring.
     findings.extend(_drawn_shorts(project, bdir, block))
+    try:
+        fit = die_fit(project, block)
+    except (ValueError, OSError, TypeError) as exc:
+        fit = {"status": "FAIL", "reason": str(exc)}
+    if fit["status"] == "FAIL":
+        findings.append({"block": block, "rule": "A5_LAYOUT_EXCEEDS_DOCUMENTED_DIE",
+                         "rel_path": str(gds.relative_to(project)), "detail": fit})
     # NOTE: per-block DRC / LVS sign-off is deliberately NOT judged here —
     # see the module docstring's "SCOPE" section. It is step A6's verdict,
     # over A6's own (richer) evidence, at the point in the flow where that
