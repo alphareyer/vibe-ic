@@ -94,6 +94,21 @@ def test_a_real_range_before_a_declared_pin_still_requires_bus_width(tmp_path):
     assert report['bus_confirmed'] == 1
 
 
+def test_checked_in_rtl_declarations_keep_their_own_bus_evidence(tmp_path):
+    from programs.tests._hostpaths import require_repo
+    source = require_repo('vibe-ic-marketplace', 'plugins', 'vibe-ic', 'programs',
+                          'tests', 'fixtures', 'iface_table_roles', 'neutral_reg.v')
+    _write_input(tmp_path, 'rtl/ports.sv', source.read_text())
+    _write_l1(tmp_path, [
+        {'name': 'address', 'mode': 'input', 'width': 8},
+        {'name': 'write_data', 'mode': 'input', 'width': 32},
+        {'name': 'read_data', 'mode': 'output', 'width': 32},
+    ])
+    rc, report = _run(tmp_path)
+    assert rc == 0, report
+    assert report['bus_confirmed'] == 3
+
+
 # ------------------------------------------------- POSITIVE: well-formed
 def test_pass_well_formed_layer(tmp_path):
     """Well-formed L1: every bus-confirmed pin has an integer width."""
