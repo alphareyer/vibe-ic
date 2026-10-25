@@ -1630,10 +1630,10 @@ def _worked_example_is_covered_parent_gloss(coverage_tokens: List[str],
 
 
 _SEPARATE_WIDTH_ILLUSTRATION_RE = re.compile(
-    r"\b(?:for\s+example|for\s+instance|as\s+an?\s+illustration)\s*,?\s*"
+    r"\s*(?:for\s+example|for\s+instance|as\s+an?\s+illustration)\s*,?\s*"
     r"(?:consider\s+)?(?:a|an)\s+(\d+)\s*[- ]\s*bit\s+"
     r"(?:vector|word|value|operand|example|illustration)\b"
-    r"[^.;]*?\b(?:given|with)\s+(?:the\s+)?input\b",
+    r"\s*,?\s*(?:given|with)\s+(?:the\s+)?input\s*",
     re.I)
 
 
@@ -1670,10 +1670,12 @@ def _worked_example_is_separate_width_illustration(
             continue
         lo, hi = _prose_sentence_scope(spec, match.start(), match.end())
         clause = spec[lo:hi]
-        owner = _SEPARATE_WIDTH_ILLUSTRATION_RE.search(
+        owner = _SEPARATE_WIDTH_ILLUSTRATION_RE.fullmatch(
             clause[:match.start() - lo])
+        trailing = spec[match.end():]
         if (owner is None or _prose_is_denied(clause)
-                or re.search(r"\b(?:must|shall|required|requirement)\b", clause, re.I)):
+                or re.match(
+                    r"[ \t]*(?:[.!?]+(?=\s|$)|\Z)", trailing) is None):
             continue
         width = int(owner.group(1))
         if width <= 1 or width in {inputs[0].width, outputs[0].width}:

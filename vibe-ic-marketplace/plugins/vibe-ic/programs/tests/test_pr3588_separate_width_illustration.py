@@ -59,6 +59,46 @@ endmodule
     assert all(item["advisory_note"] for item in examples)
 
 
+def test_source_owned_requirement_has_to():
+    rtl = _rtl()
+    owner = ("For example, a 16-bit vector given the input 0x1234 -> 0xEDCB "
+             "and the implementation has to satisfy this example.")
+    report, examples = _worked(_spec(rtl, owner), rtl)
+    assert report["blocked"] is True
+    assert all(item["covered"] is False for item in examples)
+    assert all(item["block_eligible"] is True for item in examples)
+
+
+def test_source_owned_requirement_needs_to():
+    rtl = _rtl()
+    owner = ("For example, a 16-bit vector given the input 0x1234 -> 0xEDCB "
+             "and the implementation needs to satisfy this example.")
+    report, examples = _worked(_spec(rtl, owner), rtl)
+    assert report["blocked"] is True
+    assert all(item["covered"] is False for item in examples)
+    assert all(item["block_eligible"] is True for item in examples)
+
+
+def test_source_owned_requirement_prefix():
+    rtl = _rtl()
+    owner = ("The implementation must satisfy, for example, a 16-bit vector "
+             "given the input 0x1234 -> 0xEDCB.")
+    report, examples = _worked(_spec(rtl, owner), rtl)
+    assert report["blocked"] is True
+    assert all(item["covered"] is False for item in examples)
+    assert all(item["block_eligible"] is True for item in examples)
+
+
+def test_source_owned_requirement_inside_owner_prefix():
+    rtl = _rtl()
+    owner = ("For example, a 16-bit vector that the implementation must "
+             "satisfy, given the input 0x1234 -> 0xEDCB.")
+    report, examples = _worked(_spec(rtl, owner), rtl)
+    assert report["blocked"] is True
+    assert all(item["covered"] is False for item in examples)
+    assert all(item["block_eligible"] is True for item in examples)
+
+
 @pytest.mark.parametrize("case", [
     "same_width",
     "default_width",
