@@ -56,6 +56,8 @@ _NUMBER_WORD = {
 }
 _BITSEL = re.compile(r"\b([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]")
 _NONE = re.compile(r"^\s*(none|-|n/?a)\s*\.?\s*$", re.I)
+_TEMPORAL_PRIOR = r"(?:previous|prior|earlier|last[- ]sample)"
+_COMPARATIVE = r"(?:lower|higher|less|greater|equal|different|same|above|below|larger|smaller)"
 
 
 def _pipe_rows(text: str) -> List[List[str]]:
@@ -146,14 +148,15 @@ def _direction_relation(text: str, outs: Sequence[str],
                         table_outs: Sequence[Tuple[str, ...]]) -> Optional[Tuple[str, str]]:
     """A single source-owned comparison and the output it explicitly asserts."""
     spare = set(outs) - {n for row in table_outs for n in row}
-    # Descriptive mentions of an earlier sample are not conditions. Keep every
-    # comparative/normative previous-value clause, including unsupported forms,
-    # so an extra conflicting condition cannot disappear during extraction.
+    # Descriptive mentions of an earlier sample are not conditions. Census
+    # comparative/normative temporal clauses independently of the one accepted
+    # previous/current grammar, though, so an unsupported synonym or conflicting
+    # condition cannot disappear during extraction.
     clauses = [s.strip() for s in re.split(r"[.;]|\n\s*\n", text)
-               if re.search(r"\bprevious\b", s, re.I) and (
+               if re.search(rf"\b{_TEMPORAL_PRIOR}\b", s, re.I) and (
                    re.search(r"\b(?:current|present|now)\b", s, re.I)
-                   or re.search(r"\bprevious\b.*\b(?:lower|higher|less|greater|equal|different|same|above|below|larger|smaller)\b", s, re.I | re.S)
-                   or re.search(r"\b(?:lower|higher|less|greater|equal|same|above|below|larger|smaller)\s+(?:than|to|as)\s+(?:the\s+)?previous\b", s, re.I)
+                   or re.search(rf"\b{_TEMPORAL_PRIOR}\b.*\b{_COMPARATIVE}\b", s, re.I | re.S)
+                   or re.search(rf"\b{_COMPARATIVE}\s+(?:than|to|as)\s+(?:the\s+)?{_TEMPORAL_PRIOR}\b", s, re.I)
                    or re.search(r"\b(?:should|must|shall)\b", s, re.I)
                    or re.match(r"\s*(?:if|when|unless)\b", s, re.I))]
     if len(spare) != 1 or len(clauses) != 1:

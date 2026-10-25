@@ -173,3 +173,35 @@ def test_actuator_wording_does_not_infer_unsupported_polarity(effect):
 ])
 def test_unsupported_extra_previous_conditions_are_not_silently_dropped(extra):
     assert tl.synth(LADDER + '\n' + extra) is None
+
+
+_PRIOR_CONTRADICTION = (
+    'If the prior level was higher than the current level, boost should be disabled.'
+)
+
+
+def _route_outcome(prompt):
+    direct = "refused" if tl.synth(prompt) is None else "emitted"
+    registry = "no-route" if reg.generate(prompt, "TopModule") == (None, None) else "routed"
+    return direct, registry
+
+
+def test_exact_prior_contradiction_refuses_synth_and_registry_route():
+    prompt = LADDER + '\n' + _PRIOR_CONTRADICTION
+    assert _route_outcome(prompt) == ("refused", "no-route")
+
+
+@pytest.mark.parametrize('extra', [
+    'If the earlier level was higher than the present level, boost should be disabled.',
+    'If the last-sample level was higher than now, boost should be disabled.',
+])
+def test_other_prior_sample_comparisons_are_not_silently_dropped(extra):
+    prompt = LADDER + '\n' + extra
+    assert _route_outcome(prompt) == ("refused", "no-route")
+
+
+def test_noncomparative_prior_sample_narrative_remains_accepted():
+    prompt = LADDER + '\nThe prior sample is retained for diagnostic reporting.'
+    rtl = tl.synth(prompt)
+    assert rtl is not None
+    assert reg.generate(prompt, "TopModule") == ("threshold_ladder", rtl)
