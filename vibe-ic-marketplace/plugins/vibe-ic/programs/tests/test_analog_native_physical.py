@@ -738,6 +738,67 @@ def test_a16_block_declaration_routes_mission_and_keeps_every_attempt(project, m
     assert all(Path(p).is_file() for p in first["outputs"] + second["outputs"])
 
 
+def test_a16_op_convergence_uses_only_fixed_stock_ngspice_controls(project, monkeypatch):
+    import analog_real_corner_sweep as ars
+    import _designs_root as dr
+    deck = put(project / "input/mission.sp",
+               "* untouched mission\n.control\nop\necho MEAS max_stress=0.8\n.endc\n.end\n")
+    put(project / "input/mission_spec.json",
+        {"specs": [{"name": "max_stress", "max": 1.0}]})
+    monkeypatch.setattr(dr, "resolve_host_root", lambda *a: str(project))
+    monkeypatch.setattr(ars, "_container_path", lambda c, root, p: str(p))
+    seen = {}
+    def simulate(container, actual_deck, **kwargs):
+        seen["path"] = Path(actual_deck)
+        seen["text"] = kwargs["deck_text"]
+        return True, {"max_stress": 0.8}, "native measured stress", {"rc": 0}
+    monkeypatch.setattr(ars, "_run_ngspice", simulate)
+    result = physical._reliability(project, "unit", "container", "image", "process", {
+        "deck": "input/mission.sp", "spec": "input/mission_spec.json",
+        "op_convergence": True,
+        "_features": {"requires_thermal": False, "requires_ir": False,
+                      "requires_em": False, "requires_aging": False}})
+    mission = result["metrics"]["mission"]
+    assert result["status"] == "PASS"
+    assert mission["op_convergence"]["options"] == {
+        "itl1": 500, "gminsteps": 100, "srcsteps": 100}
+    assert ".options itl1=500 gminsteps=100 srcsteps=100" in seen["text"]
+    assert "reltol" not in seen["text"] and "abstol" not in seen["text"]
+    assert seen["path"] != deck
+    assert deck.read_text() == "* untouched mission\n.control\nop\necho MEAS max_stress=0.8\n.endc\n.end\n"
+    assert result["native_inputs"]["mission_execution_deck"]["sha256"] == physical._sha(seen["path"])
+
+
+@pytest.mark.parametrize("deck", [
+    ".control\ntran 1n 10n\nop\n.endc\n.end\n",
+    ".options itl1=9\n.control\nop\n.endc\n.end\n",
+])
+def test_a16_op_convergence_refuses_non_op_or_preconfigured_deck(deck):
+    with pytest.raises(ValueError):
+        physical._a16_op_convergence_deck(deck)
+
+
+def test_a16_op_nonconvergence_is_a_consumed_mission_failure(project, monkeypatch):
+    import analog_real_corner_sweep as ars
+    import _designs_root as dr
+    put(project / "input/mission.sp", ".control\nop\n.endc\n.end\n")
+    put(project / "input/mission_spec.json",
+        {"specs": [{"name": "max_stress", "max": 1.0}]})
+    monkeypatch.setattr(dr, "resolve_host_root", lambda *a: str(project))
+    monkeypatch.setattr(ars, "_container_path", lambda c, root, p: str(p))
+    monkeypatch.setattr(ars, "_run_ngspice", lambda *a, **k: (
+        False, {}, "singular matrix", {"rc": 1, "failed_analyses": ["*"]}))
+    result = physical._reliability(project, "unit", "container", "image", "process", {
+        "deck": "input/mission.sp", "spec": "input/mission_spec.json",
+        "op_convergence": True,
+        "_features": {"requires_thermal": False, "requires_ir": False,
+                      "requires_em": False, "requires_aging": False}})
+    assert result["status"] == "FAIL"
+    assert result["metrics"]["mission"]["status"] == "FAIL"
+    assert result["metrics"]["mission"]["simulation"]["rc"] == 1
+    assert result["metrics"]["mission"]["missing"] == ["max_stress"]
+
+
 @pytest.mark.parametrize("stress,expected", [(0.8, "NOT_MEASURED"), (1.2, "FAIL")])
 def test_a16_executes_native_mission_and_retains_violation_over_other_missing_evidence(
         project, monkeypatch, stress, expected):

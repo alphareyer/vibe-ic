@@ -53,6 +53,54 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+_A16_OP_CONVERGENCE_OPTIONS = {
+    "itl1": 500,
+    "gminsteps": 100,
+    "srcsteps": 100,
+}
+
+
+def _a16_op_convergence_deck(text: str) -> tuple[str, dict]:
+    """Add only stock-ngspice DC operating-point convergence controls.
+
+    This is deliberately narrower than a generic simulator-options escape
+    hatch: A16 may ask for the fixed, documented set below only on a pure OP
+    mission.  Tolerances, circuit conductances and the acceptance spec remain
+    owned by the supplied deck and spec.
+    """
+    logical = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("*", ";", "$", "//")):
+            continue
+        logical.append(line.casefold())
+    has_op = any(re.fullmatch(r"\.?op", line) for line in logical)
+    other_analyses = [line for line in logical if re.match(
+        r"^\.?(?:ac|dc|tran|noise|pz|tf|disto|sens)(?:\s|$)", line)]
+    if not has_op or other_analyses:
+        raise ValueError("A16 op_convergence requires a pure OP mission deck")
+    protected = "|".join(map(re.escape, _A16_OP_CONVERGENCE_OPTIONS))
+    if any(re.search(rf"\b(?:{protected})\s*=", line) for line in logical
+           if line.startswith((".option ", ".options "))):
+        raise ValueError(
+            "A16 op_convergence refuses a deck that already sets its protected options")
+    card = ".options " + " ".join(
+        f"{key}={value}" for key, value in _A16_OP_CONVERGENCE_OPTIONS.items())
+    lines = text.splitlines()
+    insert = next((index for index, line in enumerate(lines)
+                   if re.match(r"(?i)^\s*\.end\s*$", line)), len(lines))
+    lines.insert(insert, card)
+    derived = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    return derived, {
+        "enabled": True,
+        "analysis_scope": "OP only",
+        "options": dict(_A16_OP_CONVERGENCE_OPTIONS),
+        "basis": ("stock ngspice DC iteration limit plus built-in GMIN and "
+                  "source stepping; no tolerance, topology, stimulus, or "
+                  "acceptance change"),
+    }
+
+
 def _paths(project: Path, name: str) -> tuple[Path, Path]:
     return (project / "phase3" / "analog" / name,
             project / "phase3" / "librelane" / "analog" / name / "native_analog")
@@ -918,9 +966,20 @@ def _reliability(project: Path, name: str, container: str, image: str, pdk: str,
         remember("mission_deck", deck)
         remember("mission_spec", spec)
         native_inputs.update(measurements.consumed_input_views(project, deck))
+        execution_deck = deck
+        convergence = {"enabled": False}
+        if cfg.get("op_convergence") is True:
+            derived, convergence = _a16_op_convergence_deck(deck.read_text())
+            execution_deck = work / f"reliability-op-{uuid.uuid4().hex}.sp"
+            atomic_write_text(execution_deck, derived)
+            remember("mission_execution_deck", execution_deck)
+            outputs.append(execution_deck)
+        elif cfg.get("op_convergence") not in (None, False):
+            raise ValueError("A16 op_convergence must be true or false")
         host = dr.resolve_host_root(project, container)
         ok, values, log, sim = ars._run_ngspice(container,
-            ars._container_path(container, host, deck), deck_text=deck.read_text(),
+            ars._container_path(container, host, execution_deck),
+            deck_text=execution_deck.read_text(),
             run_to_completion=True)
         logfile = work / f"reliability-{uuid.uuid4().hex}.ngspice.log"
         logfile.write_text(log or "")
@@ -931,7 +990,8 @@ def _reliability(project: Path, name: str, container: str, image: str, pdk: str,
         status = "FAIL" if bad or (not ok and not sim.get("stopped")) else (
             "PASS" if ok and bounds and not missing else "NOT_MEASURED")
         records["mission"] = {"status": status, "measurements": values,
-                              "violations": bad, "missing": missing, "simulation": sim}
+                              "violations": bad, "missing": missing,
+                              "simulation": sim, "op_convergence": convergence}
     else:
         missing_inputs.extend(mission_missing)
         records["mission"] = {"status": "NOT_MEASURED",
