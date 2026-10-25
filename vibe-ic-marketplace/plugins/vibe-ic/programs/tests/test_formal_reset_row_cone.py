@@ -46,6 +46,25 @@ def pmux(a, b, s, y):
             "port_directions": {"A": "input", "B": "input", "S": "input", "Y": "output"}}
 
 
+def pmux_matrix_model(*, undef_selector=False, undef_data=False):
+    """Three-arm PMUX plus a total off-cone user of shared PMUX inputs."""
+    selector = [10, "x", 12] if undef_selector else [10, 11, 12]
+    data = ["x", 4, 5, 6, 7, 8] if undef_data else [4, 5, 6, 7, 8, 9]
+    ports = {
+        "a": {"direction": "input", "bits": [2, 3]},
+        "b": {"direction": "input", "bits": [bit for bit in data if isinstance(bit, int)]},
+        "s": {"direction": "input", "bits": [bit for bit in selector if isinstance(bit, int)]},
+        "off": {"direction": "input", "bits": [13, 14]},
+        "n": {"direction": "output", "bits": [15, 16]},
+    }
+    cells = {
+        "row": pmux([2, 3], data, selector, [15, 16]),
+        "offcone": cell("$xor", [2, 3], [17, 18], [13, 14]),
+    }
+    return {"modules": {"transition_pair": {"attributes": {}, "ports": ports,
+                                               "cells": cells, "netnames": {}}}}
+
+
 @pytest.mark.parametrize("defect,reason", [
     ("feedback", "combinational-feedback"),
     ("multiple", "non-unique-output-driver"),
@@ -92,6 +111,7 @@ def test_legal_pmux_relation_is_cone_eligible():
     ("$le", lambda c: c["connections"].__setitem__("Y", [4, 5])),
     ("$pmux", lambda c: c["parameters"].__setitem__("S_WIDTH", 3)),
     ("$pmux", lambda c: c["connections"].__setitem__("B", [3])),
+    ("$pmux", lambda c: c["parameters"].__setitem__("WIDTH", 2)),
 ])
 def test_malformed_new_total_relations_keep_whole_module(kind, mutation):
     candidate = (relation(kind, [2], [3], [4]) if kind != "$pmux"
@@ -99,6 +119,18 @@ def test_malformed_new_total_relations_keep_whole_module(kind, mutation):
     mutation(candidate)
     assert fsc._reset_row_cone_eligibility(model({"row": candidate})) == {
         "eligible": False, "reason": "malformed-total-cell-shape"}
+
+
+@pytest.mark.parametrize("defect,expected", [
+    ("feedback", "combinational-feedback"),
+    ("multiple-driver", "non-unique-output-driver"),
+])
+def test_pmux_feedback_and_multiple_driver_keep_whole_module(defect, expected):
+    cells = {"row": pmux([2], [3, 4], [6, 7], [4])}
+    if defect == "multiple-driver":
+        cells["other"] = cell("$not", [2], [4])
+    assert fsc._reset_row_cone_eligibility(model(cells)) == {
+        "eligible": False, "reason": expected}
 
 
 def native(tmp_path, data, commands, cone):
@@ -169,6 +201,36 @@ def test_native_comparison_undef_full_and_cone_are_identical(tmp_path, kind, sig
     cone = native(tmp_path / "cone", data, commands, True)
     assert full["by_identity"] == cone["by_identity"]
     assert full["by_identity"]["0"]["result"] == "HAS_UNDEF"
+
+
+@pytest.mark.parametrize("case,command,expected,undef_selector,undef_data", [
+    ("default", "-set a 2'b10 -set b 6'b111001 -set s 3'b000 -set off 2'b11 -prove n 2'b10",
+     "PROVED", False, False),
+    ("one_hot_0", "-set a 0 -set b 6'b111001 -set s 3'b001 -set off 2'b01 -prove n 1",
+     "PROVED", False, False),
+    ("one_hot_1", "-set a 0 -set b 6'b111001 -set s 3'b010 -set off 2'b10 -prove n 2",
+     "PROVED", False, False),
+    ("one_hot_2", "-set a 0 -set b 6'b111001 -set s 3'b100 -set off 2'b11 -prove n 3",
+     "PROVED", False, False),
+    ("equal_overlap", "-set a 0 -set b 6'b110101 -set s 3'b011 -set off 0 -set-any-undef n",
+     "HAS_UNDEF", False, False),
+    ("unequal_overlap", "-set a 0 -set b 6'b111001 -set s 3'b011 -set off 1 -set-any-undef n",
+     "HAS_UNDEF", False, False),
+    ("undefined_selector", "-set a 0 -set b 6'b111100 -set s 0 -set off 2 -set-any-undef n",
+     "HAS_UNDEF", True, False),
+    ("undefined_data", "-set a 0 -set b 0 -set s 1 -set off 3 -set-any-undef n",
+     "HAS_UNDEF", False, True),
+])
+def test_native_pmux_full_and_cone_matrix_is_identical(
+        tmp_path, case, command, expected, undef_selector, undef_data):
+    data = pmux_matrix_model(undef_selector=undef_selector, undef_data=undef_data)
+    assert fsc._reset_row_cone_eligibility(data) == {
+        "eligible": True, "reason": "single-driver-total-boolean-dag"}
+    full = native(tmp_path / "full", data, [command], False)
+    cone = native(tmp_path / "cone", data, [command], True)
+    assert full["by_identity"] == cone["by_identity"], case
+    assert full["by_identity"] == {
+        "0": {"status": "COMPLETED", "result": expected}}
 
 
 def test_native_feedback_can_restrict_shared_domain_and_is_not_pruned(tmp_path):
