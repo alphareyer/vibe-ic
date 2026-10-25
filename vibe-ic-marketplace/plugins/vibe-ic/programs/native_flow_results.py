@@ -8,7 +8,6 @@ import json
 import re
 from collections import Counter
 from pathlib import Path
-from _atomic_artefact import write_json
 
 _NATIVE_ID = re.compile(r"\b(?:Checker|OpenROAD|Yosys|Verilator|Odb|Magic|KLayout|Netgen|Vibeic)\.[A-Za-z][A-Za-z0-9]*")
 
@@ -93,6 +92,7 @@ def collect(run_dir: Path, mapping: Path, *, returncode: int,
 
 
 def main():
+    from _atomic_artefact import write_json
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("mapping", type=Path)
