@@ -1,116 +1,14 @@
 #!/usr/bin/env python3
-"""analog_a5_layout_emit.py — A5's missing PRODUCER: it draws the layout.
+"""Emit A5 layout and source-bound provenance through native Magic gencells.
 
-WHY THIS PROGRAM EXISTS
------------------------
-A5 is the one step in the analog track that had no deterministic producer.
-The plugin shipped a CHECKER (`analog_a5_layout_check`, "is geometry
-present?"), a RECORD (`_analog_layout_matching`), and a stub in
-`analog_one_shot_runner` that wrote 400 bytes of `x` as `layout.mag`. The
-DRAWING was a hand-off to the `analog-layout` skill, and the skill had no
-program behind it — so every run that needed a real analog layout authored
-its own generator.
-
-MEASURED (u_hawaii_adc / ihp-sg13g2, round 20). The generator one run
-authored was hand-written in a scratch directory and copied forward for
-eight rounds. It encoded "what is drawable" as the two widths it happened to
-have probed, and refused a legal `w=1.0u l=0.5u` keeper — a device the PDK is
-perfectly happy with (wmin 0.15 um) — with
-
-    AssertionError: ('mp_mkp1', 'no leg tap level')
-
-The refusal was not about the width at all: its bulk-tap scan walked UP from
-the guard ring's B label, which on that device sits BELOW the ring leg, and a
-25-lambda stride anchored on that label missed the only legal band by ONE
-lambda. A predicted refusal, in a hand-authored script, blocked a measured
-circuit fix.
-
-THE CONTRACT
-------------
-INPUTS, all files, none of them a design:
-
-  1. the A3 block netlist `phase3/analog/<block>/<block>.sp`, parsed for the
-     subckt name, its port order, and per device (name, model, terminals,
-     w, l, m). Nothing else is read from it. Section 4.05: the netlist is
-     design INPUT; no oracle, golden or harness artefact is ever opened.
-  2. the PDK's own gencell definitions and DRC deck, through
-     `analog_a5_pdk_device_limits` — (lmin, wmin) per model, Metal1 minimum
-     space, and a bulk-tap clearance floor built from those plus this
-     emitter's OWN pad half-heights (pad size is the GENERATOR's choice, so
-     the limits program takes it as an argument).
-  3. a tool handle (container name / magic rcfile) — a path, not a behaviour.
-
-OUTPUTS, exactly two, both under `phase3/analog/<block>/`:
-
-  1. `layout.mag` and the streamed `<block>.gds`, carrying REAL placed
-     geometry. `analog_a5_layout_check` already rejects an empty or
-     stub-marked layout and keeps passing unchanged.
-  2. `layout_provenance.json`: producer + version, block, device count, the
-     resolved PDK limits WITH the file each came from, and a `deviations`
-     list. A deviation is a structured record, not prose:
-     {device, model, w, l, quantity, required, achieved, shortfall,
-      adjudicator}.
-
-THE INVARIANTS
---------------
-I1  DRAWS WHAT THE LIMITS PERMIT. A geometry inside (lmin, wmin) is drawn. A
-    width this emitter has not drawn before is NOT an error: there is no
-    width list anywhere in this file. An emitter that refuses everything also
-    refuses the bug.
-
-I2  REFUSES SUB-MINIMUM BY NAME, NEVER BY ASSERTION. `w`/`l` below the PDK
-    minimum exits non-zero naming the model, the value, the rule and the FILE
-    the rule came from, BEFORE any probe. An AssertionError tuple is a
-    contract violation.
-
-I3  SEARCHES THE WHOLE STRUCTURE, NOT ONE DIRECTION. The bulk tap is chosen
-    by scanning the ring leg's FULL extent on the PDK's own grid and taking
-    the position of MAXIMUM clearance — never the first hit of a descending
-    ladder of magic numbers, and never a walk in one direction from a label
-    that may sit at either end. The same rule governs the escape lanes.
-
-I4  RECORDS SHORTFALLS LOUDLY, AND NEVER GRADES. A clearance floor is a
-    PREDICTION; the sign-off deck is the adjudicator. When the best available
-    position is under the floor this emitter DRAWS it and writes a deviation
-    naming device, quantity, required, achieved and shortfall — then A6
-    decides. This program never prints a DRC verdict of its own and never
-    silently downgrades a floor to make itself pass.
-
-I5  DEGRADES LOUDLY, NEVER SILENTLY. An unreadable PDK, or an unreachable
-    tool, is ENV_UNAVAILABLE with the file/tool named and a non-zero exit —
-    never a built-in default and never a fabricated `layout.mag`. A structure
-    that cannot host a tap at all is REFUSED by name, with the extent it
-    measured, and nothing is written.
-
-WHAT IS CHIP-AGNOSTIC HERE, AND HOW
------------------------------------
-No design, block, net or device name appears in this file, and no PDK family
-name either. Everything PDK-specific is MEASURED:
-
-  * the gencell namespace, the parameter names each gencell accepts, the
-    device CLASS (mosfet / resistor / capacitor) and (lmin, wmin) come from
-    the PDK's own `_defaults` procs, through `analog_a5_pdk_device_limits`;
-  * lambda-per-micron comes from asking Magic itself, not from a constant;
-  * a terminal's metal level is the lowest `metalN` plane whose rectangle
-    covers the label point in the gencell's OWN output — so a capacitor
-    terminal that lands on metal5 is routed as metal5 without this file ever
-    naming a capacitor or a metal5;
-  * the guard-ring layer is whatever layer the bulk label sits on.
-
-The only numbers this file chooses are the ones the PDK does NOT state: the
-wire width and via pad size of its own routing. They are CLI arguments, and
-they are recorded in the provenance.
-
-    analog_a5_layout_emit.py <project_dir> [--block B] [--container C]
-                             [--magicrc PATH] [--pdk-root P] [--family F]
-
-exit 0 → LAYOUT: OK          (layout.mag + <block>.gds + provenance written)
-exit 1 → FORBIDDEN           (the PDK refuses this geometry, named) — OR the
-                             layout this emitter drew SHORTS two routed nets,
-                             with the witness path in the provenance
-exit 2 → ENV_UNAVAILABLE     (PDK unreadable or tool unreachable, named)
-exit 3 → REFUSED             (drawn structure cannot host the connection)
-chip-AGNOSTIC.
+Read the A3 SPICE netlist, PDK generators/rules and measured device geometry.
+Reject subminimum dimensions and unavailable inputs with named typed failures.
+Place bounded rows with local rails and shared trunks; preserve high-plane
+access corridors. Record measured geometry, deviations and actual die fit.
+Outputs are layout.mag, the streamed block GDS and layout_provenance.json.
+Clearance predictions never establish signoff: A6 owns native DRC/LVS verdicts.
+Return nonzero for drawn shorts, unavailable tools or refused geometry.
+Routing dimensions and their source facts remain recorded in provenance.
 """
 from __future__ import annotations
 
@@ -1254,18 +1152,9 @@ def box_separation(a: Tuple[int, int, int, int],
 # 5b. the routing geometry — every number the deck states, in lambda
 # ──────────────────────────────────────────────────────────────────────
 class Geo:
-    """What the routing may be, per layer, resolved to lambda.
-
-    The PDK does not state a routing WIRE WIDTH or a VIA PAD SIZE: those are
-    the generator's style, which is why the limits program takes the pad
-    half-height as an argument. Everything else — the minimum width a metal
-    may be, the spacing it needs, the metal a via must be enclosed by, the
-    area a metal island must have — the deck states, and every one of those is
-    read here rather than chosen.
-
-    A rule the deck does not state is ABSENT, not defaulted: the Metal1
-    spacing the limits program already derives is the only fallback, and it
-    is used only where the deck is silent."""
+    """Resolve PDK routing rules to lambda; wire/pad style stays explicit.
+    Preserve the existing Metal1-spacing fallback when a rule is unstated.
+    """
 
     def __init__(self, rules: dict, m1_space_um: float, lam: int,
                  wire_w_um: float, pad_half_um: float) -> None:
@@ -1375,10 +1264,7 @@ class Geo:
                 else self.default_space)
 
     def pitch(self) -> int:
-        """Centre-to-centre spacing for parallel routing: the widest thing
-        this generator paints plus the widest spacing any routed layer asks
-        for. One number, deliberately, so the corridor arithmetic stays
-        readable — and it is the MAXIMUM, so it is never short."""
+        """Return the low-metal routing pitch; high-plane escapes size separately."""
         # Device access uses metal1/2/3 and the cross-row trunks metal4.
         # Unused thick top-metal widths must not set every local corridor's
         # pitch. Pin stripes retain their separately measured width/spacing.
@@ -1396,26 +1282,10 @@ class Geo:
 # commands take, and the scale that turns microns into it was measured from
 # Magic in the probe pass.
 class Plan:
-    """Everything the layout pass will paint, and every shortfall it found.
+    """Collect drawn shapes, local row rails, shared trunks and deviations.
 
-    The routing style is deliberately simple and deliberately EXPLICIT about
-    what makes it correct, because a producer that cannot say why its wires
-    do not touch is a producer nobody can audit:
-
-      * devices occupy bounded rows, each with its own routing band;
-      * the terminals of one net at one height are strapped together on
-        metal2 at a height just above or just below that row of contacts —
-        two nets sharing a contact row take OPPOSITE sides, which is what
-        keeps an interleaved multi-finger device's drain strap clear of its
-        source stubs;
-      * each strap escapes sideways on metal3 into the corridor between two
-        devices and drops to its net's metal2 rail below the row. Lanes in a
-        corridor are handed out in order of the height they come from, so an
-        escape never crosses the lane of an escape that started lower;
-      * the rails are one metal2 track per net, below every device.
-
-    Everything the plan cannot make clear it MEASURES and records as a
-    deviation. It never adjusts a floor to make itself pass."""
+    Native signoff adjudicates the recorded clearance predictions.
+    """
 
     def __init__(self) -> None:
         self.shapes: List[dict] = []      # {net, layer, box}
