@@ -274,22 +274,15 @@ class GateLevelSim(Step):
 
     @staticmethod
     def _run(argv, log: str, limit: int, cwd=None) -> int:
-        # The existing native pattern collector preserves both streams without
-        # splicing VPI stderr fragments into source-bound SDF diagnostics.
+        # Reuse complete-stream collection to keep GLS diagnostics source-bound.
         return TestPatternReplay._run(argv, log, limit, cwd=cwd)
 
 
 @Step.factory.register()
 class TestPatternReplay(Step):
-    """Replay producer-owned test patterns on their bound implementation.
-
-    The producer supplies one self-checking testbench per pattern case.  This
-    step owns only native compile/simulation and the blocking readback: every
-    pattern file must still hash to the manifest, every process must exit zero,
-    and every transcript must name the exact case and vector population it
-    checked.  A later DFT producer can therefore feed this shared native step
-    directly without a row-specific adapter.
-    """
+    """Replay producer-owned self-checking testbenches for manifest-bound patterns.
+    Require matching hashes, zero exits and exact case/vector witnesses;
+    keep every raw SDF error accounted for until classified."""
 
     id = "Vibeic.TestPatternReplay"
     name = "Native test-pattern replay"
@@ -305,9 +298,8 @@ class TestPatternReplay(Step):
 
     @staticmethod
     def _run(argv, log: str, limit: int, cwd=None) -> int:
-        # Keep native stdout/stderr separate until complete lines are written.
-        # SDF diagnostics are emitted in fragments; sharing one fd can splice
-        # VPI stderr into an SDF ERROR and make its source record unparseable.
+        # Collect complete stdout/stderr separately so VPI fragments cannot splice
+        # into and corrupt the source-bound SDF error record.
         with open(log, "w") as stdout, open(log + ".stderr", "w") as stderr:
             try:
                 rc = subprocess.run(argv, stdout=stdout, stderr=stderr,
