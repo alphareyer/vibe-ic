@@ -269,7 +269,8 @@ def query(prompt: str, k: int = 5, db_path=None,
             rentry = by_class.get(r)
             if not rentry or not rentry.get("lessons"):
                 continue
-            les = rentry["lessons"][0]
+            les = _bundle_ranked_lessons(
+                [(0.0, r, rentry["lessons"][0])], [rentry])[0][2]
             if les in seen:
                 continue
             seen.add(les)

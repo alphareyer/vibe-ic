@@ -286,3 +286,32 @@ def test_invalid_lesson_groups_are_refused(tmp_path, groups):
     assert not C.check(path)["pass"]
     with pytest.raises(ValueError, match="lesson_groups"):
         Q.query("divider", db_path=path)
+
+
+def test_related_only_fifo_hit_keeps_both_grouped_lessons():
+    prompt = "Design a CDC mux synchronizer level handshake."
+    normal = Q.query(prompt, k=1, expand_related=False)
+    expanded = Q.query(prompt, k=1, expand_related=True)
+    row = next(e for e in json.loads(DB.read_text())["entries"]
+               if e["ic_class"] == "async-fifo-cdc")
+    assert [h["ic_class"] for h in normal] == ["cdc-mux-synchronizer"]
+    assert expanded[0] == normal[0]
+    assert len(expanded) == 2
+    assert expanded[1] == {"ic_class": "async-fifo-cdc", "score": 0.0,
+        "lesson": "\n\n".join(row["lessons"][:2]),
+        "related_to": "cdc-mux-synchronizer"}
+
+
+def test_related_expansion_deduplicates_an_already_grouped_fifo_hit():
+    prompt = "Design a CDC mux synchronizer level handshake."
+    normal = Q.query(prompt, k=5, expand_related=False)
+    expanded = Q.query(prompt, k=5, expand_related=True)
+    assert [h["ic_class"] for h in normal] == [
+        "cdc-mux-synchronizer", "glitch-free-clock-mux", "async-fifo-cdc",
+        "axi-mmio-cdc-datapath", "handshake-valid-ready"]
+    assert expanded[:5] == normal
+    assert [h["ic_class"] for h in expanded] == [
+        h["ic_class"] for h in normal] + ["edge-interval-monitor"]
+    assert expanded[-1]["score"] == 0.0
+    assert expanded[-1]["related_to"] == "cdc-mux-synchronizer"
+    assert len([h for h in expanded if h["ic_class"] == "async-fifo-cdc"]) == 1
