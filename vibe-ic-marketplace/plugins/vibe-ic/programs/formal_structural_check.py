@@ -1455,8 +1455,10 @@ def _reset_row_cone_eligibility(model: dict) -> dict:
         if kind in shaped_total:
             connections = cell.get("connections") or {}
             params = cell.get("parameters") or {}
+            directions = cell.get("port_directions") or {}
             if kind in {"$ge", "$le"}:
                 legal = (set(connections) == {"A", "B", "Y"}
+                         and directions == {"A": "input", "B": "input", "Y": "output"}
                          and _param_bit(params.get("A_WIDTH")) == len(connections.get("A", []))
                          and _param_bit(params.get("B_WIDTH")) == len(connections.get("B", []))
                          and _param_bit(params.get("Y_WIDTH")) == len(connections.get("Y", [])) == 1
@@ -1466,6 +1468,8 @@ def _reset_row_cone_eligibility(model: dict) -> dict:
                 width = _param_bit(params.get("WIDTH"))
                 select_width = _param_bit(params.get("S_WIDTH"))
                 legal = (set(connections) == {"A", "B", "S", "Y"}
+                         and directions == {"A": "input", "B": "input",
+                                            "S": "input", "Y": "output"}
                          and isinstance(width, int) and width > 0
                          and isinstance(select_width, int) and select_width > 0
                          and len(connections.get("A", [])) == len(connections.get("Y", [])) == width

@@ -112,13 +112,18 @@ def test_legal_pmux_relation_is_cone_eligible():
     ("$pmux", lambda c: c["parameters"].__setitem__("S_WIDTH", 3)),
     ("$pmux", lambda c: c["connections"].__setitem__("B", [3])),
     ("$pmux", lambda c: c["parameters"].__setitem__("WIDTH", 2)),
+    ("$ge", lambda c: c["port_directions"].__setitem__("Y", "input")),
+    ("$le", lambda c: c["port_directions"].__setitem__("Y", "input")),
+    ("$pmux", lambda c: c["port_directions"].__setitem__("Y", "input")),
+    ("$pmux", lambda c: c["port_directions"].__setitem__("S", "output")),
 ])
 def test_malformed_new_total_relations_keep_whole_module(kind, mutation):
     candidate = (relation(kind, [2], [3], [4]) if kind != "$pmux"
                  else pmux([2], [3, 5], [6, 7], [4]))
     mutation(candidate)
-    assert fsc._reset_row_cone_eligibility(model({"row": candidate})) == {
-        "eligible": False, "reason": "malformed-total-cell-shape"}
+    result = fsc._reset_row_cone_eligibility(model({"row": candidate}))
+    assert result["eligible"] is False, result
+    assert result["reason"] == "malformed-total-cell-shape", result
 
 
 @pytest.mark.parametrize("defect,expected", [
