@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1496
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1496)
+- **Total programs (excluding helpers / shims):** 1497
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1497)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1487 |
+| `any` | 1488 |
 
 ## Alphabetical listing
 
@@ -513,6 +513,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `flow109_mixed_native` | any | — | M06-M09 Default adapters over the existing mixed-signal producers. |
 | `flow109_netlist_cdc` | any | — | D45 adopted-netlist CDC/RDC adapter over the existing native consumers. |
 | `flow109_package_electrical` | any | — | D67: BLOCKING checks of owner-provided, bounded passive package RLC models. |
+| `flow109_package_plan` | any | — | D06 Default adapter for the existing pad/package-interface producers. |
 | `flow109_package_ready` | any | — | Flow109 D75 Default package/test interface component. |
 | `flow109_route_check` | any | — | D42 Default routed-candidate checks on the adopted D41 database. |
 | `flow109_system_security` | any | — | D16/D17/D73 readers for existing full-stack and formal producers. |
@@ -1568,7 +1569,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1487 programs)
+### `any` (1488 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2053,6 +2054,7 @@ _(no programs in this group)_
 - `flow109_mixed_native` — M06-M09 Default adapters over the existing mixed-signal producers.
 - `flow109_netlist_cdc` — D45 adopted-netlist CDC/RDC adapter over the existing native consumers.
 - `flow109_package_electrical` — D67: BLOCKING checks of owner-provided, bounded passive package RLC models.
+- `flow109_package_plan` — D06 Default adapter for the existing pad/package-interface producers.
 - `flow109_package_ready` — Flow109 D75 Default package/test interface component.
 - `flow109_route_check` — D42 Default routed-candidate checks on the adopted D41 database.
 - `flow109_system_security` — D16/D17/D73 readers for existing full-stack and formal producers.
