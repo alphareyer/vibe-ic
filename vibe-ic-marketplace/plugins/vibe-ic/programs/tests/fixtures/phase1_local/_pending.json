@@ -504,5 +504,16 @@
     "version_observed": "1.31.58 at base d1a134de8353b95860e173798b50b6c0c9a59af0 plus locally applied report-binding PR3576 head54f700a467d126f9d91fbb1fde717d14893a7372.",
     "version_lkg": "",
     "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/memory_profile_public_prose/memory_geometry.txt"
+  },
+  {
+    "issue": 3583,
+    "project": "neutral_declared_module",
+    "layer": "L2 and L9",
+    "field": "L2_FRS.json: frs_sections[].content; L9_INTEGRATION_SPEC.json: ports[], top_ports[], top_module_pins[]",
+    "expected": "L2 retains the complete source-backed functional requirement text in its existing FRS section schema. L9 carries alpha as an output with width 5, msb 4 and lsb 0, with source evidence. No synthesized behavior is required at Phase 1.",
+    "actual": "The real shared producer emits L1.pin_table with alpha/output/width=5 and extraction_strategy=markdown_bullet_inline_direction. L2.frs_sections and all three L9 port lists are empty. Reproduced directly using gen_l1_datasheet, gen_l2_frs and gen_l9_integration_spec in the released 0.4.46 EDA image.",
+    "version_observed": "1.31.58, source d1a134de8353b95860e173798b50b6c0c9a59af0. The local PR #3576 overlay changes report binding and interrupted-run recovery only; the layer producer used for this reproduction is unchanged from release.",
+    "version_lkg": "Not established for this exact neutral fixture. Historical benchmark scores do not establish this producer contract.",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_declared_module/design.md"
   }
 ]

@@ -22832,7 +22832,11 @@ def gen_l1_datasheet(project: Path,
                 fname=fname,
                 width=entry.get("width"),
                 description=entry.get("description"),
-                extraction_strategy="markdown_bullet_inline_direction",
+                # The existing L1-to-L9 gate accepts strategies which declare
+                # their structured port-row shape.  Keep this strict bullet
+                # reader's provenance self-describing so an arbitrary name
+                # (rather than only a conventional pin stem) can promote.
+                extraction_strategy="markdown_inline_direction_port_bullet",
             )
             if len(ev) < 24:
                 ev.append({
@@ -24234,6 +24238,35 @@ def gen_l2_frs(project: Path,
         # `rst_underline` preserved for .rst / unknown).
         multi_shape_hits = _v1_6_334_extract_multi_shape_section_headers(
             text, source_path=fname, include_md_h1=True)
+        if not multi_shape_hits and _is_port_source_allowed(fname):
+            # A source-owned design request is still a specification when its
+            # short requirement body has no heading.  Carry the complete input
+            # through the existing FRS schema; do not infer new behavior.
+            owner, explicit = _issue3234_explicit_parameter_owner({fname: text})
+            subjects = _doc_comportable_module_subjects({fname: text})
+            header_owner = next((m.group("name") for m in
+                _RE_DOC_TOP_MODULE_REAL_DECL.finditer(text)
+                if _issue3234_position_is_current(text, m.start())
+                and _ppx.selected_module_header(text, m.group("name"))), None)
+            declared = ((bool(owner) if explicit else len(subjects) == 1)
+                        or header_owner is not None)
+            body = _v1_6_357_slice_section_body(text, 0, None, max_chars=None)
+            setup_body = _RE_DOC_TOP_MODULE_NAME_LABEL.sub("", body)
+            setup_body = _RE_DOC_TOP_MODULE_TOP_IS_NAMED.sub("", setup_body)
+            if (declared and body
+                    and not _is_install_verb_v1_6_315(Path(fname).stem)
+                    and not _l2_is_host_setup_section(
+                        "Setup", setup_body.strip(" \t\r\n.,;:"))):
+                sections.append({
+                    "section": "unheaded",
+                    "title": "Functional requirements",
+                    "content": body,
+                    "evidence": f"input/docs/{fname}",
+                })
+                ev.append({
+                    "literal": owner or header_owner or next(iter(subjects)),
+                    "label": "unheaded design owner",
+                })
         for i, hit in enumerate(multi_shape_hits):
             sec_id = hit["section_id"]
             title = hit["title"]
