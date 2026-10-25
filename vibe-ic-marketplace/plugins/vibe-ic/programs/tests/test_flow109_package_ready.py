@@ -715,9 +715,11 @@ def test_normal_flow109_default_entry_runs_d75_without_generic_qualification(
                            entry_step="D75", exit_step="D75")
     rc = flow109.prepare_front_door(args, project)
     assert generic_admission_calls == [], generic_admission_calls
-    assert rc == 0
+    assert rc == 2
     result = json.loads((project / "reports/flow109/components/D75.json").read_text())
     assert result["component_status"] == "PASS"
+    assert result["default_row_status"] == "NOT_MEASURED"
+    assert result["completed"] is False
     assert result["flow109_acceptance"] == "NOT_MEASURED"
     admission = json.loads((project / "reports/flow109/admission.json").read_text())
     assert admission["qualification_status"] == "NOT_CLAIMED"
