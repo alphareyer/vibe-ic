@@ -201,9 +201,10 @@ def scored_view(run) -> dict:
     with a higher round, or an AI_REPAIR origin, was recovered by the repair
     loop. We read that record and report it.
 
-    Degrades LOUDLY: if the acceptance record is absent or unreadable the view
-    is NOT_MEASURED with the reason named. It is never defaulted to
-    single-shot -- claiming a stricter view than was measured is the exact
+    Degrades LOUDLY: absent/unreadable evidence or unresolved rounds without
+    a proven repair remain NOT_MEASURED. A proven repair is sufficient to
+    establish a composed view even if another round stays unknown. Unknown
+    candidates are never defaulted to round zero or single-shot -- claiming a stricter view than was measured is the exact
     error this field exists to prevent.
     """
     from pathlib import Path as _P
@@ -232,7 +233,7 @@ def scored_view(run) -> dict:
         rounds[pid] = {"origin": origin, "round": rnd}
         if rnd > 0 or origin == "ai_repair":
             recovered.append(pid)
-    if unparsed:
+    if unparsed and not recovered:
         return {"view": "NOT_MEASURED",
                 "view_basis": ("accepted review key(s) did not carry a parseable "
                                f"origin-round: {sorted(unparsed)}"),
@@ -242,11 +243,16 @@ def scored_view(run) -> dict:
                 "view_basis": "acceptance record contains no ACCEPTED outcome",
                 "recovered_ids": [], "candidate_rounds": {}}
     view = _VIEW_CONVERGED if recovered else _VIEW_SINGLE
-    basis = (f"{len(rounds)} accepted candidate(s); "
-             + (f"{len(recovered)} recovered by the repair loop"
+    basis = (f"{len(rounds)} accepted candidate(s) with parsed rounds; "
+             + (f"{len(recovered)} known recovered by the repair loop"
                 if recovered else "every one is a round-0 first candidate"))
+    if unparsed:
+        # One proven repair already rules out a first-candidate score. Unknown
+        # rounds remain unknown; they cannot erase that fact or become round 0.
+        basis += f"; unresolved accepted rounds: {sorted(unparsed)}"
     return {"view": view, "view_basis": basis,
-            "recovered_ids": sorted(recovered), "candidate_rounds": rounds}
+            "recovered_ids": sorted(recovered), "candidate_rounds": rounds,
+            "unparsed_round_ids": sorted(unparsed)}
 
 
 def samples_provenance(samples: Path) -> dict:
@@ -1145,9 +1151,9 @@ def _aliased_golden_srcs(design: str, dataset: Path, layout: dict,
     golden's top-module name to the canonical DUT name the TB binds.
 
     Returns (srcs, golden_ports):
-      srcs        — [aliased_first_ref] + [str(p) for p in refs[1:]] (the FIRST
-                    ref's top module renamed to the canonical DUT name, written
-                    into `tmpdir`; remaining refs verbatim for multi-file goldens).
+      srcs        — reference order preserved; only the resolved hierarchy root
+                    declaration is aliased in a temporary copy of its file.
+                    Helpers and all other files remain verbatim.
       golden_ports— the golden header's declared port set.
     Returns (None, set()) when the canonical name or the golden's module name
     cannot be resolved (→ no determination; the caller returns its undetermined
@@ -1155,19 +1161,50 @@ def _aliased_golden_srcs(design: str, dataset: Path, layout: dict,
     dut_name = _canonical_dut_name_shape_b(design, dataset, layout)
     if not dut_name:
         return (None, set())
-    golden_text = refs[0].read_text(errors="ignore")
-    mm = re.search(r"\bmodule\s+(\w+)", golden_text)
-    if not mm:
+    if not refs:
         return (None, set())
-    golden_mod = mm.group(1)
-    golden_ports = _module_declared_ports(golden_text)
-    aliased = (golden_text if golden_mod == dut_name
-               else re.sub(rf"\b{re.escape(golden_mod)}\b", dut_name, golden_text))
+    from module_port_audit import lexical_mask, parse_modules
+    texts = [ref.read_text(errors="replace") for ref in refs]
+    modules = [(index, module) for index, (ref, text) in enumerate(zip(refs, texts))
+               for module in parse_modules(text, str(ref))]
+    names = [module.name for _, module in modules]
+    if not modules or len(names) != len(set(names)):
+        return (None, set())
+    children = {instance.module_name for _, module in modules
+                for instance in module.instances}
+    roots = [(index, module) for index, module in modules
+             if module.name not in children]
+    # A file can define helper modules before its actual top. Resolve the
+    # hierarchy, using declared names only; source order is not top identity.
+    preferred = [(i, m) for i, m in roots if m.name == dut_name]
+    if not preferred:
+        preferred = [(i, m) for i, m in roots if m.name == refs[i].stem]
+    if not preferred:
+        preferred = roots
+    if len(preferred) != 1:
+        return (None, set())
+    index, top = preferred[0]
+    if top.name != dut_name and dut_name in names:
+        return (None, set())  # aliasing cannot collide with a helper declaration
+    text = texts[index]
+    masked = lexical_mask(text)
+    declaration = re.compile(r"\bmodule\s+(?:(?:automatic|static)\s+)?(?P<name>" +
+                             re.escape(top.name) + r")\b")
+    found = list(declaration.finditer(masked))
+    if len(found) != 1:
+        return (None, set())
+    edits = [found[0].span("name")]
+    edits += [match.span("name") for match in re.finditer(
+        r"\bendmodule\s*:\s*(?P<name>" + re.escape(top.name) + r")\b", masked)]
+    # Rename declaration roles only. Never rewrite comments, string literals,
+    # or an unrelated signal whose spelling happens to equal the module name.
+    for start, end in sorted(edits, reverse=True):
+        text = text[:start] + dut_name + text[end:]
     alias_f = os.path.join(tmpdir, "golden_alias.v")
-    with open(alias_f, "w") as fh:
-        fh.write(aliased)
-    srcs = [alias_f] + [str(p) for p in refs[1:]]
-    return (srcs, golden_ports)
+    Path(alias_f).write_text(text)
+    srcs = [str(ref) for ref in refs]
+    srcs[index] = alias_f
+    return (srcs, set(top.ports))
 
 
 def _golden_ref_fails_own_tb_runtime(design: str, dataset: Path,
