@@ -32,12 +32,12 @@ import interface_encoding_audit as iea  # noqa: E402
 
 
 def _enable_interface_encoding_p0(flow, monkeypatch):
-    """Re-enable the historical P0 route with its complete CLI contract."""
+    """Focus the canonical P0 route without manufacturing its wiring."""
+    assert "interface_encoding_audit" in flow._STRUCTURAL_RTL_GATES
+    assert (flow._STRUCTURAL_GATE_INVOCATION_CONTRACTS.get(
+        "interface_encoding_audit") == "interface-encoding")
     monkeypatch.setattr(
         flow, "_STRUCTURAL_RTL_GATES", ("interface_encoding_audit",))
-    contracts = dict(flow._STRUCTURAL_GATE_INVOCATION_CONTRACTS)
-    contracts["interface_encoding_audit"] = "interface-encoding"
-    monkeypatch.setattr(flow, "_STRUCTURAL_GATE_INVOCATION_CONTRACTS", contracts)
 
 
 @pytest.mark.parametrize('body', ["if (flag) seen <= 1'b1;", "if (!flag) seen <= 1'b1;",

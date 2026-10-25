@@ -1360,6 +1360,7 @@ _STRUCTURAL_RTL_GATES: tuple[str, ...] = (
     # assumed it didn't exist and left 33 spurious waivers open.
     # Honors waiver project_artifacts_external_storage_intentional.
     # Chip-AGNOSTIC.
+    "interface_encoding_audit",
     "project_outputs_in_tree_check",
     # v0.124 / Wave 58 — closes Wave 56 column-D RTL bug families on
     # v0.121-vendor.  Each gate is chip-AGNOSTIC, silent-skips when its
@@ -8747,6 +8748,7 @@ _STRUCTURAL_GATE_INVOCATION_CONTRACTS: Mapping[str, str] = MappingProxyType({
     "fpga_async_input_synchronizer_check": "fpga-top",
     "fpga_qsf_lint": "fpga-qsf",
     "fresh_agent_provenance_check": "reference-provenance",
+    "interface_encoding_audit": "interface-encoding",
     "json_schema_check": "l3-schema",
     "l12_sequence_implementation_check": "l12-sequences",
     "l9_completeness_check": "l9",
@@ -9158,21 +9160,21 @@ _ZERO_DENOMINATOR_CLASSIFICATION: Dict[str, Dict[str, str]] = {
 # ---------------------------------------------------------------------------
 _UNDRIVABLE_BY_STRUCTURAL_UMBRELLA: Dict[str, Dict[str, str]] = {
     "interface_encoding_audit": {
-        "active_project_p0": False,
+        "active_project_p0": True,
         "category": "zero-decidable-denom",
         "requires": "--rtl-dir --top-module --out-dir (all umbrella-suppliable)",
         "measured": (
-            "Umbrella argv over 107 tracked rtl dirs: 0 new FAIL, but the "
-            "decidable denominator (matches+mismatches) is 0. On opentitan_aes "
-            "all 21 module-boundary crossings resolve to encoding=UNKNOWN "
-            "('encoding could not be determined'): total_interfaces=21, "
-            "matches=0, mismatches=0. It discloses a non-zero interface count "
-            "while its actual subject — gray-vs-binary mismatches it can DECIDE "
-            "— is empty, so a PASS certifies a comparison that examined nothing."),
+            "Umbrella argv over 107 tracked rtl dirs originally found 0 new FAIL "
+            "and a zero decidable denominator. The issue3368 retained Subservient "
+            "corpus instead has 19 interfaces: 1 MATCH, 0 MISMATCH, 18 UNKNOWN. "
+            "That non-empty decided arm authorizes ordinary P0 dispatch, while the "
+            "source-bound receipt consumer keeps the unresolved population "
+            "INCONCLUSIVE/NOT_MEASURED rather than converting zero mismatches to "
+            "PASS."),
         "disposition": (
-            "KEEP registered, unwired. Its decidable denominator must become "
-            "non-empty (encoding inference improved beyond UNKNOWN) before it "
-            "is a gate rather than a report."),
+            "ACTIVE in ordinary project P0 with the interface-encoding contract. "
+            "A source-bound receipt may PASS only a fully decided population; "
+            "UNKNOWN remains INCOMPLETE and a semantic mismatch remains FAIL."),
     },
     # `module_port_audit` LEFT THIS REGISTER with the umbrella (1a27f263d):
     # its one ERROR finding, a named connection to a port the module does not
