@@ -142,9 +142,47 @@ def rank_lessons(prompt: str, entries, keep_zero_scores: bool = False):
     return ranked
 
 
+def lesson_groups(entry):
+    """Optional, disjoint groups of lesson indexes that must travel together.
+
+    Grouping changes presentation within an entry slot, never lexical scores,
+    class membership or k. Lesson strings remain the authoritative DB content.
+    Invalid metadata is refused rather than silently dropping a companion.
+    """
+    groups = entry.get("lesson_groups", [])
+    used = set()
+    if not isinstance(groups, list):
+        raise ValueError("lesson_groups must be a list of index lists")
+    for group in groups:
+        if (not isinstance(group, list) or len(group) < 2
+                or any(type(i) is not int or not 0 <= i < len(entry["lessons"])
+                       for i in group)
+                or len(set(group)) != len(group) or used.intersection(group)):
+            raise ValueError("lesson_groups must contain disjoint valid indexes")
+        used.update(group)
+    return groups
+
+
+def _bundle_ranked_lessons(ranked, entries):
+    companions = {}
+    for entry in entries:
+        lessons = entry["lessons"]
+        for group in lesson_groups(entry):
+            text = "\n\n".join(lessons[i] for i in group)
+            for i in group:
+                companions[(entry["ic_class"], lessons[i])] = text
+    # Keep the highest original score and rank for a group. Existing slot
+    # allocation and dedup then operate on the complete piece of guidance.
+    return [(score, cls, companions.get((cls, lesson), lesson))
+            for score, cls, lesson in ranked]
+
+
 def query(prompt: str, k: int = 5, db_path=None,
           expand_related: bool = False, ic_class=None):
     """Retrieve the top-k relevant lessons for `prompt`.
+
+    An entry may declare `lesson_groups`: those lessons share one entry slot,
+    with their original text joined in declared order. Ranking is unchanged.
 
     `ic_class` is the design's REGISTERED class (default None → byte-identical
     to the tuned lexical ranking, which is what every pre-#2094 caller gets).
@@ -186,6 +224,7 @@ def query(prompt: str, k: int = 5, db_path=None,
                     f"{missing}, which entries[] does not carry")
             entries = [e for e in entries if e.get("ic_class") in allowed]
     ranked = rank_lessons(prompt, entries, keep_zero_scores=bool(profile))
+    ranked = _bundle_ranked_lessons(ranked, entries)
     # ── the k slots are ENTRY slots (#2164) ─────────────────────────────────
     # Scoring is per LESSON, and the dedup used to be per lesson too — so an
     # entry carrying four lessons could occupy four of the five slots and push
@@ -230,7 +269,8 @@ def query(prompt: str, k: int = 5, db_path=None,
             rentry = by_class.get(r)
             if not rentry or not rentry.get("lessons"):
                 continue
-            les = rentry["lessons"][0]
+            les = _bundle_ranked_lessons(
+                [(0.0, r, rentry["lessons"][0])], [rentry])[0][2]
             if les in seen:
                 continue
             seen.add(les)

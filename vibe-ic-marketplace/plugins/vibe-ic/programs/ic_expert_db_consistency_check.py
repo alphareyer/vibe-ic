@@ -54,6 +54,8 @@ from __future__ import annotations
 import argparse, json, re, sys
 from pathlib import Path
 
+from ic_expert_db_query import lesson_groups
+
 _DEFAULT_DB = (Path(__file__).resolve().parent.parent
                / "agents" / "ic_expert_db" / "ic_expert_db.json")
 
@@ -158,6 +160,10 @@ def check(db_path: Path):
             continue
         if e.get("lesson_count") != len(lessons):
             findings.append(f"[{cls}] lesson_count {e.get('lesson_count')} != {len(lessons)}")
+        try:
+            lesson_groups(e)
+        except ValueError as exc:
+            findings.append(f"[{cls}] {exc}")
         rel = e.get("related")
         if rel is not None:
             if not isinstance(rel, list) or not all(isinstance(r, str) for r in rel):

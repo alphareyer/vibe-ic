@@ -719,20 +719,20 @@ highest-precedence condition is the first `if`. Re-ordering the branches (e.g. t
 testing ground) silently changes behavior only on the cycles where two conditions co-occur, so it
 passes most random draws and fails a few — a determinism gap. Copy the stated order verbatim.
 
-### Skill: multi-phase / dual-edge clock dividers — a 50%-duty or fractional divide needs BOTH clock edges
-A frequency divider that must keep a **50% duty cycle** at an **ODD** divide ratio, or a
-**FRACTIONAL** ratio, cannot be done with a single posedge counter — the high/low half-periods
-would be unequal. The canonical realization uses **two counters/flags, one on `posedge clk` and one on
-`negedge clk`, combined by OR** (the negedge path supplies the missing half-cycle):
-- *Odd 50%-duty (÷N, N odd):* `cnt1` on posedge (0..N-1), `clk_div1 = cnt1 < N/2`; `cnt2` on negedge,
-  `clk_div2 = cnt2 < N/2`; `assign clk_div = clk_div1 | clk_div2;`.
-- *Fractional (×2/N):* a `clk_ave` set on posedge at `cnt==0` and `cnt==N/2+1`, plus a `clk_adjust`
-  set on negedge at `cnt==1` and `cnt==N/2+1`; `assign clk_div = clk_ave | clk_adjust;`.
-- *Even ÷N:* the simple case — toggle `clk_div` when `cnt == N/2-1`, single posedge counter.
-The divide ratio (N) is a SPEC value, not invented. A posedge-only attempt at an odd/fractional ratio
-passes some self-checks but mismatches the duty/phase the hidden TB samples — a determinism gap, not a
-spec ambiguity. (Worked: RTLLM `freq_divbyodd`/`freq_divbyfrac`/`freq_divbyeven` — converged to 5/5 only
-with the dual-edge structure.)
+### Skill: derive clock division and phase from the visible contract
+An odd divide ratio with equal high/low intervals requires both clock edges or
+another explicitly available timing resource. Use the public ratio, reset level,
+edge roles and output architecture; a frequency target alone does not specify
+reset-to-first-transition phase. For a registered decode, distinguish the old
+counter on the assignment RHS from the value committed after the edge. State
+which counter value defines the high interval, including its wrap boundary.
+Check reset release, the first two transitions and wrap against visible examples
+in addition to steady-state period/duty. Do not replace a current-value decode
+with a next-value decode (or vice versa) to satisfy an assumed checker. If the
+visible requirements conflict or leave the relevant edge phase unresolved,
+request clarification rather than claiming an executable counterexample proves
+one convention universally wrong. Structural findings are routed by
+`programs/counter_decode_lookahead_phase_check.py`; they do not select intent.
 
 ### Skill: multi-stage pipeline — align the valid/enable delay to the data-path latency EXACTLY
 In a pipelined datapath (e.g. a multi-stage multiplier: partial-products → pairwise-adds → final-sum),
@@ -1126,19 +1126,20 @@ python3 vibe-ic-marketplace/plugins/vibe-ic-d/programs/k3_view_resolve.py \
 
 ## Captured by benchmark-enhancement-capture (anonymized close-loop sweeps, 2026-05-28)
 
-### Skill: NBA-vs-blocking clock toggle — match TB sample-region semantics
-
-**Pattern**: Behavioral clock generators of the form `initial clk=X; always #(PERIOD/2) clk = ~clk;` give DIFFERENT waveforms depending on `=` vs `<=` AT THE FENCEPOST SAMPLE POINTS the TB inspects. With `=` (blocking, active region), a TB `#5 $display(clk)` samples the POST-toggle value; with `<=` (NBA, observed region), it samples PRE-toggle.
-
-**When to apply**: Authoring any clock-generator or PWM/strobe stimulus module that another module's testbench will sample at fencepost times (`#(PERIOD/2)`, `#PERIOD`, etc.).
-
-**What to do**: Default to NBA (`clk <= ~clk;`) in `always` toggle blocks unless the description explicitly states 'block-and-sample-after'. NBA defers the assignment to the observed region so a TB's `#5 $display` after the same delay sees the pre-toggle value — which is what the description's stated initial value `clk=0` should yield for the FIRST sample.
-
-**Worked pattern** (anonymized): a behavioral clock-generator design with stated `initial clk=0` and `toggles every PERIOD/2`. Blocking `=` gave `[1,0,1,0,…]` at `t=5,10,15,…` (TB saw clk just after each toggle). NBA `<=` gave `[0,1,0,1,…]` — matched the stated initial value at first sample. Single-character fix.
-
-**Why this is GENERAL**: Anywhere a clock or strobe generator is authored and a separate module samples it at the same delay granularity as the toggle period — NBA vs blocking is observable at the fencepost. The rule is independent of which IC class; it's a Verilog scheduling-region invariant.
-
-_Captured by benchmark-enhancement-capture 2026-05-28._
+### Skill: preserve declared sampling regions and sequential latency
+A clocked nonblocking assignment evaluates its RHS in the active region and
+commits in the NBA region. A separate active-region checker at the same edge
+can observe the old output; a settled post-NBA observation sees the new output.
+Neither an initial value nor a period alone determines this sampling contract.
+Do not default to a particular assignment operator to match an imagined
+harness, and do not deregister an output that the visible source requires to
+be clocked. Anchor a self-test to the public edge/latency/reset contract, record
+pre-edge and post-settle observations distinctly, and test the first event after
+reset. Conflicting public descriptions/examples require clarification. A
+simulator-dependent observation is not evidence that the DUT must be changed.
+Existing executable worked-example handling is owned by
+`programs/worked_example_sequence_oracle_check.py`; this advice never overrides
+its measured source contract or fabricates one for an unspecified interface.
 
 ### Skill: infer downstream-ready input from 'whether the result has been consumed' phrasing
 

@@ -1,50 +1,18 @@
 #!/usr/bin/env python3
-"""counter_decode_lookahead_phase_check.py — a level decoded from the NEXT
-counter value, registered on the same edge that advances the counter.
+"""Report a registered decode of the value used to advance a counter.
 
-WHY (RTLLM clean-room run 2026-09-06/07, freq_divbyodd + asyn_fifo)
-===================================================================
-Two designs in one run failed the hidden reference harness for the same
-structural reason, in two different subsystems:
+The deterministic fact is structural: a decode and a counter update on one
+edge share a next-value expression. That is not, by itself, a functional
+error. Pre-update and post-update decodes have different phases; only the
+public temporal contract can choose between them. A coupled binary/Gray
+pointer update can be necessary to preserve queue capacity and stop an
+empty read. Do not introduce a stale pointer merely to match a reference.
 
-    freq_divbyodd   clk_div1 <= (cnt1_next < NUM_DIV/2);  cnt1 <= cnt1_next;
-    asyn_fifo       wptr     <= bin2gray(waddr_bin + wen); waddr_bin <= waddr_bin + wen;
-
-In both, a register is loaded from a LOOKAHEAD of a counter on the very edge
-that advances that counter. The result is published one source cycle EARLY
-relative to the counter it describes. Both are self-consistent and both look
-more "correct" than the form the reference uses — the flop appears to describe
-the value it will hold. That reasoning is what produced both bugs: a
-`always @(posedge)` block already registers, so decoding the PRE-increment value
-is what makes the level line up with the counter state it names.
-
-WHY THE EXISTING GATES DO NOT SEE IT
-------------------------------------
-* `clock_divider_phase_form_check` matches the SELF-TOGGLE anti-pattern
-  (`X <= ~X`, reset LOW). Both designs here use a level decode and are reset
-  correctly, so it PASSes them — verified on both the broken and the fixed RTL.
-* A ratio/duty oracle is blind by construction: period and duty are exactly
-  right; only the phase relative to reset moves.
-* For the FIFO the flags round-trip self-consistently, so a write-then-read
-  testbench also passes. It takes traffic at the full/empty boundary to see it.
-
-WHAT THIS DETECTS — narrow on purpose
--------------------------------------
-Inside one edge-triggered block, a nonblocking assignment whose RHS reads a
-LOOKAHEAD of a counter (`cnt + 1`, `cnt + inc`, or a wire defined as such) while
-the SAME block advances that counter with the same expression. Both halves must
-be present: a design that only computes `cnt_next` and uses it solely to update
-the counter is the ordinary pattern and is NOT reported.
-
-`--strict` makes a finding exit non-zero; the default is advisory, because a
-lookahead decode is legitimate when the spec asks for the level to lead (a
-pre-emptive `almost_full`, a one-cycle-early enable). The finding names the
-signal and both statements so a human can decide in seconds.
-
-WHY_NOT_BUCKET_A: whether a lookahead is a defect or the spec's intent needs the
-spec. The deterministic half — that a lookahead decode and its counter update
-share an edge — is what this program measures, and it is exactly the shape that
-was wrong twice in one run.
+Default findings remain advisory, and --strict retains its existing shape
+refusal. Neither mode proves intended timing from structure alone. Validate
+reset, the first transitions, wrap and admission boundaries from the visible
+contract; ask for clarification when the phase is not determined. Period and
+duty alone cannot establish phase. No oracle or design identity selects it.
 """
 from __future__ import annotations
 
@@ -168,9 +136,8 @@ def scan(src: str) -> list:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="A level decoded from a counter LOOKAHEAD, registered on "
-                    "the same edge that advances that counter, is published one "
-                    "cycle early.")
+        description="Report a same-edge counter next-value decode; "
+                    "phase correctness requires the public temporal contract.")
     ap.add_argument("rtl", nargs="+", help="RTL file(s) to scan")
     ap.add_argument("--strict", action="store_true",
                     help="exit non-zero on a finding (default: advisory)")
@@ -205,16 +172,16 @@ def main() -> int:
         return 0
 
     print(f"FINDING: {len(rows)} signal(s) decoded from a counter LOOKAHEAD on "
-          f"the same edge that advances the counter — each is published one "
-          f"cycle early relative to the counter it names:")
+          f"the same edge that advances the counter (structural fact, "
+          f"not a functional defect by itself):")
     for f in rows:
         print(f"  {f['file']}: {f['signal']} <- lookahead of {f['counter']} "
               f"({f['via']})")
         print(f"      {f['statement']}")
-    print("  Decode the PRE-increment value instead, unless the spec asks for a "
-          "level that leads by one cycle. A period/duty or write-then-read "
-          "oracle cannot see this; only a check anchored to reset or to the "
-          "full/empty boundary can.")
+    print("  Preserve the declared pre-update or post-update phase. Validate "
+          "reset, first transitions, wrap and accepted-transfer boundaries. "
+          "Do not shift a phase or delay a pointer to match a hidden checker; "
+          "an unspecified or conflicting phase requires clarification.")
     return 1 if args.strict else 0
 
 
