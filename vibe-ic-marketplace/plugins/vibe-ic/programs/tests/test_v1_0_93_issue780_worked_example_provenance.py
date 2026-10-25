@@ -263,5 +263,77 @@ def test_artifact_tag_survives_cross_station_merge():
     assert all(it["we_structural_artifact"] for it in we)
 
 
+def _width_example_spec(header, width=16, *, explicit_owner=True):
+    pair = ("16'h1234", "16'hedcb") if width == 16 else ("8'h34", "8'hcb")
+    example = (f"For example, a {width}-bit vector inverter\n"
+               f"given the input {pair[0]} would output {pair[1]}.\n"
+               if explicit_owner else
+               f"For input {pair[0]}, the output is {pair[1]}.\n")
+    return example + "Build the inverter with the following exact interface:\n" + header
+
+
+def test_separate_width_illustration_is_advisory_through_native_program_contract(tmp_path):
+    import hashlib
+    import benchmark_dispatch as bd
+    from _hostpaths import require_repo
+    rtl = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
+                       "fixtures", "librelane_lint_frontend", "plain.v").read_text()
+    spec = _width_example_spec(rtl)
+    tb = '''module tb;
+reg [7:0] value_i; wire [7:0] value_o; integer n;
+plain u(.value_i(value_i), .value_o(value_o));
+initial begin
+  for (n=0; n<256; n=n+1) begin
+    value_i=n; #1;
+    if (value_o !== (~value_i & 8'hff)) $fatal(1, "inversion mismatch");
+  end
+  $display("all 256 native cases passed"); $finish;
+end
+endmodule
+'''
+    source, bench = tmp_path / "plain.v", tmp_path / "tb.sv"
+    source.write_text(rtl)
+    bench.write_text(tb)
+    compiled = subprocess.run(["iverilog", "-g2012", "-s", "tb", "-o", str(tmp_path / "sim"),
+                               str(source), str(bench)], capture_output=True, text=True)
+    assert compiled.returncode == 0, compiled.stderr
+    simulated = subprocess.run(["vvp", str(tmp_path / "sim")], capture_output=True, text=True)
+    assert simulated.returncode == 0 and "all 256 native cases passed" in simulated.stdout
+    report, examples = _we_items(spec, rtl, tb)
+    assert examples
+    for item in examples:
+        assert item["block_eligible"] is False
+    assert all(it["advisory_note"] for it in examples)
+    assert all(it["block_eligible"] is True for it in report["items"] if it["kind"] == "port")
+    candidate = {"rtl_paths": [str(source)]}
+    contract = bd._program_review_obligation_contract(spec, candidate)
+    assert not any(it["kind"] == "worked_example" for it in contract["obligations"])
+    coverage = bd._program_review_coverage_result(spec, candidate, [{
+        "path": str(bench), "sha256": hashlib.sha256(bench.read_bytes()).hexdigest()}])
+    assert coverage["status"] == "PASS", coverage
+
+
+@pytest.mark.parametrize("case", ["same_width", "no_separate_owner", "wrong_candidate_width",
+                                  "unknown_source_width", "unknown_output_width",
+                                  "missing_source_interface", "no_rtl"])
+def test_real_or_unresolved_width_examples_remain_blocking(case):
+    rtl = "module neutral(input [7:0] data_i, output [7:0] data_o); assign data_o=~data_i; endmodule\n"
+    spec = _width_example_spec(rtl, 8 if case == "same_width" else 16,
+                               explicit_owner=case != "no_separate_owner")
+    if case == "wrong_candidate_width":
+        rtl = rtl.replace("[7:0]", "[3:0]")
+    elif case == "unknown_source_width":
+        spec = spec.replace("[7:0]", "[WIDTH-1:0]")
+    elif case == "unknown_output_width":
+        spec = spec.replace("output [7:0]", "output [WIDTH-1:0]")
+        rtl = rtl.replace("output [7:0]", "output")
+    elif case == "missing_source_interface":
+        spec = spec.split("Build the inverter", 1)[0] + "Build an eight-bit inverter.\n"
+    elif case == "no_rtl":
+        rtl = None
+    _, examples = _we_items(spec, rtl, None)
+    assert examples and all(it["block_eligible"] is True for it in examples)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

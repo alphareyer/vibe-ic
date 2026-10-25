@@ -142,9 +142,11 @@ except ImportError:  # packaged
     from .pulse_width_rearm_contract import extract_contract as _extract_pulse_contract
 
 try:
-    from _prose_polarity import is_denied as _prose_is_denied
+    from _prose_polarity import (is_denied as _prose_is_denied,
+                                 sentence_scope as _prose_sentence_scope)
 except ImportError:  # packaged
-    from ._prose_polarity import is_denied as _prose_is_denied  # type: ignore
+    from ._prose_polarity import (is_denied as _prose_is_denied,
+                                  sentence_scope as _prose_sentence_scope)  # type: ignore
 
 # The ONE offset-preserving blanker for HDL comments AND string literals
 # (vibe-ic#731). `_SRC.strip_comments` blanks comments only, and a Verilog
@@ -1625,6 +1627,51 @@ def _worked_example_is_covered_parent_gloss(coverage_tokens: List[str],
     except ValueError:
         return False
     return _binary_nibble_has_grouped_source(combined_text, lhs)
+
+
+def _worked_example_is_separate_width_illustration(it: ChecklistItem,
+                                                  spec: str,
+                                                  rtl: Optional[str]) -> bool:
+    """A separately sized illustrative object does not own this DUT's stimulus.
+
+    Require both an explicit source owner and the exact declared DUT interface;
+    a wider literal alone, unknown widths or an incorrectly narrowed candidate
+    cannot downgrade a real required example.
+    """
+    if not rtl or len(it.coverage_tokens) != 2:
+        return False
+    literal = _SIZED_LITERAL_RE.fullmatch(it.coverage_tokens[0])
+    if literal is None:
+        return False
+    contract = _SRC.extract_spec_contract(spec, confirm=False)
+    inputs = [p for p in contract.ports if p.direction == "input"]
+    outputs = [p for p in contract.ports if p.direction == "output"]
+    if (len(inputs) != 1 or len(outputs) != 1
+            or inputs[0].width <= 1 or outputs[0].width <= 1
+            or int(literal.group(1)) == inputs[0].width):
+        return False
+    if contract.module is None and len(_dut_module_names(rtl, None)) != 1:
+        return False
+    top, ports = _SRC.parse_rtl_ports(rtl, contract.module)
+    if ((contract.module is not None and top != contract.module)
+            or {(p.name, p.direction, p.width) for p in ports}
+            != {(p.name, p.direction, p.width) for p in contract.ports}
+            or _rtl_declared_widths(rtl).get(inputs[0].name.lower()) != inputs[0].width):
+        return False
+    for match in re.finditer(re.escape(it.coverage_tokens[0]), spec, re.I):
+        lo, hi = _prose_sentence_scope(spec, match.start(), match.end())
+        clause = spec[lo:hi]
+        if (_prose_is_denied(clause)
+                or not re.search(re.escape(it.coverage_tokens[1]), clause, re.I)):
+            continue
+        owner = re.search(
+            r"\b(?:for\s+example|for\s+instance|as\s+an?\s+illustration)\s*,?\s*"
+            r"(?:a|an)\s+" + literal.group(1) + r"\s*[- ]\s*bit\b"
+            r"[^.;]*\b(?:given|with)\s+(?:the\s+)?input\b",
+            clause[:match.start() - lo], re.I)
+        if owner and not re.search(r"\b(?:must|shall|required)\b", owner.group(0), re.I):
+            return True
+    return False
 
 
 def _worked_example_structural_artifact(text: str, m) -> bool:
@@ -3532,6 +3579,8 @@ def run(stations: dict, rtl_text: Optional[str], tb_text: Optional[str],
                 #  3'b010"; cvdp_copilot_binary_to_BCD_0010: the single example
                 #  0010_0101_0111->257 split into 0010=2 / 0101=5 / 0111=7.)
                 if it.we_structural_artifact:
+                    corr = _prov.NO_CORROBORATION
+                elif _worked_example_is_separate_width_illustration(it, _all_spec, rtl_text):
                     corr = _prov.NO_CORROBORATION
                 # ORGANIC #780 r2 (field reopen) — the extraction-time artifact
                 # check sees only the SPEC, so a spec that lists the per-digit
