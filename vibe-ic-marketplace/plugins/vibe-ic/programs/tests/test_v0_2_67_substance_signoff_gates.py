@@ -50,7 +50,7 @@ _P3_SRC = (PLUGIN / "programs" / "phase3_one_shot_runner.py").read_text()
 
 # ── (a) tapeout DRC gates on the COUNT of the SIGNOFF report ───────────────
 
-def _tapeout_base(tmp_path):
+def _tapeout_base(tmp_path, monkeypatch=None, density_count=0):
     (tmp_path / "phase3" / "stage4" / "gds").mkdir(parents=True)
     _gdsii.write_gdsii(tmp_path / "phase3/stage4/gds/chip_top.gds")
     (tmp_path / "synth_netlist.v").write_text("module chip_top(); endmodule")
@@ -68,6 +68,26 @@ def _tapeout_base(tmp_path):
     _si_signoff_fixture.write_proved_si_report(tmp_path)
     # U17: the timing slot credits Step 23/32 PASS verdicts, not a report.
     _tapeout_timing_fixture.write_timing_signoff_pass(tmp_path)
+    if monkeypatch is not None:
+        # Neutral process-edge fixtures exercise the actual producers/readers;
+        # their protocol counts are not native physical qualification.
+        from _native_signoff_fixture import producer, put, IMAGE
+        import librelane_contract as contract
+        import librelane_fill_dfm as fill
+        gds = tmp_path / "phase3/stage4/gds/chip_top.gds"
+        producer(tmp_path, monkeypatch, 'lvs', both_lvs=True, gds_path=gds)
+        info = producer(tmp_path, monkeypatch,
+                        counts={'klayout__density_error__count': density_count}, gds_path=gds)
+        config = put(tmp_path / 'phase3/librelane/34-config/KLayout.Density.json', {
+            'meta': {'step': 'KLayout.Density'}, 'KLAYOUT_DENSITY_RUNSET': str(info['deck'])})
+        put(contract.views_path(config), {
+            'step': 'KLayout.Density', 'inputs': ['gds'], 'outputs': []})
+        monkeypatch.setattr(fill, 'measure_density_ratios',
+                            lambda *a, **kw: {'scope': 'NOT_MEASURED_PROTOCOL_EDGE'})
+        actual = fill.run_density(tmp_path, IMAGE, info['tree'].parent, 'procx',
+            gds=gds, lane='34-density', configs={'KLayout.Density': config},
+            steps=('KLayout.Density',))
+        fill.update_record(tmp_path, 'gds', {'shipped': 'librelane', 'librelane': actual})
 
 
 def test_tapeout_drc_fails_on_nonzero_signoff_count(tmp_path):
@@ -96,14 +116,27 @@ def test_tapeout_drc_unparseable_count_refuses_pass(tmp_path):
                for f in result.findings)
 
 
-def test_tapeout_drc_clean_parsed_count_passes(tmp_path):
-    _tapeout_base(tmp_path)
+def test_tapeout_drc_clean_parsed_count_passes(tmp_path, monkeypatch):
+    _tapeout_base(tmp_path, monkeypatch)
     (tmp_path / "drc_signoff.rpt").write_text(
         "<report-database>\n</report-database>\n")
     SA._LENIENT = False
     result = SA._check_tapeout(tmp_path)
     assert any(f.rule == "TAPEOUT_DRC_CLEAN" for f in result.findings)
     assert result.passed is True
+
+
+def test_clean_drc_cannot_hide_a_measured_density_failure(tmp_path, monkeypatch):
+    _tapeout_base(tmp_path, monkeypatch, density_count=2)
+    (tmp_path / "drc_signoff.rpt").write_text(
+        "<report-database>\n</report-database>\n")
+    SA._LENIENT = False
+    result = SA._check_tapeout(tmp_path)
+    assert any(f.rule == "TAPEOUT_DRC_CLEAN" for f in result.findings)
+    density = result.summary['native_evidence']['density']
+    assert density['verdict'] == 'FAIL'
+    assert density['rows']['klayout__density_error__count']['value'] == 2
+    assert result.passed is False
 
 
 # ── (c) multi-corner STA substance in eda_report_audit ─────────────────────
