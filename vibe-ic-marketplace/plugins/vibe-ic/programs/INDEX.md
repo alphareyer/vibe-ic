@@ -55,7 +55,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `analog_a3_netlist_gen_check` | any | — | A3 deterministic gate (v1.6.35). |
 | `analog_a4_corner_sweep_check` | any | — | A4 deterministic gate (v1.6.35). |
 | `analog_a5_layout_check` | any | — | Verifies that the upstream `analog-layout` skill has emitted the |
-| `analog_a5_layout_emit` | any | — | A5's missing PRODUCER: it draws the layout. |
+| `analog_a5_layout_emit` | any | — | Emit A5 layout and source-bound provenance through native Magic gencells. |
 | `analog_a5_pdk_device_limits` | any | — | what the PDK ITSELF permits a drawn device to be, and what clearance its metal-1 rule demands of a bulk tap. |
 | `analog_a6_block_pv_check` | any | — | A6 deterministic gate (Per-Block Physical Verification: DRC + LVS). |
 | `analog_a6_drc_attribute` | any | — | what each A6 DRC violation actually IS. |
@@ -1600,7 +1600,7 @@ _(no programs in this group)_
 - `analog_a3_netlist_gen_check` — A3 deterministic gate (v1.6.35).
 - `analog_a4_corner_sweep_check` — A4 deterministic gate (v1.6.35).
 - `analog_a5_layout_check` — Verifies that the upstream `analog-layout` skill has emitted the
-- `analog_a5_layout_emit` — A5's missing PRODUCER: it draws the layout.
+- `analog_a5_layout_emit` — Emit A5 layout and source-bound provenance through native Magic gencells.
 - `analog_a5_pdk_device_limits` — what the PDK ITSELF permits a drawn device to be, and what clearance its metal-1 rule demands of a bulk tap.
 - `analog_a6_block_pv_check` — A6 deterministic gate (Per-Block Physical Verification: DRC + LVS).
 - `analog_a6_drc_attribute` — what each A6 DRC violation actually IS.
