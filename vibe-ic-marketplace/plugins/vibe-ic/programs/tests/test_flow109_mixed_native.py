@@ -128,6 +128,26 @@ def test_manifest_image_must_match_runtime_resolution(monkeypatch, tmp_path):
     assert calls == []
 
 
+def test_runtime_image_refusal_is_local_not_measured_before_native(monkeypatch, tmp_path):
+    import librelane_contract as librelane
+
+    root = project(tmp_path, "M07")
+    calls = []
+    monkeypatch.setattr(
+        librelane, "resolve_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            librelane.Refusal("LL_IMAGE_NOT_RESOLVABLE", "no current image attestation")))
+    monkeypatch.setattr(mixed, "_run", lambda *args, **kwargs: calls.append(args))
+
+    refused = mixed.execute(root, context("M07"))
+    assert refused["component_status"] == "NOT_MEASURED"
+    assert refused["reason"] == "LL_IMAGE_NOT_RESOLVABLE"
+    assert refused["detail"] == (
+        "LL_IMAGE_NOT_RESOLVABLE: no current image attestation")
+    assert refused["native_started"] is False
+    assert calls == []
+
+
 def test_changed_consumed_input_refuses_completion_without_replay(monkeypatch, tmp_path):
     install_fakes(monkeypatch)
     root = project(tmp_path, "M07")

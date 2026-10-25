@@ -40,7 +40,14 @@ ROWS = {
 def _runtime_image(project):
     """Resolve the exact execution image now; never store a release digest."""
     import librelane_contract as librelane
-    return librelane.resolve_image(Path(project), record=False)
+    try:
+        return librelane.resolve_image(Path(project), record=False)
+    except librelane.Refusal as exc:
+        detail = str(exc)
+        prefix = f"{exc.code}: "
+        if detail.startswith(prefix):
+            detail = detail[len(prefix):]
+        raise Refusal(exc.code, detail) from None
 
 
 class Refusal(RuntimeError):
