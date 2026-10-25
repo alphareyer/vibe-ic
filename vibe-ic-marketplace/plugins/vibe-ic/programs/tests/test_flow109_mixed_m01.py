@@ -99,7 +99,7 @@ def _case(project):
                                       'topology': topology}]})
     config = _put(project, mixed.INPUT, {
         'schema': mixed.SCHEMA, 'basis': 'source_bound_interface_facts',
-        'sources': {'L1': l1, 'L5': l5, 'L9': l9},
+        'sources': {'L1': l1, 'L5': l5, 'L9': l9, 'actual': _put(project, 'input/flow109/M01-actual-source-facts.md', 'CK1 direction input.\n')},
         'requirements': requirements, 'a04_receipt': a04})
 
     features = next(row['features'] for row in flow109.load_registry()['reference_profiles']

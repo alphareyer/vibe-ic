@@ -294,11 +294,12 @@ def prepare(project, context):
     if manifest.get('schema') != SCHEMA or manifest.get('basis') != 'source_bound_interface_facts':
         raise AdmissionRefusal('M01_BASIS_UNSUPPORTED', str(manifest.get('basis')))
     declared_sources = manifest.get('sources')
-    if not isinstance(declared_sources, dict) or set(declared_sources) != {'L1', 'L5', 'L9'}:
+    if (not isinstance(declared_sources, dict)
+            or not {'L1', 'L5', 'L9'} <= set(declared_sources)):
         raise AdmissionRefusal('M01_SOURCE_POPULATION_INVALID', str(declared_sources))
     sources = {name: _bound(project, record) for name, record in declared_sources.items()}
-    if len(set(sources.values())) != 3:
-        raise AdmissionRefusal('M01_SOURCE_POPULATION_INVALID', 'three distinct layers required')
+    if len(set(sources.values())) != len(sources):
+        raise AdmissionRefusal('M01_SOURCE_POPULATION_INVALID', 'distinct source files required')
     rails = rail_source.derive(project, [str(path.relative_to(project)) for path in sources.values()])['rails']
     if not rails:
         raise AdmissionRefusal('M01_SOURCE_RAILS_ABSENT', 'no source-stated rail/voltage table')
