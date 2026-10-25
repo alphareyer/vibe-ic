@@ -6322,6 +6322,9 @@ def _validated_route_reentry_state(*, bench: str, dataset: str | Path | None,
         return {"status": "REFUSED", "reason": str(exc)}
 
     expected_exit = str(receipt["verify_through"])
+    rtl_only = (receipt.get("delivery_target") == "rtl"
+                and _tnr.is_rtl_only_evidence(
+                    receipt.get("requested_evidence"), exit_step=expected_exit))
     try:
         prompt_text = (project / "input" / "phase1_prompt.md").read_text(
             errors="replace")
@@ -6347,6 +6350,11 @@ def _validated_route_reentry_state(*, bench: str, dataset: str | Path | None,
         return {"status": "REFUSED", "reason": "ROUTE_REENTRY_ENTRY_MUTATION"}
 
     current_activation = None
+    activation_root = _receipt_history_dir(project, "d1_activation").parent
+    activation_seen = isinstance(result.get("d1_activation"), dict) or any(
+        path.exists() or path.is_symlink() for path in (
+        _receipt_current_pointer(project, "d1_activation"),
+        _receipt_history_head(project, "d1_activation"), activation_root))
     try:
         current_activation = _read_current_receipt(project, "d1_activation")
         activation = current_activation["receipt"]
@@ -6368,13 +6376,18 @@ def _validated_route_reentry_state(*, bench: str, dataset: str | Path | None,
         # Only a genuinely absent activation may be retried at D1.  Existing
         # but stale/foreign evidence is a hard refusal and may not be used to
         # authorize even a later D1 span.
-        if allow_d1_only and current_activation is None:
+        if (current_activation is None and not activation_seen
+                and (allow_d1_only or rtl_only)):
             try:
                 _require_route_admission(run_p, task, receipt, require_d1=False)
             except (OSError, ValueError, TypeError, KeyError) as authority_error:
                 return {"status": "REFUSED", "reason": str(authority_error)}
-            return {"status": "D1_ONLY", "reason": str(exc),
-                    "route_receipt": receipt, "task": task, "project": project}
+            return {"status": ("ACTIVE" if rtl_only
+                               else "D1_ONLY"), "reason": str(exc),
+                    "route_receipt": receipt, "task": task, "project": project,
+                    "activation": None, "entry_step": str(receipt["entry_step"]),
+                    "exit_step": expected_exit, "delivery_route": expected_route,
+                    "effective_entry": "2" if supplied_rtl else str(receipt["entry_step"])}
         return {"status": "REFUSED", "reason": f"ROUTE_REENTRY_D1_INVALID: {exc}"}
     try:
         _require_route_admission(run_p, task, receipt)
@@ -6709,6 +6722,10 @@ def _require_route_admission(run_p: Path, task: dict, receipt: dict,
         anchor["benchmark"], anchor["format"], Path("/unused"), [task])["tasks"][0]
     if anchored != expected:
         raise ValueError("ROUTE_ADMISSION_ORIGINAL_ANCHOR_MISMATCH")
+    prompt = Path(task["project"]) / "input" / "phase1_prompt.md"
+    if (prompt.is_symlink()
+            or _sha256_text(prompt.read_text(errors="replace")) != task["prompt_sha256"]):
+        raise ValueError("ROUTE_ADMISSION_ORIGINAL_PROMPT_CHANGED")
     issued = run_p / "ai_route_tasks" / f"{task_hash}.json"
     if _read_json_regular(issued) != task:
         raise ValueError("ROUTE_ADMISSION_ISSUED_TASK_CHANGED")
@@ -7592,34 +7609,57 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
             ev = str(route_receipt["requested_evidence"])
             exit_step = str(route_receipt["verify_through"])
             route_backup = _declared_route_ai_backup(verdict)
-            # Every accepted response is normalized into the Program receipt,
-            # and every newly executed route crosses the same two-stage D1
-            # barrier.  Response shape cannot opt into a legacy bypass.
-            phase1_frontdoor, pending, activation = _activate_route_d1(
-                proj, route_task, route_receipt, runner, runner_budget,
-                run_scope=run_scope,
-                delivery_route=str(verdict.get("delivery_route") or "ip"))
-            if entry == "D1":
+            # RTL authoring uses the original source-authorized normal entry.
+            # Full-design delivery still qualifies D1 before its later span.
+            rtl_delivery = (
+                route_receipt.get("delivery_target") == "rtl"
+                and tnr.is_rtl_only_evidence(
+                    route_receipt.get("requested_evidence"), exit_step=exit_step))
+            if rtl_delivery:
+                pending = _prepare_route_d1(
+                    proj, route_task, route_receipt, run_scope=run_scope)
+                state = _validated_route_reentry_state(
+                    bench=bench, dataset=ds, fmt=fmt, run_p=run_p, pid=pid,
+                    result={"route_receipt": route_receipt},
+                    route_worklist=routed_tasks, allow_d1_only=False)
+                if state.get("status") != "ACTIVE":
+                    raise ValueError(str(state.get("reason") or "ROUTE_REENTRY_REFUSED"))
+                activation = state["activation"]
+                effective_entry = entry
+                if entry != "D1":
+                    phase1_frontdoor = _ensure_phase1_frontdoor(
+                        runner, proj, runner_budget,
+                        delivery_route=str(verdict.get("delivery_route") or "ip"))
+                    if phase1_frontdoor.get("status") == "BLOCKED":
+                        raise RuntimeError(str(phase1_frontdoor.get("reason")))
+            else:
+                phase1_frontdoor, pending, activation = _activate_route_d1(
+                    proj, route_task, route_receipt, runner, runner_budget,
+                    run_scope=run_scope,
+                    delivery_route=str(verdict.get("delivery_route") or "ip"))
+            if not rtl_delivery and entry == "D1":
                 nature_row = tnr.NATURE_ENTRY[verdict["entry_nature"]]
                 candidates = [str(x) for x in nature_row.get("then") or []]
                 order = {sid: i for i, sid in enumerate(rd.canonical_dag()["steps"])}
                 effective_entry = next(
                     (sid for sid in candidates
                      if sid in order and order[sid] <= order[exit_step]), None)
-            else:
+            elif not rtl_delivery:
                 effective_entry = entry
-            rd.require_d1_activation(
-                activation, route_receipt, task_sha256=route_task["task_sha256"],
-                ldoc_root_handle=_sha256_text(str((proj / "phase1" / "generated_docs").resolve())))
-            planned_snapshot = _validate_live_d1_for_launch(
-                proj, route_receipt, activation, route_task["task_sha256"])
-            admitted_steps = rd.admit_route_closure(
-                pending=pending, activation=activation,
-                route_receipt=route_receipt,
-                task_sha256=route_task["task_sha256"],
-                source_sha256=route_receipt["source_sha256"],
-                ldoc_root_handle=_sha256_text(
-                    str((proj / "phase1" / "generated_docs").resolve())))
+            admitted_steps = []
+            if activation is not None:
+                rd.require_d1_activation(
+                    activation, route_receipt, task_sha256=route_task["task_sha256"],
+                    ldoc_root_handle=_sha256_text(str((proj / "phase1" / "generated_docs").resolve())))
+                planned_snapshot = _validate_live_d1_for_launch(
+                    proj, route_receipt, activation, route_task["task_sha256"])
+                admitted_steps = rd.admit_route_closure(
+                    pending=pending, activation=activation,
+                    route_receipt=route_receipt,
+                    task_sha256=route_task["task_sha256"],
+                    source_sha256=route_receipt["source_sha256"],
+                    ldoc_root_handle=_sha256_text(
+                        str((proj / "phase1" / "generated_docs").resolve())))
             if effective_entry is None:
                 # A D1-only proof still has a receipt and activation but no
                 # downstream runner span to launch.
@@ -7630,18 +7670,33 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 argv = _solver_argv(
                     runner, proj, effective_entry, exit_step,
                     str(verdict.get("delivery_route") or "ip"))
-                d1_snapshot = _capture_d1_evidence(proj)
-                if d1_snapshot.digest != planned_snapshot.digest:
-                    raise ValueError("D1_SNAPSHOT_PLANNED_GENERATION_CHANGED")
-                process = _run_from_d1_snapshot(
-                    runner_budget, argv, d1_snapshot, route_receipt, activation,
-                    route_task["task_sha256"])
+                if activation is None:
+                    _require_route_admission(run_p, route_task, route_receipt,
+                                             require_d1=False)
+                    process = runner_budget.run(argv)
+                else:
+                    d1_snapshot = _capture_d1_evidence(proj)
+                    if d1_snapshot.digest != planned_snapshot.digest:
+                        raise ValueError("D1_SNAPSHOT_PLANNED_GENERATION_CHANGED")
+                    process = _run_from_d1_snapshot(
+                        runner_budget, argv, d1_snapshot, route_receipt, activation,
+                        route_task["task_sha256"])
                 if process.error is not None:
                     raise RuntimeError(process.error)
                 rc = int(process.rc)
                 got = _collect_runner_result(
                     process, argv, fmt, pid, proj,
                     required_top=_required_scorer_top(_entry(bench), fmt))
+            if rtl_delivery:
+                import emit_attestation as ea              # noqa: PLC0415
+                import _path_layout as pl                  # noqa: PLC0415
+                phase1_frontdoor = phase1_frontdoor or {
+                    "runner_rc": rc, "provenance": ea.phase1_provenance(proj)}
+                try:
+                    native_d1 = _read_json_regular(pl.report_path(proj, "phase1_one_shot.json"))
+                    phase1_frontdoor["native_verdict"] = native_d1.get("verdict")
+                except (OSError, ValueError, TypeError):
+                    pass
             diagnostic = got.get("runner_diagnostics")
             pre_gate_blocked = bool(diagnostic and diagnostic.get("reason"))
             waive = None if pre_gate_blocked else _rtl_gen_waive(proj)
@@ -8059,6 +8114,10 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         expected = (task.get("phase1_provenance")
                     if isinstance(task, dict) else None)
         current = emit_attestation.phase1_provenance(proj)
+        admission = _route_reentry_state(pid, result, allow_d1_only=False)
+        if admission.get("status") != "ACTIVE":
+            phase1_blocked[pid] = str(admission.get("reason") or "ROUTE_REENTRY_REFUSED")
+            continue
         if isinstance(expected, dict) and expected.get("ran") is True:
             if current != expected:
                 phase1_blocked[pid] = (
@@ -8074,10 +8133,6 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             # a measured fact rather than a missing field.
             phase1_blocked[pid] = (
                 "canonical D1-entry run emitted no Phase-1 provenance")
-            continue
-        admission = _route_reentry_state(pid, result, allow_d1_only=False)
-        if admission.get("status") != "ACTIVE":
-            phase1_blocked[pid] = str(admission.get("reason") or "ROUTE_REENTRY_REFUSED")
             continue
         frontdoor = _ensure_phase1_frontdoor(runner, proj, runner_budget)
         if frontdoor.get("status") == "BLOCKED":
@@ -8125,13 +8180,22 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         # The caller performs a state check before constructing a job. Repeat
         # it here at the actual fan-out seam so a pointer/anchor mutation after
         # planning cannot turn a valid plan into a later-span bypass.
-        d1_snapshot = _capture_d1_evidence(proj)
         state = _route_reentry_state(str(pid), result_by_id.get(str(pid)) or {},
-                                     allow_d1_only=False, d1_snapshot=d1_snapshot)
+                                     allow_d1_only=False)
         if state.get("status") != "ACTIVE":
             return _ResumeRunnerOutcome(
                 problem_id=pid, rc=None, collected_json=None,
                 error=str(state.get("reason") or "ROUTE_REENTRY_REFUSED"))
+        d1_snapshot = None
+        if state["activation"] is not None:
+            d1_snapshot = _capture_d1_evidence(proj)
+            state = _route_reentry_state(
+                str(pid), result_by_id.get(str(pid)) or {},
+                allow_d1_only=False, d1_snapshot=d1_snapshot)
+            if state.get("status") != "ACTIVE":
+                return _ResumeRunnerOutcome(
+                    problem_id=pid, rc=None, collected_json=None,
+                    error=str(state.get("reason") or "ROUTE_REENTRY_REFUSED"))
         if expected_repaired_output_sha256 is not None:
             try:
                 current_output_sha256 = _runner_material_snapshot(proj).get(
@@ -8152,10 +8216,15 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         argv = _resume_solver_argv(
             runner, proj, supplied_rtl, state["entry_step"],
             state["exit_step"], state["delivery_route"])
-        process = _run_from_d1_snapshot(
-            runner_budget, argv, d1_snapshot, state["route_receipt"],
-            state["activation"], state["task"]["task_sha256"],
-            expected_repaired_output_sha256=expected_repaired_output_sha256)
+        if state["activation"] is None:
+            _require_route_admission(run_p, state["task"], state["route_receipt"],
+                                     require_d1=False)
+            process = runner_budget.run(argv)
+        else:
+            process = _run_from_d1_snapshot(
+                runner_budget, argv, d1_snapshot, state["route_receipt"],
+                state["activation"], state["task"]["task_sha256"],
+                expected_repaired_output_sha256=expected_repaired_output_sha256)
         diagnostic = _runner_diagnostics(process, argv, proj)
         diagnostics_json = json.dumps(diagnostic) if diagnostic else None
         if process.error is not None:
