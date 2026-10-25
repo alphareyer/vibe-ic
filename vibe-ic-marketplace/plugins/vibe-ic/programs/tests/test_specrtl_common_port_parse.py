@@ -12,6 +12,15 @@ import importlib
 C = importlib.import_module("_specrtl_common")
 
 
+def test_native_range_metadata_uses_the_existing_parameter_evaluator():
+    ports = C.parse_verilog_ports(
+        'module m #(parameter BASE=5)(input [BASE+5:BASE] slot_i, output bit_o); endmodule')
+    assert [(p.name, p.width, p.msb, p.lsb) for p in ports] == [
+        ('slot_i', 6, 10, 5), ('bit_o', 1, None, None)]
+    assert C.Port('slot_i', 'input', 6, True).optional is True
+    assert C.Port('slot_i', 'input', 6) == ports[0]
+
+
 # ---------------------------------------------------------------------------
 # defect #3 — JSON spec `dir` / `direction` alias
 # ---------------------------------------------------------------------------

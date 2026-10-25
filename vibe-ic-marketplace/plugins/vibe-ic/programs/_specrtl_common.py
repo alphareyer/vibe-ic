@@ -187,6 +187,10 @@ class Port:
     # l9_rtl_pin_consistency_check already honours. Defaults False so every
     # positional Port(...) construction keeps its current meaning.
     optional: bool = False
+    # Endpoint metadata does not change legacy width-only Port equality.
+    # The conformance consumer asserts it only for validated refinements.
+    msb: Optional[int] = field(default=None, compare=False)
+    lsb: Optional[int] = field(default=None, compare=False)
 
 
 # The width bracket tolerates ANY range expression, not only a `\d+:\d+` literal
@@ -343,10 +347,8 @@ def _parse_module_params(text: str) -> Dict[str, int]:
     return resolved
 
 
-def _resolve_bracket_width(bracket: str, params: Dict[str, int]) -> int:
-    """Width of a `[hi:lo]` packed dimension, resolving parameter names via
-    ``params``. Returns WIDTH_UNKNOWN when either bound cannot be resolved to a
-    concrete int (e.g. an unresolved parameter, or a ternary/complex bound)."""
+def _resolve_bracket_bounds(bracket: str, params: Dict[str, int]) -> Tuple[Optional[int], Optional[int]]:
+    """The declared packed endpoints, using the existing parameter evaluator."""
     inner = bracket.strip()
     if inner.startswith('['):
         inner = inner[1:]
@@ -355,13 +357,17 @@ def _resolve_bracket_width(bracket: str, params: Dict[str, int]) -> int:
     # Exactly one colon separates msb:lsb; a ternary (`?:`) or multi-colon bound
     # is too complex to resolve statically → UNKNOWN (safe).
     if inner.count(':') != 1:
-        return WIDTH_UNKNOWN
+        return None, None
     hi_s, lo_s = inner.split(':', 1)
     hi = _safe_eval_int(hi_s, params)
     lo = _safe_eval_int(lo_s, params)
-    if hi is None or lo is None:
-        return WIDTH_UNKNOWN
-    return abs(hi - lo) + 1
+    return hi, lo
+
+
+def _resolve_bracket_width(bracket: str, params: Dict[str, int]) -> int:
+    """Resolve a packed width, retaining UNKNOWN for unresolved endpoints."""
+    hi, lo = _resolve_bracket_bounds(bracket, params)
+    return WIDTH_UNKNOWN if hi is None or lo is None else abs(hi - lo) + 1
 
 
 # function/task argument declarations use the same input/output keywords as module
@@ -390,20 +396,23 @@ def parse_verilog_ports(text: str,
     ports: List[Port] = []
     for m in _PORT_DECL.finditer(text):
         direction = m.group(1)
+        msb = lsb = None
         if m.group(2) is None:
             width = 1  # no packed dimension → genuine 1-bit scalar
         else:
             bracket = m.group(2).strip()
             lit = _LITERAL_RANGE.fullmatch(bracket)
             if lit:
-                width = abs(int(lit.group(1)) - int(lit.group(2))) + 1
+                msb, lsb = int(lit.group(1)), int(lit.group(2))
+                width = abs(msb - lsb) + 1
             else:
                 # Parameterized / symbolic bound: resolve via params, else UNKNOWN.
-                width = _resolve_bracket_width(bracket, params)
+                msb, lsb = _resolve_bracket_bounds(bracket, params)
+                width = WIDTH_UNKNOWN if msb is None or lsb is None else abs(msb - lsb) + 1
         for nm in re.split(r'\s*,\s*', m.group(3)):
             nm = nm.strip()
             if nm:
-                ports.append(Port(nm, direction, width))
+                ports.append(Port(nm, direction, width, msb=msb, lsb=lsb))
     return ports
 
 
@@ -608,6 +617,9 @@ class SpecContract:
     # gate on their own; spec_conformance_check re-emits them as INFO findings so a
     # silent 0-port skip on a table-only interface spec is visible.
     notes: List[str] = field(default_factory=list)
+    # Only the native publication reader supplies this authority. Plain JSON
+    # numeric fields and prose cannot arm exact selected-range comparisons.
+    primitive_refinements: Dict[str, dict] = field(default_factory=dict)
 
 
 # Natural-language interface bullet:  " - input  d   (8 bits)"  /  " - output q"
@@ -727,9 +739,19 @@ def _nl_port_is_prose(name: str, tail: str, has_width: bool = False) -> bool:
     `has_width` is True when the caller's port regex already consumed a `(N bits)`
     width group for this bullet (the structural anchor the function-word check
     looks for, but eaten before the tail)."""
+    t = tail or ""
+    # Preserve HDL words already excluded by the prose/function-word guards
+    # when a structural width or description follows them.
+    if name.lower() in {'and', 'or', 'nor', 'bit', 'interface'}:
+        return True
+    # Exact numeric-width bullets and separated descriptions declare an
+    # identifier even when it is also an English noun. An empty heading colon
+    # and ordinary copular/descriptive tails are not this provenance.
+    if ((has_width and not t.strip())
+            or re.match(r'^\s*(?::|,|;|--?\s|[–—])\s*\S', t)):
+        return False
     if name.lower() in _NL_PORT_PROSE_NAMES:
         return True
-    t = tail or ""
     # ORGANIC #770 — a function word (and/or/the/a/an/…) is a phantom port ONLY
     # when it is NOT immediately followed by a structural width anchor. A real
     # short/single-letter port (`- input a (8 bits)`) carries the anchor and is
@@ -1595,6 +1617,43 @@ def _json_port_width(d: dict) -> int:
         return 0  # symbolic/parameterized width — unknown, do not assert
 
 
+def _published_primitive_ports(project: Optional[Path], content=None, *, text=None,
+                               module=None) -> Dict[str, dict]:
+    """Validate the owning publication before consuming a selected primitive."""
+    try:
+        if project is None:
+            if isinstance(content, dict) and 'interface_binding_authoring' in content:
+                raise ValueError('a native interface publication requires its actual project')
+            return {}
+        project = Path(project).resolve()
+        import interface_bindings as binding
+        if content is None:
+            path = project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json'
+            if not path.is_file() and not (project / binding.INPUT).exists():
+                return {}
+            content = json.loads(path.read_text(errors='replace'))
+        if not isinstance(content, dict):
+            return {}
+        if 'interface_binding_authoring' not in content:
+            if (project / binding.INPUT).exists():
+                raise ValueError('author input exists without a native L9 publication')
+            return {}
+        published = binding.current_published_ports(project, content)
+        refined = {name: row for name, row in published.items()
+                   if isinstance(row.get('primitive_refinement'), dict)}
+        if refined and text is not None:
+            ledger = content['interface_binding_authoring']
+            if module != content.get('top_module'):
+                raise ValueError('native refinement targets another module')
+            if not any(binding._path(project, rel).read_text(errors='replace') == text
+                       for rel in ledger['input_files']):
+                raise ValueError('raw spec is not a current bound design input')
+        return refined
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise ValueError('UNRESOLVED_STRUCTURED_INTERFACE: current native interface refused: '
+                         + str(exc)) from exc
+
+
 def extract_spec_contract(text: str, is_json: bool = False,
                           confirm: bool = True, client_factory=None,
                           project: Optional[Path] = None) -> SpecContract:
@@ -1615,6 +1674,7 @@ def extract_spec_contract(text: str, is_json: bool = False,
     """
     if is_json:
         data = json.loads(text)
+        refined = _published_primitive_ports(project, data)
         if isinstance(data, list):          # bare port list [{...}, ...]
             port_dicts, rst, mod, lat = data, {}, None, None
         else:                               # {"ports":[...],"reset":{...},...}
@@ -1641,7 +1701,9 @@ def extract_spec_contract(text: str, is_json: bool = False,
                                  + ' type=' + str(d.get('package_struct'))
                                  + '; bind directed payload ports before physical conformance')
         ports = [Port(d['name'], _json_port_direction(d), _json_port_width(d),
-                      bool(d.get('optional')) if isinstance(d, dict) else False)
+                      bool(d.get('optional')) if isinstance(d, dict) else False,
+                      msb=refined.get(d['name'], {}).get('msb'),
+                      lsb=refined.get(d['name'], {}).get('lsb'))
                  for d in port_dicts]
         return SpecContract(module=mod, ports=ports,
                             reset_mode=rst.get('mode'),
@@ -1650,7 +1712,7 @@ def extract_spec_contract(text: str, is_json: bool = False,
                             latency_registered=lat,
                             fsm_output_style=(data.get('fsm_output_style')
                                               if isinstance(data, dict) else None),
-                            source='json')
+                            source='json', primitive_refinements=refined)
 
     clean = strip_comments(text)
     ports = _parse_nl_ports(clean)
@@ -1717,4 +1779,17 @@ def extract_spec_contract(text: str, is_json: bool = False,
             from .llm_semantic_confirm import confirm_contract, manifest  # packaged
         contract.semantic_confirmations = manifest(
             confirm_contract(contract, text, client_factory=client_factory))
+    refined = _published_primitive_ports(project, text=text, module=contract.module)
+    if refined:
+        ports_by_name = {port.name: port for port in contract.ports}
+        for name, selected in refined.items():
+            port = ports_by_name.get(name)
+            before = selected['primitive_refinement']['before']
+            if port is None or any(getattr(port, key) != before.get(key)
+                                   for key in ('direction', 'width')) or (
+                    port.msb is not None and port.lsb is not None
+                    and (port.msb, port.lsb) != (before.get('msb'), before.get('lsb'))):
+                raise ValueError('UNRESOLVED_STRUCTURED_INTERFACE: raw spec differs from native before claim: ' + name)
+            port.width, port.msb, port.lsb = selected['width'], selected['msb'], selected['lsb']
+        contract.primitive_refinements = refined
     return contract

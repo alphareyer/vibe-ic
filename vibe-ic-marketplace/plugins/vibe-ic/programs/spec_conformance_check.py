@@ -124,6 +124,7 @@ except ImportError:  # allow running from another cwd
 # AND the tier/stability pipeline both consult this so a "Tier-1 solved" emit must
 # survive the SAME conformance the real blind run applies (no stability-test gap).
 EMIT_BLOCKING_CONFORMANCE_RULES = frozenset({
+    "port-range-mismatch",
     "onebased-port-range",
     "fsm-output-style-mismatch",
     "port-missing",
@@ -2029,6 +2030,21 @@ def _project_root_of(files, marker: str) -> Optional[Path]:
     return None
 
 
+def _contract_project(spec_path: Path, files) -> Optional[Path]:
+    """Confine native authoring context to a real spec or normal RTL tree."""
+    resolved = spec_path.resolve()
+    for parent in resolved.parents:
+        parts = resolved.relative_to(parent).parts
+        if (parts == ('phase1', 'generated_docs', 'L9_INTEGRATION_SPEC.json')
+                or (len(parts) >= 3 and parts[:2] in
+                    (('input', 'docs'), ('phase1', 'input_doc'), ('phase1', 'input_prompt')))
+                or parts in (('input', 'phase1_prompt.md'), ('input', 'phase1_structured.yaml'))):
+            return parent
+    roots = {parent.parents[2] for path in files for parent in Path(path).resolve().parents
+             if parent.parts[-3:] == ('phase2', 'stage1', 'rtl')}
+    return next(iter(roots)) if len(roots) == 1 else None
+
+
 def _input_stated_alternatives(text: str) -> List[tuple]:
     """[(primary, alternative)] pairs the INPUT itself offers. §4.05: this is
     read from the design input only."""
@@ -2373,6 +2389,13 @@ def check(spec: SpecContract, rtl_name: str, rtl_ports: List[Port],
                 and rp.width != sp.width):
             f.append(Finding(path, 'ERROR', 'port-width-mismatch', nm,
                 f"port '{nm}' width RTL={rp.width} vs spec={sp.width}."))
+        actual_range = (rp.msb, rp.lsb)
+        if rp.width == 1 and actual_range == (None, None):
+            actual_range = (0, 0)  # an unpacked scalar's only bit
+        if nm in spec.primitive_refinements and actual_range != (sp.msb, sp.lsb):
+            f.append(Finding(path, 'ERROR', 'port-range-mismatch', nm,
+                f"port '{nm}' range RTL=[{rp.msb}:{rp.lsb}] vs native selected "
+                f"[{sp.msb}:{sp.lsb}]."))
     if smap:
         for nm in rmap:
             if nm in renamed_ok_rtl:
@@ -2737,8 +2760,17 @@ def _tool_ports(path: Path, top: str) -> Optional[List[Port]]:
     module = modules.get(top) or modules.get('\\' + top) if top else None
     if not isinstance(module, dict):
         return None
-    return [Port(name, str(port.get('direction')), len(port.get('bits') or []))
-            for name, port in (module.get('ports') or {}).items()]
+    ports = []
+    for name, port in (module.get('ports') or {}).items():
+        width = len(port.get('bits') or [])
+        msb = lsb = None
+        offset, upto = port.get('offset', 0), port.get('upto', 0)
+        if width and type(offset) is int and type(upto) is int and upto in (0, 1):
+            if width > 1 or 'offset' in port or 'upto' in port:
+                low, high = offset, offset + width - 1
+                msb, lsb = (low, high) if upto else (high, low)
+        ports.append(Port(name, str(port.get('direction')), width, msb=msb, lsb=lsb))
+    return ports
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -2766,8 +2798,10 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return 2
     spec_raw = spec_path.read_text(errors='replace')
+    files = collect_rtl_files(args.paths, args.rtl_dir)
     try:
-        spec = extract_spec_contract(spec_raw, is_json=spec_path.suffix == '.json')
+        spec = extract_spec_contract(spec_raw, is_json=spec_path.suffix == '.json',
+                                     project=_contract_project(spec_path, files))
     except ValueError as exc:
         if not str(exc).startswith('UNRESOLVED_STRUCTURED_INTERFACE:'):
             raise
@@ -2810,7 +2844,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             input_prose = ''
 
     top = args.top or spec.module
-    files = collect_rtl_files(args.paths, args.rtl_dir)
     if not files:
         print('spec_conformance_check: FAIL — no RTL files found', file=sys.stderr)
         return 2
