@@ -679,6 +679,27 @@ def _phase1_checkpoint_freshness(project: Path,
     return fresh
 
 
+def _standalone_rtl_provenance(project: Path, knobs: Dict[str, Any],
+                               original_inputs: dict) -> dict:
+    """BLOCKING source integrity for bounded RTL; never qualifies full D1."""
+    fresh = _phase1_checkpoint_freshness(project, knobs)
+    if fresh['state'] not in (_p1id.REUSE, _p1id.REVALIDATE):
+        raise ValueError(f"{fresh['reason']}: {fresh['why']}")
+    now = _p1id.input_tree_snapshot(project)
+    if any(value[0] is None or now.get(name, (None,))[0] != value[0]
+           for name, value in original_inputs.items()):
+        raise ValueError('original design input or supplied RTL changed')
+    documents = _p1id.generated_docs(project)
+    if len(documents) < 13 or any(
+            not isinstance(json.loads(path.read_text()), dict) for path in documents):
+        raise ValueError('produced Phase1 documents are incomplete or malformed')
+    import emit_attestation
+    provenance = emit_attestation.phase1_provenance(project)
+    if provenance.get('ran') is not True:
+        raise ValueError('produced Phase1 provenance is absent')
+    return provenance
+
+
 def _revalidate_phase1_checkpoint(project: Path, knobs: Dict[str, Any]) -> dict:
     """Recheck a current D1 checkpoint; this call produces no L documents.
 
@@ -3145,6 +3166,13 @@ def _main() -> int:
         return why
     # FX_STALE_LDOCS — the knobs THIS run hands phase 1, so a doc written
     # under another `--pdk` / `--ic-name` is not reused (review wave8 MAJOR).
+    import task_nature_route as _request_routes
+    _rtl_only_request = bool(
+        _execution.request()['mode'] == 'default' and args.skip_phase3
+        and args.entry_step != 'D1'
+        and _request_routes.is_rtl_only_evidence(exit_step=args.exit_step))
+    _rtl_source_before = (_p1id.input_tree_snapshot(project)
+                          if _rtl_only_request else {})
     _p1_knobs = {"ic_name": args.ic_name, "pdk": args.pdk, "mode": "docs"}
     _p1_checkpoint = _execution.request()['mode'] == 'default'
     if _p1_checkpoint and args.entry_step == 'D1':
@@ -3447,7 +3475,7 @@ def _main() -> int:
             review = "PASS" if credit else "FAIL" if rejected else "NOT_MEASURED"
             _phase1_checkpoint_review = {
                 "verdict": review, "detail": detail, "producer_reused": True}
-            if credit:
+            if credit and not _rtl_only_request:
                 accepted = _revalidate_phase1_checkpoint(project, _p1_knobs)
                 _phase1_checkpoint_review['canonical_acceptance'] = accepted
                 review = accepted['verdict']
@@ -3474,6 +3502,36 @@ def _main() -> int:
                 plan[-1] = ("phase1", review, 0)
                 halted_at = "phase1"
                 advisories.append("phase1 checkpoint handoff refused: " + detail)
+
+    if _rtl_only_request and _p1_design_input:
+        # A bounded RTL request consumes the original specification and intact
+        # produced documents, not full-chip D1 qualification. Keep D1's actual
+        # verdict; the selected Phase2 producer and its Program/AI gates decide
+        # the requested RTL evidence. No stale or reportless producer is excused.
+        try:
+            if p1_mode == _P1_MODE_REFUSED or (run_phase1 and not _published_here(
+                    project, 'phase1_one_shot.json', _phase_started['phase1'])):
+                raise ValueError('Phase1 refused or published no current producer report')
+            _rtl_provenance = _standalone_rtl_provenance(
+                project, _p1_knobs, _rtl_source_before)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            halted_at = 'phase1'
+            advisories.append('BOUNDED_RTL_PHASE1_PROVENANCE_REFUSED: ' + str(exc))
+        else:
+            halted_at = ''
+            _fd_disclosures.append({
+                'refresh': 'full D1 qualification', 'kind': 'outside_requested_evidence',
+                'declared_by': ' '.join(_fd_window_flags),
+                'provenance': _rtl_provenance,
+                'why': 'Original source and source-bound produced Ldocs are intact; '
+                       'the selected standalone RTL evidence follows Phase2. '
+                       'Historical producer source drift remains disclosed. '
+                       'The recorded D1 verdict is unchanged.'})
+            advisories.append(
+                'BOUNDED_RTL_PHASE1_PROVENANCE: original source and source-bound '
+                'produced Ldocs retained; full D1 qualification is outside '
+                'this standalone RTL request. Its actual verdict remains '
+                'recorded; Phase2 Program/AI gates still apply.')
 
     # FX_STALE_LDOCS (review wave8 BLOCKER 2) — the generated docs as phase 1
     # left them. Anything that changes them from here to the end of this run
