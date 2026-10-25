@@ -75,8 +75,7 @@ def _tapeout_base(tmp_path, monkeypatch=None, density_count=0):
         import librelane_contract as contract
         import librelane_fill_dfm as fill
         gds = tmp_path / "phase3/stage4/gds/chip_top.gds"
-        producer(tmp_path, monkeypatch, 'lvs', both_lvs=True, gds_path=gds)
-        info = producer(tmp_path, monkeypatch,
+        info = producer(tmp_path, monkeypatch, 'lvs', both_lvs=True,
                         counts={'klayout__density_error__count': density_count}, gds_path=gds)
         config = put(tmp_path / 'phase3/librelane/34-config/KLayout.Density.json', {
             'meta': {'step': 'KLayout.Density'}, 'KLAYOUT_DENSITY_RUNSET': str(info['deck'])})
@@ -88,6 +87,12 @@ def _tapeout_base(tmp_path, monkeypatch=None, density_count=0):
             gds=gds, lane='34-density', configs={'KLayout.Density': config},
             steps=('KLayout.Density',))
         fill.update_record(tmp_path, 'gds', {'shipped': 'librelane', 'librelane': actual})
+        # This test audits the direct DRC report grammar. LVS still requires
+        # its full-GDS native chain in direct mode; density retains Step34.
+        switch_path = tmp_path / 'phase3/librelane_switch.json'
+        switch = json.loads(switch_path.read_text())
+        switch['steps']['31'] = 'direct'
+        put(switch_path, switch)
 
 
 def test_tapeout_drc_fails_on_nonzero_signoff_count(tmp_path):
