@@ -516,7 +516,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `flow109_package_ready` | any | — | Flow109 D75 Default package/test interface component. |
 | `flow109_route_check` | any | — | D42 Default routed-candidate checks on the adopted D41 database. |
 | `flow109_system_security` | any | — | D16/D17/D73 readers for existing full-stack and formal producers. |
-| `flow109_technology_qualification` | any | — | D03 Default technology qualification over a current native checkpoint. |
+| `flow109_technology_qualification` | any | — | D03 native technology selection. BLOCKING on native config/pin refusal. |
 | `flow_compliance_check` | any | Wave 91 | Strict Vibe-IC phase 2+3 gate (40 main-track steps + A1-A9 analog + M1-M4 mixed-signal + P0 structural-RTL umbrella in v1.6.15). |
 | `flow_condition_reachability_check` | any | — | the self-disabling-condition guard. |
 | `flow_dashboard` | any | — | unified entry for the Vibe-IC flow execution dashboard. |
@@ -2056,7 +2056,7 @@ _(no programs in this group)_
 - `flow109_package_ready` — Flow109 D75 Default package/test interface component.
 - `flow109_route_check` — D42 Default routed-candidate checks on the adopted D41 database.
 - `flow109_system_security` — D16/D17/D73 readers for existing full-stack and formal producers.
-- `flow109_technology_qualification` — D03 Default technology qualification over a current native checkpoint.
+- `flow109_technology_qualification` — D03 native technology selection. BLOCKING on native config/pin refusal.
 - `flow_compliance_check` — Strict Vibe-IC phase 2+3 gate (40 main-track steps + A1-A9 analog + M1-M4 mixed-signal + P0 structural-RTL umbrella in v1.6.15).  _[Wave 91]_
 - `flow_condition_reachability_check` — the self-disabling-condition guard.
 - `flow_dashboard` — unified entry for the Vibe-IC flow execution dashboard.
