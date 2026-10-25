@@ -13920,9 +13920,26 @@ def _step_rtl_hygiene_native(project: Path) -> StepResult:
     context = {}
     status, detail = "NOT_MEASURED", "native RTL lint did not produce a current tool result"
     try:
-        result = _pr.run([
+        from _rtl_include_hub import silicon_rtl_selection
+        selected = [str(path.resolve()) for path in silicon_rtl_selection(_pl.rtl_dir(project))]
+        spec = json.loads((project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").read_text())
+        top = spec.get("top_module")
+        cmd = [
             sys.executable, str(PROGRAMS_DIR / "rtl_hygiene_lint.py"),
-            "--project", str(project),
+            "--project", str(project)]
+        if top in (None, ""):
+            # Reuse the existing structural resolver for an unnamed source top;
+            # keep the source document intact and refuse an ambiguous closure.
+            top = _v661_resolve_dut_module(project, "", None)
+            if not top:
+                raise ValueError("native RTL lint cannot resolve a unique selected top")
+            from catalog_synth_safe_params_check import top_synth_parameters
+            pinned = top_synth_parameters(project, top)
+            cmd = [sys.executable, str(PROGRAMS_DIR / "rtl_hygiene_lint.py"),
+                   *selected, "--top", top]
+            for parameter in (pinned[0] if pinned else []):
+                cmd += ["--parameter", parameter]
+        result = _pr.run(cmd + [
             "--severity", "ERROR", "--json", str(findings_path)],
             capture_output=True, text=True)
         current = set(out_dir.glob("native-elaboration-*/context.json")) - before
@@ -13933,10 +13950,7 @@ def _step_rtl_hygiene_native(project: Path) -> StepResult:
         if not isinstance(context, dict):
             raise ValueError("native RTL lint context is not an object")
         findings = json.loads(findings_path.read_text())
-        from _rtl_include_hub import silicon_rtl_selection
-        selected = [str(path.resolve()) for path in silicon_rtl_selection(_pl.rtl_dir(project))]
-        top = _rcvar_l9_top_ports(project)
-        if (not top or context.get("top") != top[0]
+        if (not top or context.get("top") != top
                 or context.get("files") != selected
                 or not isinstance(findings, list)):
             raise ValueError("native RTL lint proof does not bind the selected top and files")

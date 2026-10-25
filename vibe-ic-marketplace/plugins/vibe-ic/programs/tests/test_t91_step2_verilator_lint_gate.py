@@ -266,8 +266,12 @@ def _standalone_rtl(tmp_path):
 
 
 @pytest.mark.parametrize('valid', [True, False])
-def test_bounded_no_pdk_consumes_native_project_lint(tmp_path, valid):
+@pytest.mark.parametrize('declared_top', ['plain', None])
+def test_bounded_no_pdk_consumes_native_project_lint(tmp_path, valid, declared_top):
     project, src = _standalone_rtl(tmp_path)
+    spec_path = project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json'
+    put(spec_path, {'top_module': declared_top})
+    before = spec_path.read_bytes()
     if not valid:
         src.write_text('module plain(input [7:0] value_i, output [7:0] value_o); '
                        'assign value_o = ; endmodule\n')
@@ -279,8 +283,19 @@ def test_bounded_no_pdk_consumes_native_project_lint(tmp_path, valid):
     assert context['defines'] == []
     assert context['native_returncode'] == context['transport_returncode']
     assert context['native_returncode'] == (0 if valid else 1)
+    assert spec_path.read_bytes() == before
     assert isinstance(json.loads((project / 'reports/phase2/lint/rtl_hygiene.json').read_text()), list)
     assert not (project / 'phase3/librelane/step2/lint_config.json').exists()
+
+
+def test_unnamed_native_lint_refuses_ambiguous_roots(tmp_path):
+    project, src = _standalone_rtl(tmp_path)
+    put(project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json', {'top_module': None})
+    src.write_text(src.read_text() + 'module other(input a, output b); assign b = a; endmodule\n')
+    runner = importlib.import_module('design_one_shot_runner')
+    row = runner.step_rtl_lint_tool(project, bounded_rtl=True)
+    assert row.status == 'NOT_MEASURED' and 'unique selected top' in row.detail
+    assert row.extras['completed'] is False
 
 
 @pytest.mark.parametrize('choice', ['unbounded', 'step_switch', 'selected_pdk', 'malformed_pdk'])
