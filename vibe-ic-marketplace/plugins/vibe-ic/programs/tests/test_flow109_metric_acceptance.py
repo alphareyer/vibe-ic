@@ -53,6 +53,10 @@ def _approved_case(tmp_path: Path):
 
 def _report_and_context(project: Path):
     report = json.loads((project / "reports/flow109/components/A01.json").read_text())
+    # These retained component fixtures have no completed native row owner.
+    assert report["default_row_status"] == "NOT_MEASURED"
+    assert report["completed"] is False
+    assert report["whole_flow_acceptance"] == "NOT_MEASURED"
     request = next((project / "reports/flow109/requests").glob("*.json"))
     return report, json.loads(request.read_text())
 
@@ -103,7 +107,7 @@ def test_safe_operators_are_typed_and_fail_closed():
 def test_actual_front_door_producer_and_consumer_can_pass_both_a01_metrics(tmp_path):
     _approved_case(tmp_path)
     result = _run(tmp_path)
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 2, result.stdout + result.stderr
     report, _ = _report_and_context(tmp_path)
     assert report["component_status"] == "PASS"
     assert report["metric_acceptance_status"] == "PASS"
@@ -121,7 +125,7 @@ def test_actual_measurement_that_misses_approved_required_set_is_fail(tmp_path):
     body["required_items"].append({"block": "regulator_alpha", "name": "gain"})
     path.write_text(json.dumps(body))
     result = _run(tmp_path)
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 2, result.stdout + result.stderr
     report, _ = _report_and_context(tmp_path)
     assert report["metric_acceptance_status"] == "FAIL"
     assert report["metric_acceptance"]["delivery_blocked"] is True
@@ -163,7 +167,7 @@ def test_missing_stale_or_ai_owned_requirement_authority_is_not_measured(tmp_pat
         body["approval"]["authority"] = "AI"
         path.write_text(json.dumps(body))
     result = _run(tmp_path)
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode == 2, result.stdout + result.stderr
     report, _ = _report_and_context(tmp_path)
     acceptance = report["metric_acceptance"]
     assert acceptance["status"] == "NOT_MEASURED" and acceptance["delivery_blocked"]
@@ -172,7 +176,7 @@ def test_missing_stale_or_ai_owned_requirement_authority_is_not_measured(tmp_pat
 
 def test_corrupted_current_output_and_false_producer_cannot_pass(tmp_path):
     _approved_case(tmp_path)
-    assert _run(tmp_path).returncode == 0
+    assert _run(tmp_path).returncode == 2
     report, context = _report_and_context(tmp_path)
     spec = tmp_path / "phase3/analog/regulator_alpha/spec.json"
     spec.write_text(spec.read_text().replace('"target": 1.8', '"target": 1.7'))
@@ -189,7 +193,7 @@ def test_corrupted_current_output_and_false_producer_cannot_pass(tmp_path):
 
 def test_source_whitelist_reverse_guard_keeps_unknown_obligation_unimplemented(tmp_path, monkeypatch):
     _approved_case(tmp_path)
-    assert _run(tmp_path).returncode == 0
+    assert _run(tmp_path).returncode == 2
     report, context = _report_and_context(tmp_path)
     monkeypatch.delitem(metrics.A01_BINDINGS, "base_A1.required_measurements")
     reversed_result = metrics.accept_a01(tmp_path, context, report)
