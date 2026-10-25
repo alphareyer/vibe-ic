@@ -189,6 +189,63 @@ def _runner_source_snapshot(argv: list[str], *, consumer: str | None = None) -> 
             "runner": source(argv[1]), "consumer": source(consumer or __file__)}
 
 
+def _historical_runner_sources_match(receipt: dict) -> bool:
+    """Validate executed bytes retained by the native producer, across upgrades."""
+    import runtime_program_tree as rpt
+
+    project = Path(receipt["project"]).resolve()
+    base = project / ".vibeic" / "runtime-program-trees"
+    trees = {}
+    fresh = _runner_fresh_reports(receipt["reports_before"], receipt["reports_after"])
+    for name in fresh:
+        binding = receipt["reports_after"][name].get("runner_binding") or {}
+        producer = Path(binding.get("producer", {}).get("path", ""))
+        try:
+            relative = producer.relative_to(base)
+        except ValueError:
+            continue  # Legacy producers still require their unchanged live bytes.
+        if len(relative.parts) < 3 or relative.parts[1] != "plugin":
+            raise ValueError("retained report producer path is malformed")
+        root = base / relative.parts[0]
+        if root in trees:
+            continue
+        if root.resolve() != root or base.resolve() != base:
+            raise ValueError("retained source tree escapes its project")
+        manifest = _read_json_regular(root / "manifest.json")
+        if (manifest.get("source_tree_sha256") != root.name
+                or manifest.get("retained_plugin_root") != str(root / "plugin")):
+            raise ValueError("retained source tree identity differs")
+        try:
+            trees[root] = rpt._load_retained(root / "manifest.json")
+        except rpt.RuntimeTreeError as exc:
+            raise ValueError(str(exc)) from exc
+
+    source, argv = receipt["source_before"], receipt["argv"]
+    if (source["argv"] != argv
+            or source["runner"]["path"] != str(Path(argv[1]).resolve())):
+        return False
+    for label in ("executable", "runner", "consumer"):
+        record = source[label]
+        path = Path(record["path"])
+        retained = []
+        if label != "executable":
+            for tree in trees.values():
+                try:
+                    relative = str(path.relative_to(tree.source_root))
+                except ValueError:
+                    continue
+                retained.append(tree.manifest["files"].get(relative))
+        if retained:
+            if any(digest != record["sha256"] for digest in retained):
+                return False
+        elif ((label == "consumer" and path != Path(__file__).resolve())
+              or not path.is_file()
+              or hashlib.sha256(path.read_bytes()).hexdigest() != record["sha256"]):
+            return False
+    executable = shutil.which(argv[0]) or argv[0]
+    return source["executable"]["path"] == str(Path(executable).resolve())
+
+
 def _bind_runner_report(summary: dict, project: Path, producer: str,
                         report_name: str, *, context: dict | None = None) -> dict:
     """Called by the actual report writer, before publishing its measured data.
@@ -383,6 +440,7 @@ def _material_matches_repaired_output(expected: dict, current: dict) -> bool:
 
 def _runner_diagnostics(process: _ProcessOutcome, argv: list[str],
                         project: Path, *, require_phase2: bool = True,
+                        historical: bool = False,
                         allow_repaired_output: bool = False,
                         repaired_output_sha256: str | None = None) -> dict | None:
     """Disclose pre-gate refusals without interpreting rc as a gate verdict.
@@ -432,7 +490,8 @@ def _runner_diagnostics(process: _ProcessOutcome, argv: list[str],
                     "reason_class": "RUNNER_MATERIAL_UNBOUND",
                     "reason": "RUNNER_MATERIAL_UNBOUND: input or output file population/content changed after invocation"}
         if not (receipt["source_before"] == receipt["source_after"]
-                == _runner_source_snapshot(argv)):
+                and (_historical_runner_sources_match(receipt) if historical
+                     else receipt["source_before"] == _runner_source_snapshot(argv))):
             return {**diagnostic, "status": "SOURCE_MISMATCH",
                     "reason_class": "RUNNER_SOURCE_UNBOUND",
                     "reason": "RUNNER_SOURCE_UNBOUND: actual runner executable/source/options changed"}
@@ -591,6 +650,7 @@ def _stored_runner_diagnostics(invocation: dict, *,
         receipt_sha256=hashlib.sha256(raw).hexdigest(), invocation=invocation)
     diagnostic = _runner_diagnostics(
         process, invocation["argv"], Path(invocation["project"]),
+        historical=True,
         allow_repaired_output=allow_repaired_output,
         repaired_output_sha256=repaired_output_sha256)
     if process.error:

@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sys
 
 import pytest
@@ -190,3 +191,130 @@ def test_standalone_native_writer_retains_its_existing_format(tmp_path, monkeypa
     expected = {"project": str(tmp_path), "verdict": "NOT_MEASURED", "steps": []}
     producer._write_phase2_report(out, expected, tmp_path)
     assert json.loads(out.read_text()) == expected
+
+
+def _retained_compiled_task(tmp_path, monkeypatch, *, change_during_execution=False):
+    """Real native compile, retained source and the actual report/receipt writers."""
+    import test_benchmark_program_first_ai_review as fixture
+    from _hostpaths import require_repo
+    monkeypatch.delenv("VIBEIC_RETAINED_PLUGIN_ROOT", raising=False)
+    monkeypatch.delenv("VIBEIC_RETAINED_PLUGIN_MANIFEST", raising=False)
+    project = fixture._project(tmp_path)
+    prompt = (project / "input/phase1_prompt.md").read_text()
+    bio._stage_public_original("p1", prompt, {}, project)
+    source = tmp_path / "source-plugin/programs"
+    source.mkdir(parents=True)
+    actual = require_repo() / "vibe-ic-marketplace/plugins/vibe-ic/programs"
+    for name in ("benchmark_dispatch.py", "design_one_shot_runner.py", "runtime_program_tree.py"):
+        shutil.copy2(actual / name, source / name)
+    consumer = source / "benchmark_dispatch.py"
+    monkeypatch.setattr(bd, "__file__", str(consumer))
+    runner = source / "vibe_ic_one_shot_runner.py"
+    runner.write_text('''import hashlib, pathlib, subprocess, sys
+sys.path[:0] = [%r, %r]
+import runtime_program_tree as rpt
+p = pathlib.Path(sys.argv[1]).resolve()
+tree = rpt.activate(p, pathlib.Path(__file__).parent, pathlib.Path(__file__))
+import design_one_shot_runner as producer
+rtl = p/'phase2/stage1/rtl/dut.v'
+command = ['iverilog', '-g2012', '-s', 'dut', '-tnull', str(rtl)]
+compiled = subprocess.run(command, capture_output=True, text=True)
+producer._write_phase2_report(p/'reports/orchestrator/phase2_one_shot.json', {
+    'project': str(p), 'verdict': 'PASS' if compiled.returncode == 0 else 'FAIL',
+    'steps': [{'name': 'rtl_gen', 'status': 'PASS', 'detail': 'retained native candidate'},
+              {'name': 'rtl_lint_tool', 'status': 'PASS' if compiled.returncode == 0 else 'FAIL',
+               'detail': compiled.stderr, 'extras': {'command': command,
+                   'native_returncode': compiled.returncode,
+                   'input_sha256': hashlib.sha256(rtl.read_bytes()).hexdigest()}}]}, p)
+if %r:
+    consumer = pathlib.Path(%r)
+    consumer.write_text(consumer.read_text() + '\\n# changed during execution\\n')
+raise SystemExit(compiled.returncode)
+''' % (str(source), str(PROGRAMS), change_during_execution, str(consumer)))
+    argv = [sys.executable, str(runner), str(project), "--entry-step", "2", "--exit-step", "2"]
+    process = bd._RunnerBudget(1, 1, 1).run(argv)
+    got = bd._collect_runner_result(process, argv, "rtllm", "p1", project)
+    if change_during_execution:
+        return project, process, argv, got
+    assert process.rc == 0 and process.error is None and got["ok"] is True, (process.stderr, got)
+    task = bd._make_ai_review_task("p1", project, got, fixture.ROUTING, 0,
+                                   tmp_path / "run", "PROGRAM", runner_invocation=process.invocation)
+    return project, process, argv, task
+
+
+def _upgrade_live_programs(argv):
+    for path in (Path(argv[1]), Path(bd.__file__)):
+        path.write_text(path.read_text() + "\n# next installed version\n")
+
+
+def test_completed_native_proof_survives_live_runner_and_dispatcher_upgrade(tmp_path, monkeypatch):
+    project, process, argv, task = _retained_compiled_task(tmp_path, monkeypatch)
+    report = project / "reports/orchestrator/phase2_one_shot.json"
+    original = {p: p.read_bytes() for p in (report, Path(process.receipt_path))}
+    measured = json.loads(original[report])["steps"][1]
+    assert measured["extras"]["native_returncode"] == 0
+    _upgrade_live_programs(argv)
+    assert bd._runner_reentry_reason(task, {"accepted": True}) is None
+    # Fresh collection must still use the currently issued live source identity.
+    assert bd._runner_diagnostics(process, argv, project)["reason_class"] == "RUNNER_SOURCE_UNBOUND"
+    assert {p: p.read_bytes() for p in original} == original
+
+
+def test_published_native_candidate_reuses_original_review_after_upgrade(tmp_path, monkeypatch):
+    import test_benchmark_program_first_ai_review as fixture
+    project, process, argv, task = _retained_compiled_task(tmp_path, monkeypatch)
+    run = tmp_path / "run"
+    (run / "responses").mkdir()
+    fixture._solve_report(run, task, exit_step="2")
+    routes = bd._read_jsonl(run / bd._ROUTE_WORKLIST)
+    receipt = fixture._issue_pending_route_fixture(run, routes[0], requested_evidence="lint_validated")
+    solve = json.loads((run / "solve_report.json").read_text())
+    solve["results"][0].update(route_receipt=receipt, entry=receipt["entry_step"])
+    (run / "solve_report.json").write_text(json.dumps(solve))
+    fixture._write_review(task, fixture._valid_review(task))
+    assert bd.cmd_resume("rtllm", "/unused", str(run)) == 0
+    paths = (Path(task["review_path"]), Path(task["response_path"]), Path(process.receipt_path))
+    original = {p: p.read_bytes() for p in paths}
+    _upgrade_live_programs(argv)
+    assert bd.cmd_resume("rtllm", "/unused", str(run)) == 0
+    assert json.loads((run / bd._ACCEPTANCE_REPORT).read_text())["accepted_ids"] == ["p1"]
+    assert bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0]["review_path"] == task["review_path"]
+    assert {p: p.read_bytes() for p in original} == original
+    assert not (run / "runner_regates").exists()
+
+
+@pytest.mark.parametrize("mutation", ["retained_runner", "retained_consumer", "manifest", "missing_manifest",
+                                      "options", "input", "output", "report", "receipt", "stdout"])
+def test_historical_native_proof_refuses_changed_archive_or_subject(tmp_path, monkeypatch, mutation):
+    project, process, argv, task = _retained_compiled_task(tmp_path, monkeypatch)
+    report = project / "reports/orchestrator/phase2_one_shot.json"
+    producer = Path(json.loads(report.read_text())["runner_binding"]["producer"]["path"])
+    manifest = producer.parents[2] / "manifest.json"
+    _upgrade_live_programs(argv)
+    if mutation.startswith("retained_"):
+        path = producer.parent / ("vibe_ic_one_shot_runner.py" if mutation == "retained_runner" else "benchmark_dispatch.py")
+        path.write_text(path.read_text() + "\n# changed archive\n")
+    elif mutation == "manifest":
+        value = json.loads(manifest.read_text())
+        value["source_tree_sha256"] = "0" * 64
+        manifest.write_text(json.dumps(value))
+    elif mutation == "missing_manifest":
+        manifest.unlink()
+    elif mutation == "options":
+        task["program_verification"]["runner_argv"].append("--different-window")
+    elif mutation == "input":
+        (project / "input/phase1_prompt.md").write_text("Changed requirements.\n")
+    elif mutation == "output":
+        (project / "phase2/stage1/rtl/dut.v").write_text("module dut; endmodule\n")
+    elif mutation == "report":
+        report.write_text('{"steps": []}')
+    elif mutation == "receipt":
+        Path(process.receipt_path).write_text('{}')
+    else:
+        Path(process.invocation["stdout_path"]).write_text("changed capture\n")
+    assert (bd._runner_reentry_reason(task, {}) or "ADMITTED").startswith("RUNNER_INVOCATION_NOT_MEASURED:")
+
+
+def test_source_change_during_native_execution_remains_unbound(tmp_path, monkeypatch):
+    _, _, _, got = _retained_compiled_task(tmp_path, monkeypatch, change_during_execution=True)
+    assert got["ok"] is False and got["runner_diagnostics"]["reason_class"] == "RUNNER_SOURCE_UNBOUND"
