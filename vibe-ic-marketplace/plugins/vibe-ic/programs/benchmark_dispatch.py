@@ -1667,17 +1667,42 @@ def _program_review_coverage_result(prompt_text: str, candidate: dict,
 
     rtl_text = _candidate_text(
         [Path(str(p)) for p in candidate.get("rtl_paths") or []])
-    test_parts = []
+    stations = {"user_prompt": prompt_text}
+    catalog = coverage.run(stations, rtl_text, None, None, True)
+    reports = []
     for challenge in challenges:
         path = Path(str(challenge.get("path") or ""))
         text = path.read_text(errors="replace")
         if _sha256_text(text) != challenge.get("sha256"):
             raise ValueError(
                 f"active verification challenge hash changed at {path}")
-        test_parts.append(text)
-    report = coverage.run(
-        {"user_prompt": prompt_text}, rtl_text,
-        "\n\n".join(test_parts), None, True)
+        reports.append((challenge["sha256"], coverage.run(
+            stations, rtl_text, text, None, True)))
+    # One complete standalone test must prove an obligation. Concatenating
+    # separately compiled tops invents duplicate bindings and can also join
+    # a drive from one test to an observer from another. Source eligibility
+    # remains the fixed catalog's, never the most permissive test's gloss.
+    by_test = [(sha, {_review_obligation_id(item): item
+                     for item in report.get("items") or []})
+               for sha, report in reports]
+    items, covered_by = [], {}
+    for source_item in catalog.get("items") or []:
+        item = dict(source_item)
+        oid = _review_obligation_id(item)
+        winner = next(((sha, rows[oid]) for sha, rows in by_test
+                       if rows.get(oid, {}).get("covered") is True), None)
+        item["covered"] = winner is not None
+        if winner:
+            covered_by[oid] = winner[0]
+            item["coverage_note"] = winner[1].get("coverage_note")
+        items.append(item)
+    report = {
+        "items": items, "checklist_items": len(items),
+        "covered": sum(item["covered"] for item in items),
+        "coverage_gaps": sum(not item["covered"] for item in items),
+        "blocking_gaps": sum(not item["covered"] and item.get("block_eligible", True)
+                             for item in items),
+    }
     gaps = []
     for item in report.get("items") or []:
         if item.get("covered") is not False \
@@ -1697,12 +1722,55 @@ def _program_review_coverage_result(prompt_text: str, candidate: dict,
         "actor": "programs/spec_coverage_check.py",
         "status": "PASS" if not gaps else "FAIL",
         "active_challenge_sha256": [c.get("sha256") for c in challenges],
+        "covered_by_challenge": covered_by,
         "checklist_items": report.get("checklist_items"),
         "covered": report.get("covered"),
         "coverage_gaps": report.get("coverage_gaps"),
         "blocking_gaps": report.get("blocking_gaps"),
         "blocking_gap_items": gaps,
     }
+
+
+def _refresh_retained_measurement_result(task: dict, result: dict,
+                                         collected: dict) -> bool:
+    """Re-derive metadata only for the exact validated later duplicate attempt.
+
+    The current collector has already read the measured candidate; no gate or
+    acceptance is manufactured. Changed evidence still reaches the unchanged
+    freshness/required-gate checks after this owner correction.
+    """
+    import flow_phase_attribution as fpa                  # noqa: PLC0415
+    try:
+        invocation = task["program_verification"]["runner_invocation"]
+        diagnostic = _stored_runner_diagnostics(invocation)
+        retained = (diagnostic or {}).get("retained_after_duplicate")
+        phase3 = (result.get("phases") or {}).get("phase3_verifying") or {}
+        if (not retained or diagnostic.get("reason") or not collected.get("ok")
+                or Path(task["project"]).resolve() != Path(invocation["project"]).resolve()
+                or _sha256_text(str(collected.get("completion") or "")) != task.get("rtl_sha256")
+                or phase3.get("status") != "NOT_MEASURED"
+                or phase3.get("reason") != "RUNNER_REPORT_NOT_FRESH"
+                or (result.get("runner_diagnostics") or {}).get("reason_class") != "RUNNER_REPORT_NOT_FRESH"):
+            return False
+        attempt = _read_json_regular(Path(retained["receipt_path"]))
+        if (result.get("runner_invocation") != attempt
+                or hashlib.sha256(Path(retained["receipt_path"]).read_bytes()).hexdigest()
+                != retained["receipt_sha256"]):
+            return False
+        phases = fpa.attribute(
+            Path(task["project"]), routing=result.get("routing_verdict") or {},
+            entry=result.get("entry"), evidence=result.get("evidence"),
+            exit_step=result.get("exit"), artefact_collected=True)
+        first = result.get("program_first_phases") or {}
+        for key in ("phase2_solving", "phase4_debugging"):
+            if isinstance(first.get(key), dict):
+                phases[key] = dict(first[key])
+        result.update(phases=phases, runner_invocation=invocation,
+                      runner_diagnostics=diagnostic, rc=invocation["rc"],
+                      ok=True, candidate_ready=True)
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def _rtl_files(project: Path) -> list[Path]:
@@ -2159,7 +2227,8 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
     if candidate_origin == "PROGRAM":
         program_candidate = candidate
     import emit_attestation as emit_attestation          # noqa: PLC0415
-    phase1_provenance = emit_attestation.phase1_provenance(project)
+    phase1_provenance = emit_attestation.input_provenance(
+        project, _invocation_rtl_input(runner_invocation))
     challenges = verification_challenges or []
     review_key = review_key or (f"{_safe_problem_id(candidate_origin).lower()}-"
                                f"r{len(challenges)}-{candidate['rtl_sha256']}")
@@ -2359,6 +2428,17 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
                             "result stays an interface defect: it authorizes "
                             "repair, never a runtime FAIL or a PASS"),
                         "schema": _INTERFACE_PROOF_SCHEMA,
+                        "_parameter_override_alternative": (
+                            "For a source-declared public parameter made "
+                            "localparam by the candidate, add kind='parameter_override' "
+                            "and parameter='<identifier>'; omit port/direction/width. "
+                            "The exact excerpt must declare parameter NAME = VALUE, "
+                            "the source must uniquely name this module, the test "
+                            "must override that instance's parameter by name or "
+                            "defparam, and every native compile diagnostic must "
+                            "be its Cannot override localparam rejection. The "
+                            "same hashes apply; a compile defect is "
+                            "CANDIDATE_BROKEN, never runtime FAIL."),
                         "module": "<module the public input names>",
                         "port": "<required port identifier>",
                         "direction": "<input|output|inout>",
@@ -2565,18 +2645,17 @@ def _repair_record_path(run_p: Path, task: dict) -> Path:
             f"repair-of-{parent_hash}.json")
 
 
-def _requires_public_source_repair_contract(task: dict) -> bool:
-    """Source-completion declarations apply when original RTL was supplied.
+def _requires_source_repair_contract(task: dict) -> bool:
+    """Preserve supplied RTL; a text-only generation has no RTL fragments.
 
-    A prompt-only generation repair instead binds the immutable generated
-    parent and challenge through the ordinary AI repair record.
+    The original-input selection comes from the measured runner invocation,
+    not an author/reviewer label. All other inputs retain the source-bound
+    completion contract, including absent or malformed public-source records.
     """
-    public = task.get("public_original_input") or {}
     return not (
-        (task.get("program_routing") or {}).get("nature") == "spec_generation"
-        and public.get("status") == "NOT_PROVIDED"
-        and public.get("files") == []
-        and task.get("public_original_input_paths") == [])
+        (task.get("public_original_input") or {}).get("status") == "NOT_PROVIDED"
+        and (task.get("program_routing") or {}).get("nature") == "spec_generation"
+        and _task_rtl_input(task) == "original")
 
 
 def _validate_repair_record(path: Path, task: dict, repaired_hash: str,
@@ -2614,9 +2693,13 @@ def _validate_repair_record(path: Path, task: dict, repaired_hash: str,
         reasons.append("AI repair record rationale must explain the repair")
     contract = record.get("repair_contract")
     public = task.get("public_original_input") or {}
-    if contract is None and not _requires_public_source_repair_contract(task):
-        return (None, reasons) if reasons else (
-            {**record, "path": str(path), "sha256": _sha256_text(raw)}, [])
+    source_bound = _requires_source_repair_contract(task)
+    if not source_bound:
+        if contract is not None:
+            reasons.append("text-only generation cannot declare supplied RTL preservation")
+        if reasons:
+            return None, reasons
+        return {**record, "path": str(path), "sha256": _sha256_text(raw)}, []
     if public.get("status") != "PRESENT" or not public.get("source_sha256"):
         reasons.append("source-bounded repair requires immutable public original input")
     if not isinstance(contract, dict):
@@ -2882,6 +2965,150 @@ def _gate_escalation_disposition_reasons(task: dict, review: dict,
 
 _INTERFACE_PROOF_SCHEMA = "vibeic.benchmark.interface_proof.v1"
 _DIRECTIONS = ("input", "output", "inout")
+
+
+def _interface_parameter_kind(source: str, module: str,
+                              parameter: str) -> str | None:
+    """A unique module-owned declaration; unsupported/scoped claims refuse.
+
+    Reuse the existing balanced module/list readers and parameter grammar.
+    A helper module, comment, duplicate owner or procedural localparam cannot
+    establish this module's public parameter defect.
+    """
+    import module_port_audit as ports                     # noqa: PLC0415
+    from _specrtl_common import _PARAM_ASSIGN             # noqa: PLC0415
+    issues = []
+    regions = list(ports.module_regions(source, issues))
+    owners = [row for row in regions if row[0] == module]
+    if issues or len(owners) != 1:
+        return None
+    try:
+        clean = ports.lexical_mask(source, attributes=True)
+    except ValueError:
+        return None
+    _, start, body_start, end = owners[0]
+    header, body = clean[start:body_start], clean[body_start:end]
+    groups = []
+    marker = re.search(r"#\s*\(", header)
+    if marker:
+        balanced = ports.extract_balanced(header, marker.end() - 1)
+        if balanced is None:
+            return None
+        groups.append(balanced[0])
+    for match in re.finditer(r"\b(?:parameter|localparam)\b[^;]+;", body):
+        if re.search(r"\b(?:begin|generate|function|task|class)\b",
+                     body[:match.start()]):
+            continue
+        groups.append(match.group()[:-1])
+    kinds = []
+    for group in groups:
+        kind = None
+        for item in ports.split_top_level(group):
+            keyword = re.match(r"\s*(parameter|localparam)\b", item)
+            if keyword:
+                kind = keyword[1]
+                item = item[keyword.end():]
+            if kind:
+                declaration = _PARAM_ASSIGN.match(kind + " " + item.strip())
+                if declaration and declaration[1] == parameter:
+                    kinds.append(kind)
+    return kinds[0] if len(kinds) == 1 else None
+
+
+def _interface_parameter_instances(source: str, module: str,
+                                   parameter: str) -> set[str]:
+    """Direct named overrides/defparams of this module in the challenge top."""
+    import module_port_audit as ports                     # noqa: PLC0415
+    try:
+        clean = ports.lexical_mask(source, attributes=True)
+    except ValueError:
+        return set()
+    issues = []
+    owners = [row for row in ports.module_regions(clean, issues)
+              if row[0] == "vibeic_ai_challenge_tb"]
+    if issues or len(owners) != 1:
+        return set()
+    _, _, start, end = owners[0]
+    body = clean[start:end]
+    declared = {item.instance_name for item in
+                ports.parse_instantiations(body, "", 1)
+                if item.module_name == module}
+    found = set()
+    for match in re.finditer(rf"\b{re.escape(module)}\s*(#\s*\()?", body):
+        overrides, rest = "", body[match.end():]
+        if match[1]:
+            balanced = ports.extract_balanced(body, match.end() - 1)
+            if balanced is None:
+                continue
+            overrides, close = balanced
+            rest = body[close + 1:]
+        instance = re.match(r"\s*([A-Za-z_]\w*)\s*\(", rest)
+        if instance is None or instance[1] not in declared:
+            continue
+        named = any(re.fullmatch(rf"\s*\.\s*{re.escape(parameter)}\s*\(.+\)\s*",
+                                 item, re.S)
+                    for item in ports.split_top_level(overrides))
+        deferred = re.search(
+            rf"\bdefparam\s+{re.escape(instance[1])}\s*\.\s*"
+            rf"{re.escape(parameter)}\s*=", body)
+        if named or deferred:
+            found.add("vibeic_ai_challenge_tb." + instance[1])
+    return found
+
+
+def _interface_parameter_source_owned(source: str, module: str,
+                                      parameter: str) -> bool:
+    """Bound an explicit declaration to the unique public module's scope.
+
+    A bare mention in another cell's prose is not the top's requirement.
+    Plain specs may put a standalone declaration table before the module-name
+    heading; keep that form, while refusing an explicitly foreign owner in
+    the declaration's paragraph. This is deliberately narrower than general
+    prose interpretation: unknown ownership does not authorize repair.
+    """
+    import module_port_audit as ports                     # noqa: PLC0415
+    from _specrtl_common import _PARAM_ASSIGN             # noqa: PLC0415
+    try:
+        scanned = ports.lexical_mask(source, attributes=True)
+    except ValueError:
+        return False
+    regions = list(ports.module_regions(scanned))
+    for match in _PARAM_ASSIGN.finditer(scanned):
+        if match[1] != parameter or not match.group().startswith("parameter"):
+            continue
+        owners = [name for name, start, _, end in regions
+                  if start <= match.start() < end]
+        if owners:
+            if owners == [module] and _interface_parameter_kind(source, module, parameter) == "parameter":
+                return True
+            continue
+        line_start = source.rfind("\n", 0, match.start()) + 1
+        line_end = source.find("\n", match.end())
+        line_end = len(source) if line_end < 0 else line_end
+        prefix = source[line_start:match.start()].strip()
+        tail = source[match.end():line_end].strip()
+        # An isolated HDL declaration or a direct instruction about the public
+        # interface supplies ownership; an inline auxiliary-cell mention does not.
+        standalone = prefix in ("", "-", "*", "`") and tail in (";", ";`")
+        directive = (prefix.lower() == "declare" and re.search(
+            r"\bin the public module interface\b", match.group(), re.I))
+        if not standalone and not directive:
+            continue
+        before = list(re.finditer(r"\n\s*\n", source[:line_start]))
+        block_start = before[-1].end() if before else 0
+        after = re.search(r"\n\s*\n", source[line_end:])
+        block_end = line_end + after.start() if after else len(source)
+        block = source[block_start:block_end]
+        if re.search(r"\b(?:auxiliary|helper|other|another|child|sub)\s+"
+                     r"(?:module|cell|block)\b", block, re.I):
+            continue
+        foreign = re.findall(r"\bmodule\s+([A-Za-z_]\w*)\s*(?=[:;#(])", block)
+        if any(name != module for name in foreign):
+            continue
+        return True
+    return False
+
+
 def _declared_ports(source: str, module: str) -> set[str] | None:
     """Identifiers in `module <name> ( ... );`, or None if it is not declared.
 
@@ -2932,6 +3159,21 @@ def _interface_proof_internal_reasons(proof) -> list:
     left loose in the other (vibe-ic#2210).
     """
     reasons = []
+    kind = proof.get("kind", "port_omission")
+    if kind == "parameter_override":
+        from _specrtl_common import _PARAM_ASSIGN         # noqa: PLC0415
+        from _prose_polarity import is_denied             # noqa: PLC0415
+        parameter = str(proof.get("parameter") or "")
+        excerpt = " ".join(str(proof.get("excerpt") or "").split())
+        declarations = [match[1] for match in _PARAM_ASSIGN.finditer(excerpt)
+                        if match.group().startswith("parameter")]
+        if (not re.fullmatch(r"[A-Za-z_]\w*", parameter)
+                or parameter not in declarations or is_denied(excerpt)):
+            reasons.append("interface_proof.excerpt must explicitly declare "
+                           "the claimed parameter, not a localparam or mention")
+        return reasons
+    if kind != "port_omission":
+        return ["interface_proof.kind is unsupported"]
     port = str(proof.get("port") or "")
     direction = str(proof.get("direction") or "").lower()
     width = proof.get("width")
@@ -2965,7 +3207,13 @@ def _interface_proof_internal_reasons(proof) -> list:
 def _interface_proof_from_review(raw, task: dict, prompt_text: str,
                                  challenge_source: str,
                                  ) -> tuple[dict | None, list[str]]:
-    """Validate a typed, prompt-bound proof that a REQUIRED port was omitted.
+    """Validate a prompt-bound omitted-port/non-overridable-parameter proof.
+
+    The backward-compatible parameter_override kind requires an explicit
+    public parameter declaration and a unique source module. Its current
+    candidate must instead declare that name as localparam, and the challenge
+    must attempt a named override or direct instance defparam. The compiler
+    half accepts only the exact localparam rejection, never arbitrary errors.
 
     THE PROBLEM THIS EXISTS FOR (#2210). A candidate that omits a required
     public port and a test that invents a port name produce the SAME compiler
@@ -3018,13 +3266,14 @@ def _interface_proof_from_review(raw, task: dict, prompt_text: str,
     direction = str(raw.get("direction") or "").lower()
     if not re.fullmatch(r"[A-Za-z_]\w*", module):
         reasons.append("interface_proof.module must be an identifier")
-    if not re.fullmatch(r"[A-Za-z_]\w*", port):
+    parameter_proof = raw.get("kind") == "parameter_override"
+    if not parameter_proof and not re.fullmatch(r"[A-Za-z_]\w*", port):
         reasons.append("interface_proof.port must be an identifier")
-    if direction not in _DIRECTIONS:
+    if not parameter_proof and direction not in _DIRECTIONS:
         reasons.append("interface_proof.direction must be one of "
                        + ", ".join(_DIRECTIONS))
     width = raw.get("width")
-    if not isinstance(width, int) or isinstance(width, bool) or width < 1:
+    if not parameter_proof and (not isinstance(width, int) or isinstance(width, bool) or width < 1):
         reasons.append("interface_proof.width must be a positive integer")
     if raw.get("prompt_sha256") != task.get("prompt_sha256"):
         reasons.append("interface_proof.prompt_sha256 is not the reviewed prompt")
@@ -3052,6 +3301,36 @@ def _interface_proof_from_review(raw, task: dict, prompt_text: str,
     candidate_text = "\n".join(
         Path(p).read_text(errors="replace")
         for p in (task.get("rtl_paths") or []) if Path(p).is_file())
+    if parameter_proof:
+        from design_one_shot_runner import _phase1_declared_module_name  # noqa: PLC0415
+        parameter = str(raw.get("parameter") or "")
+        if _phase1_declared_module_name(prompt_text) != module:
+            reasons.append("the public input does not uniquely declare this module")
+        if not _interface_parameter_source_owned(prompt_text, module, parameter):
+            reasons.append("the public parameter declaration has no unambiguous "
+                           "ownership by this module")
+        prompt_path = Path(str(task.get("prompt_path") or ""))
+        if (not prompt_path.is_file() or prompt_path.is_symlink()
+                or _sha256_text(prompt_path.read_text(errors="replace")) != task.get("prompt_sha256")
+                or _sha256_text(prompt_text) != task.get("prompt_sha256")):
+            reasons.append("interface_proof prompt source is absent or changed")
+        if _interface_parameter_kind(candidate_text, module, parameter) != "localparam":
+            reasons.append("the candidate has no unique module-owned localparam "
+                           "declaration for this public parameter")
+        if not _interface_parameter_instances(challenge_source, module, parameter):
+            reasons.append("the challenge does not override this module's parameter")
+        if reasons:
+            return None, reasons
+        return {
+            "schema": _INTERFACE_PROOF_SCHEMA, "kind": "parameter_override",
+            "module": module, "parameter": parameter,
+            "excerpt": verified[0]["excerpt"], "supports": verified[0]["supports"],
+            "prompt_path": str(prompt_path.resolve()),
+            "prompt_sha256": task.get("prompt_sha256"),
+            "public_source_sha256": raw.get("public_source_sha256"),
+            "candidate_rtl_sha256": task.get("rtl_sha256"),
+            "challenge_sha256": _sha256_text(challenge_source),
+        }, []
     ports = _declared_ports(candidate_text, module) if module else None
     if ports is None:
         reasons.append(f"the candidate declares no module {module!r}, so this "
@@ -3335,7 +3614,8 @@ def _interface_omission_reason(candidate: dict, challenge: dict,
         return None
     port = str(proof.get("port") or "")
     module = str(proof.get("module") or "")
-    if not port or not module:
+    parameter_proof = proof.get("kind") == "parameter_override"
+    if (not parameter_proof and not port) or not module:
         return None
     if proof.get("candidate_rtl_sha256") != candidate.get("rtl_sha256"):
         return None
@@ -3357,6 +3637,41 @@ def _interface_omission_reason(candidate: dict, challenge: dict,
     # attributed record assert an interface the excerpt does not support.
     if _interface_proof_internal_reasons(proof):
         return None
+    if parameter_proof:
+        parameter = str(proof.get("parameter") or "")
+        try:
+            prompt_path = Path(str(proof.get("prompt_path") or ""))
+            prompt_text = prompt_path.read_text(errors="replace")
+            test_source = Path(challenge["path"]).read_text(errors="replace")
+        except (OSError, KeyError):
+            return None
+        # Unlike the legacy port proof, the parameter kind carries its canonical
+        # prompt path, so the same freeze validator can re-earn the source quote,
+        # module ownership and all material hashes on every inherited compile.
+        _, reasons = _interface_proof_from_review(
+            proof, {**candidate, "prompt_path": str(prompt_path),
+                    "prompt_sha256": challenge.get("prompt_sha256")},
+            prompt_text, test_source)
+        if reasons:
+            return None
+        instances = _interface_parameter_instances(test_source, module, parameter)
+        diagnostics = []
+        for line in errors.splitlines():
+            if not line.strip() or re.fullmatch(r"\d+ error\(s\) during elaboration\.", line):
+                continue
+            diagnostic = re.fullmatch(
+                r".+:\d+: error: Cannot override localparam `([^`]+)` in `([^`]+)`\.", line)
+            if diagnostic is None or diagnostic[1] != parameter or diagnostic[2] not in instances:
+                return None
+            diagnostics.append(diagnostic)
+        if not diagnostics:
+            return None
+        return (f"joint compile rejected the REQUIRED public parameter interface: "
+                f"module {module!r} declares {parameter!r} as localparam, so the "
+                f"source-required parameter override cannot elaborate; public "
+                f"excerpt {proof.get('excerpt')!r}, current prompt, candidate, "
+                "challenge, module declaration and native localparam diagnostic "
+                "were re-earned; this is CANDIDATE_BROKEN, not runtime FAIL")
     if port not in _ports_absent_from_dut(errors):
         return None
     try:
@@ -4552,10 +4867,10 @@ def _shape_c_task_binding_reasons(task: dict, run_p: Path,
             break
 
     expected_phase1 = task.get("phase1_provenance")
-    current_phase1 = emit_attestation.phase1_provenance(expected_project)
+    current_phase1 = emit_attestation.input_provenance(expected_project, _task_rtl_input(task))
     if (not isinstance(expected_phase1, dict)
-            or expected_phase1.get("ran") is not True):
-        reasons.append("task lacks hash-bound Phase-1 provenance")
+            or not emit_attestation.provenance_is_current(expected_phase1)):
+        reasons.append("task lacks current input provenance")
     elif current_phase1 != expected_phase1:
         reasons.append("Phase-1 L-doc provenance changed after task creation")
 
@@ -4707,9 +5022,9 @@ def _export_accepted_shape_c_task(task: dict, samples: Path,
         reasons.append("staged prompt bytes do not match the reviewed hash")
 
     project = Path(str(task.get("project") or ""))
-    provenance = emit_attestation.phase1_provenance(project)
-    if provenance.get("ran") is not True:
-        reasons.append("Phase-1 L-doc provenance is absent")
+    provenance = emit_attestation.input_provenance(project, _task_rtl_input(task))
+    if not emit_attestation.provenance_is_current(provenance):
+        reasons.append("current input provenance is absent")
     if shutil.which("iverilog") is None:
         reasons.append("standalone compile capability is unavailable")
     if reasons:
@@ -4740,7 +5055,8 @@ def _export_accepted_shape_c_task(task: dict, samples: Path,
                 record.get("sha256")
                 == emit_attestation.sha256_file(destination)
                 and record.get("shape") == "C"
-                and (record.get("phase1") or {}).get("ran") is True
+                and record.get("phase1") == provenance
+                and emit_attestation.provenance_is_current(provenance)
             )
         except (OSError, ValueError, TypeError) as exc:
             destination.unlink(missing_ok=True)
@@ -4975,7 +5291,8 @@ def _export_accepted_shape_b_samples(bench: str, dataset: Path,
             paths[0].parent, pid, samples,
             dataset=dataset, design=design,
             prompt=Path(str(task.get("prompt_path") or "")),
-            project=Path(str(task.get("project") or "")))
+            project=Path(str(task.get("project") or "")),
+            rtl_input=_task_rtl_input(task))
         if result.get("verdict") != "PASS":
             failures.append(
                 f"{pid}: {result.get('reason') or 'emit rejected'}: "
@@ -5405,16 +5722,78 @@ def _rtl_gen_waive(project: Path) -> dict | None:
     except (OSError, ValueError):
         return None
     for st in d.get("steps") or []:
-        if st.get("name") == "rtl_gen" and st.get("status") == "WAIVED":
+        if (st.get("name") == "rtl_gen"
+                and (st.get("status") == "WAIVED" or
+                     (st.get("status") == "NOT_MEASURED"
+                      and st.get("program_status") in {"WAIVED", "PASS_WITH_WAIVERS"}
+                      and st.get("reason_class") == "awaiting_signed_judgement"))):
             ex = st.get("extras") or {}
             if ex.get("fallback_skill"):
                 return {"fallback_skill": ex["fallback_skill"],
-                        "detail": st.get("detail", "")}
+                        "detail": st.get("detail", ""),
+                        **({"input_authority": "original"}
+                           if ex.get("input_authority") == "original" else {})}
     return None
 
 
+def _invocation_rtl_input(invocation: dict | None) -> str:
+    """Read the input selection the ordinary runner actually received."""
+    argv = (invocation or {}).get("argv") or []
+    if "--rtl-input" not in argv:
+        return "structured"
+    index = argv.index("--rtl-input")
+    if argv.count("--rtl-input") != 1 or index + 1 >= len(argv):
+        raise ValueError("RUNNER_RTL_INPUT_INVALID")
+    kind = argv[index + 1]
+    if kind not in ("original", "structured"):
+        raise ValueError("RUNNER_RTL_INPUT_INVALID")
+    return kind
+
+
+def _task_rtl_input(task: dict) -> str:
+    return _invocation_rtl_input(
+        (task.get("program_verification") or {}).get("runner_invocation"))
+
+
+def _review_collection_supplied_rtl(task: dict, result: dict) -> bool:
+    """Derive supplied input from a measured canonical re-entry, not authorship.
+
+    A Program re-entry keeps its PROGRAM origin. It may consume the existing
+    supplied-RTL collection contract only with a current receipt and explicit
+    Step 2 -> 2 argv. Native FAIL stays a measured failure for the unchanged
+    required-gate ledger; unavailable/blocked validation supplies no authority.
+    """
+    if result.get("candidate_origin") in {"AI_BACKUP", "AI_REPAIR"}:
+        return True
+    if task.get("candidate_origin") != "PROGRAM" or result.get("candidate_origin") != "PROGRAM":
+        return False
+    verification = task.get("program_verification") or {}
+    invocation = verification.get("runner_invocation")
+    if (not isinstance(invocation, dict)
+            or invocation.get("schema") != "vibeic.runner_invocation.v1"
+            or invocation.get("status") != "COMPLETED"
+            or verification.get("rtl_gen") != "NOT_APPLICABLE"):
+        return False
+    argv = invocation.get("argv") or []
+    if len(argv) < 3 or Path(argv[1]).name != "vibe_ic_one_shot_runner.py":
+        return False
+    for option in ("--entry-step", "--exit-step"):
+        if argv.count(option) != 1 or any(arg.startswith(option + "=") for arg in argv):
+            return False
+        index = argv.index(option)
+        if index + 1 >= len(argv) or argv[index + 1] != "2":
+            return False
+    if _runner_reentry_reason(task, result) is not None:
+        return False
+    import flow_phase_attribution as fpa                  # noqa: PLC0415
+    report, _ = fpa.step_report(Path(task["project"]))
+    validation = [row for row in (report or {}).get("steps") or []
+                  if row.get("name") == "rtl_validate"]
+    return len(validation) == 1 and validation[0].get("status") in {"PASS", "FAIL"}
+
+
 def _solver_argv(runner: Path, proj: Path, entry, exit_step,
-                 delivery_route: str = "ip") -> list:
+                 delivery_route: str = "ip", input_contract: str = "structured") -> list:
     """One problem's runner argv, assembled from the routing verdict.
 
     Open RTL evaluations deliver IP/module evidence, so explicitly choose the
@@ -5431,6 +5810,10 @@ def _solver_argv(runner: Path, proj: Path, entry, exit_step,
         raise ValueError(f"invalid delivery runner route: {delivery_route!r}")
     argv = [sys.executable, str(runner), str(proj),
             "--route", delivery_route, "--skip-analog", "--skip-hardware"]
+    if input_contract == "original":
+        argv += ["--rtl-input", "original"]
+    elif input_contract != "structured":
+        raise ValueError("unknown RTL input contract")
     if exit_step and exit_step in tnr.flow_step_ids():
         order = {s: i for i, s in enumerate(tnr.flow_step_ids())}
         if order.get(exit_step, 99) < order.get("15", 99):
@@ -5446,15 +5829,17 @@ def _solver_argv(runner: Path, proj: Path, entry, exit_step,
 
 
 def _resume_solver_argv(runner: Path, proj: Path, supplied_rtl: bool,
-                        entry, exit_step, delivery_route: str = "ip") -> list:
+                        entry, exit_step, delivery_route: str = "ip",
+                        input_contract: str = "structured") -> list:
     """Re-enter one routed problem without losing its declared exit.
 
     AI backup/repair supplies RTL, so it resumes at the first RTL-validation
     step.  The routing exit is unchanged: re-entry must not expand a lint or
     behavioural task into synthesis/DFT/LEC work.
     """
-    effective_entry = "2" if supplied_rtl else entry
-    return _solver_argv(runner, proj, effective_entry, exit_step, delivery_route)
+    effective_entry = "2" if supplied_rtl and str(exit_step) != "1" else entry
+    return _solver_argv(runner, proj, effective_entry, exit_step, delivery_route,
+                        input_contract)
 
 
 def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget,
@@ -6139,6 +6524,25 @@ def _run_from_d1_snapshot(budget, argv: list, snapshot: _D1EvidenceSnapshot,
                           *, authority_project: Path | None = None,
                           expected_repaired_output_sha256: str | None = None):
     """Validate one captured generation and bind that generation to submission."""
+    if receipt.get("input_contract") == "original":
+        # Original-source requests use the same runner/material binding. They
+        # do not manufacture a D1 activation or claim document qualification.
+        try:
+            owner_project = Path(authority_project or argv[2]).resolve()
+            run_p = owner_project.parent.parent
+            task = _read_json_regular(run_p / "ai_route_tasks" / f"{task_sha}.json")
+            _require_route_admission(run_p, task, receipt, require_d1=False)
+            if _read_current_receipt(owner_project, "route_decision")["receipt"] != receipt:
+                raise ValueError("ROUTE_REENTRY_ROUTE_RECEIPT_STALE")
+            if _invocation_rtl_input({"argv": argv}) != "original":
+                raise ValueError("RUNNER_RTL_INPUT_INVALID")
+            process = budget.run(
+                argv, **({"expected_repaired_output_sha256": expected_repaired_output_sha256}
+                         if expected_repaired_output_sha256 is not None else {}))
+            _require_route_admission(run_p, task, receipt, require_d1=False)
+            return process
+        except (OSError, ValueError, TypeError) as exc:
+            return _ProcessOutcome(rc=None, error=f"ORIGINAL_INPUT_LAUNCH_REFUSED: {exc}")
     try:
         owner_project = Path(authority_project or snapshot.project).resolve()
         run_p = owner_project.parent.parent
@@ -6259,6 +6663,17 @@ def _validated_route_reentry_state(*, bench: str, dataset: str | Path | None,
         return {"status": "REFUSED", "reason": "ROUTE_REENTRY_ROUTE_MUTATION"}
     if result.get("entry") is not None and str(result.get("entry")) != str(receipt["entry_step"]):
         return {"status": "REFUSED", "reason": "ROUTE_REENTRY_ENTRY_MUTATION"}
+
+    if receipt.get("input_contract") == "original":
+        try:
+            _require_route_admission(run_p, task, receipt, require_d1=False)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            return {"status": "REFUSED", "reason": str(exc)}
+        return {"status": "ACTIVE", "route_receipt": receipt, "task": task,
+                "project": project, "activation": None,
+                "input_contract": "original", "entry_step": str(receipt["entry_step"]),
+                "exit_step": expected_exit, "delivery_route": expected_route,
+                "effective_entry": "2" if supplied_rtl else str(receipt["entry_step"])}
 
     current_activation = None
     activation_root = _receipt_history_dir(project, "d1_activation").parent
@@ -6666,6 +7081,10 @@ def _require_route_admission(run_p: Path, task: dict, receipt: dict,
         raise ValueError("ROUTE_ADMISSION_AI_RESPONSE_CHANGED")
     if receipt != sealed.get("route_receipt"):
         raise ValueError("ROUTE_ADMISSION_ROUTE_OR_MODE_REPLACED")
+    if receipt.get("input_contract") == "original":
+        if require_d1:
+            raise ValueError("ORIGINAL_RTL_INPUT_HAS_NO_D1_ADMISSION")
+        return
     import route_decision as _rd                   # noqa: PLC0415
     pending = _read_current_receipt(Path(task["project"]), "d1_pending")["receipt"]
     expected_pending = _rd.write_d1_pending(
@@ -7092,6 +7511,8 @@ def _make_ai_backup_task(problem_id: str, project: Path, skills: list[str],
         # route declaration is ordered, so its first member is the primary;
         # `declared_skills` keeps every authorised alternative visible.
         "skill": skills[0],
+        "input_authority": ((_rtl_gen_waive(project) or {}).get("input_authority")
+                            or "structured"),
         "declared_skills": list(skills),
         "handoff_source": source,
         "prompt_sha256": _sha256_text(prompt_text),
@@ -7526,7 +7947,21 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 route_receipt.get("delivery_target") == "rtl"
                 and tnr.is_rtl_only_evidence(
                     route_receipt.get("requested_evidence"), exit_step=exit_step))
-            if rtl_delivery:
+            input_contract = str(route_receipt.get("input_contract") or "structured")
+            admitted_steps = []
+            if input_contract == "original":
+                _seal_route_admission(run_p, route_task, verdict)
+                _require_route_admission(run_p, route_task, route_receipt, require_d1=False)
+                phase1_frontdoor = {
+                    "status": "NOT_IN_SCOPE",
+                    "input_contract": "original",
+                    "reason": "bounded RTL uses the unchanged original request",
+                }
+                effective_entry = entry
+                activation = None
+                planned_snapshot = None
+                admitted_steps = list(route_receipt["verify_closed_steps"])
+            elif rtl_delivery:
                 pending = _prepare_route_d1(
                     proj, route_task, route_receipt, run_scope=run_scope)
                 state = _validated_route_reentry_state(
@@ -7557,7 +7992,6 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                      if sid in order and order[sid] <= order[exit_step]), None)
             elif not rtl_delivery:
                 effective_entry = entry
-            admitted_steps = []
             if activation is not None:
                 rd.require_d1_activation(
                     activation, route_receipt, task_sha256=route_task["task_sha256"],
@@ -7580,7 +8014,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
             else:
                 argv = _solver_argv(
                     runner, proj, effective_entry, exit_step,
-                    str(verdict.get("delivery_route") or "ip"))
+                    str(verdict.get("delivery_route") or "ip"), input_contract)
                 if activation is None:
                     _require_route_admission(run_p, route_task, route_receipt,
                                              require_d1=False)
@@ -8023,6 +8457,17 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             continue
         proj = run_p / "projects" / re.sub(r"[^\w.-]", "_", pid)
         task = task_by_id.get(pid)
+        receipt = result.get("route_receipt") or {}
+        if receipt.get("input_contract") == "original":
+            admission = _route_reentry_state(pid, result, allow_d1_only=False)
+            if admission.get("status") != "ACTIVE":
+                phase1_blocked[pid] = str(admission.get("reason") or "ROUTE_REENTRY_REFUSED")
+            elif isinstance(task, dict):
+                expected = task.get("phase1_provenance")
+                current = emit_attestation.input_provenance(proj, "original")
+                if current != expected:
+                    phase1_blocked[pid] = "original design input changed after task creation"
+            continue
         expected = (task.get("phase1_provenance")
                     if isinstance(task, dict) else None)
         current = emit_attestation.phase1_provenance(proj)
@@ -8125,9 +8570,14 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         # first RTL-validation step so program-first does not author again and
         # overwrite the hash whose semantics the AI just repaired. The routed
         # exit still applies; otherwise resume expands a step-2/4 task into LEC.
+        input_contract = str(
+            state["route_receipt"].get("input_contract") or "structured")
         argv = _resume_solver_argv(
             runner, proj, supplied_rtl, state["entry_step"],
-            state["exit_step"], state["delivery_route"])
+            state["exit_step"], state["delivery_route"],
+            input_contract) if input_contract == "original" else _resume_solver_argv(
+                runner, proj, supplied_rtl, state["entry_step"],
+                state["exit_step"], state["delivery_route"])
         if state["activation"] is None:
             _require_route_admission(run_p, state["task"], state["route_receipt"],
                                      require_d1=False)
@@ -8798,7 +9248,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
     repair_outcomes = iter(_ordered_parallel_map(
         [(p["id"], p["project"], True, None, p["result"].get("exit"),
           ({"repair_contract": ((p.get("repair_provenance") or {}).get("repair_contract")),
-            "require_repair_contract": _requires_public_source_repair_contract(p["task"]),
+            "require_repair_contract": _requires_source_repair_contract(p["task"]),
             **({"expected_repaired_output_sha256": p["repaired_output_sha256"]}
                if p.get("repaired_output_sha256") is not None else {})}
            if p["task"].get("candidate_origin") == "AI_REPAIR" or p["kind"] == "run"
@@ -9015,7 +9465,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                             "oracle_accessed": False,
                             "preservation": "complete exact-path declaration required",
                             "elaboration_matrix": "complete exact-path declaration required",
-                        }} if _requires_public_source_repair_contract(task) else {}),
+                        }} if _requires_source_repair_contract(task) else {}),
                     },
                     "verified_prompt_evidence":
                         (verdict.get("override") or {}).get(
@@ -9032,17 +9482,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                         "a fresh AI review for the new hash"),
                 })
             continue
-        supplied_rtl = result.get("candidate_origin") in {
-            "AI_BACKUP", "AI_REPAIR"}
-        # Ordinary re-gating preserves PROGRAM authorship but supplies those
-        # existing bytes at step 2. The receipt was authenticated above; use
-        # its executed entry rather than mislabelling that upstream N/A as a scaffold.
-        invocation = (task.get("program_verification") or {}).get("runner_invocation")
-        if isinstance(invocation, dict) and invocation.get("status") == "COMPLETED":
-            argv = invocation["argv"]
-            supplied_rtl = supplied_rtl or any(
-                argv[index:index + 2] == ["--entry-step", "2"]
-                for index in range(len(argv) - 1))
+        supplied_rtl = _review_collection_supplied_rtl(task, result)
         # Only an authenticated explicit reentry may supply a PROGRAM-owned
         # postimage declaration. Ordinary author repairs retain their exact
         # signed candidate contract, including every immutable hash check.
@@ -9056,7 +9496,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             repair_contract=(repair_contract
                              if task.get("candidate_origin") == "AI_REPAIR" else None),
             require_repair_contract=(task.get("candidate_origin") == "AI_REPAIR"
-                                     and _requires_public_source_repair_contract(task)),
+                                     and _requires_source_repair_contract(task)),
             required_top=_required_scorer_top(_entry(bench), fmt))
         if (not got.get("ok")
                 or _sha256_text(str(got.get("completion") or ""))
@@ -9073,6 +9513,8 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                            "awaiting_ai_review": True,
                            "ai_repair_required": True})
             continue
+        if _refresh_retained_measurement_result(task, result, got):
+            _attach_ai_review_attribution(result, verdict, task)
         if task.get("candidate_origin") == "AI_REPAIR":
             recovery = _verified_program_recovery(task, result, verdict)
             enhancement_by_key[(
