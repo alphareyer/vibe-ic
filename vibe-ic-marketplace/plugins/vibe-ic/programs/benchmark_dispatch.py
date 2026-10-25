@@ -6313,10 +6313,22 @@ def _validated_route_reentry_state(*, bench: str, dataset: str | Path | None,
         return {"status": "REFUSED", "reason": str(exc)}
 
     expected_exit = str(receipt["verify_through"])
-    expected_route = _tnr.delivery_route_for_target(
-        str(receipt["delivery_target"]),
-        "DIE" if str(receipt["delivery_target"]) in
-        {"gds", "shippable_gds", "foundry_handoff"} else None)
+    try:
+        prompt_text = (project / "input" / "phase1_prompt.md").read_text(
+            errors="replace")
+        resolved_delivery = _tnr.resolve_prompt_delivery_target(
+            _tnr.prompt_delivery_requirements(prompt_text),
+            str(receipt["delivery_target"]))
+        if not resolved_delivery.get("ok"):
+            raise ValueError("ROUTE_REENTRY_DELIVERY_TARGET_INVALID: " + str(
+                resolved_delivery.get("reason") or "delivery target refused"))
+        # Match initial route validation: an RTL deliverable may belong to
+        # either an IC or IP. The sealed input admission below independently
+        # verifies these prompt bytes before granting execution authority.
+        expected_route = _tnr.delivery_route_for_target(
+            str(resolved_delivery["target"]), resolved_delivery.get("route_family"))
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return {"status": "REFUSED", "reason": str(exc)}
     if result.get("exit") is not None and str(result.get("exit")) != expected_exit:
         return {"status": "REFUSED", "reason": "ROUTE_REENTRY_EXIT_MUTATION"}
     if (result.get("delivery_route") is not None
@@ -8015,8 +8027,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
     phase1_blocked: dict[str, str] = {}
     for result in results:
         pid = str(result.get("id"))
-        if (result.get("worker_status") == "ERROR"
-                and result.get("worker_retryable") is True):
+        if result.get("worker_status") == "ERROR":
             # There is no Program outcome to guard yet: this result is owed
             # the retry below, which re-enters at its routed entry and emits
             # the provenance the next --resume binds and checks. Refusing it
@@ -8193,8 +8204,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
     retry_plans = []
     retry_blocked = []
     for result in results:
-        if (result.get("worker_status") == "ERROR"
-                and result.get("worker_retryable") is True):
+        if result.get("worker_status") == "ERROR":
             pid = str(result.get("id"))
             reentry_state = _route_reentry_state(pid, result, allow_d1_only=True)
             if reentry_state.get("status") == "REFUSED":
@@ -8203,6 +8213,9 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                                "worker_error": str(reentry_state.get("reason")),
                                "worker_retryable": False})
                 continue
+            # Retryability is a current admission result, not a permanent
+            # veto copied from an earlier refused route/source revision.
+            result["worker_retryable"] = True
             retry_plans.append({
                 "id": pid, "result": result,
                 "project": (run_p / "projects" /

@@ -3147,6 +3147,15 @@ def _main() -> int:
     # under another `--pdk` / `--ic-name` is not reused (review wave8 MAJOR).
     _p1_knobs = {"ic_name": args.ic_name, "pdk": args.pdk, "mode": "docs"}
     _p1_checkpoint = _execution.request()['mode'] == 'default'
+    if _p1_checkpoint and args.entry_step == 'D1':
+        import ai_signed_judgement as _p1_ai
+        if (_p1_ai.check(project, 'D1', expected_verdict='FAIL')[0]
+                and _phase1_freshness(project, _p1_knobs).get('reason')
+                == _p1id.PRODUCER_CHANGED):
+            # An explicit D1 retry may ask a changed producer to replace its
+            # rejected output through the normal docs/archive path. Ordinary
+            # continuations still revalidate the intact historical checkpoint.
+            _p1_checkpoint = False
     run_phase1, p1_mode = _phase1_decision(
         project, _force_skip_p1, _p1_knobs, checkpoint=_p1_checkpoint)
     # What the generated L docs on disk ARE, asked once and carried into the

@@ -132,6 +132,39 @@ def state(run,project):
     return bd._validated_route_reentry_state(bench='verilogeval-human',dataset=None,fmt=None,
         run_p=run,pid=tasks[0]['id'],result=solve['results'][0],route_worklist=tasks,allow_d1_only=False,supplied_rtl=True)
 
+@pytest.mark.parametrize(('prompt', 'delivery_route', 'delivery_target'), [
+    ('Design a complete chip and deliver synthesizable RTL. '
+     'Implement a pulse shaper named top_module.', 'ic', 'rtl'),
+    ('Design a standalone IP block and deliver synthesizable RTL. '
+     'Implement a pulse shaper named top_module.', 'ip', 'ip_hardmacro'),
+])
+@pytest.mark.parametrize('mutated', [False, True])
+def test_issued_rtl_route_preserves_prompt_delivery_family_on_reentry(
+        tmp_path, monkeypatch, prompt, delivery_route, delivery_target, mutated):
+    dataset, run, task, calls = prior.ready_backup(
+        tmp_path, monkeypatch, prompt=prompt)
+    project = Path(task['project'])
+    decision, reasons = bd._validate_ai_route(
+        task, run, benchmark='verilogeval-human', dataset=dataset)
+    assert decision is not None, reasons
+    assert decision['delivery_target'] == delivery_target
+    assert decision['delivery_route'] == delivery_route
+    solve_path = run / 'solve_report.json'
+    solve = json.loads(solve_path.read_text())
+    assert solve['results'][0]['delivery_route'] == delivery_route
+    if mutated:
+        solve['results'][0]['delivery_route'] = (
+            'ip' if delivery_route == 'ic' else 'ic')
+        solve_path.write_text(json.dumps(solve))
+    admission = state(run, project)
+    if mutated:
+        assert admission['status'] == 'REFUSED'
+        assert admission['reason'] == 'ROUTE_REENTRY_ROUTE_MUTATION'
+    else:
+        assert admission['status'] == 'ACTIVE', admission
+        assert admission['delivery_route'] == delivery_route
+    assert calls == []
+
 @pytest.mark.parametrize('mutation',[
     'none','entry','exit_deleted','route_deleted','prompt','report_deleted','report_duplicate',
     'ldoc_deleted','input_changed','dataset_changed','activation_rollback','duplicate_exit','duplicate_mode',

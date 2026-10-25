@@ -2641,8 +2641,10 @@ def test_emitted_phase1_provenance_is_bound_when_the_task_does_not_carry_it(
     bd._require_program_first_ai_acceptance(run)
 
 
+@pytest.mark.parametrize('retryable', [True, False])
+@pytest.mark.parametrize('mutated_route', [False, True])
 def test_a_retryable_worker_error_is_retried_not_refused_at_the_front_door(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, retryable, mutated_route):
     """THE DEFECT, second half. A result whose Program worker died is owed
     the retry `cmd_resume` was built to give it, and has no candidate to
     guard. The front door refused it -- so one D1 crash froze every other
@@ -2675,9 +2677,11 @@ def test_a_retryable_worker_error_is_retried_not_refused_at_the_front_door(
         "delivery_route": "ip",
         "route_receipt": p2_receipt,
         "routing_verdict": {**ROUTING, "route_receipt": p2_receipt}, "rc": None,
-        "worker_status": "ERROR", "worker_retryable": True,
+        "worker_status": "ERROR", "worker_retryable": retryable,
         "worker_error": "fixture: the worker died before Phase 1",
     })
+    if mutated_route:
+        solve['results'][-1]['delivery_route'] = 'ic'
     solve["total"] = 2
     (run / "solve_report.json").write_text(json.dumps(solve))
     _write_review(task, _valid_review(task))
@@ -2696,14 +2700,21 @@ def test_a_retryable_worker_error_is_retried_not_refused_at_the_front_door(
     resumed = json.loads((run / "solve_report.json").read_text())["results"]
     assert resumed[0]["accepted"] is True
     assert resumed[1]["worker_status"] == "ERROR"
-    assert [a[2] if len(a) > 2 else None for a in attempted] == [
-        str(run / "projects" / "p2")], attempted
+    assert [a[2] if len(a) > 2 else None for a in attempted] == (
+        [] if mutated_route else [str(run / "projects" / "p2")]), attempted
+    if mutated_route:
+        assert resumed[1]['worker_retryable'] is False
+        assert resumed[1]['worker_error'] == 'ROUTE_REENTRY_ROUTE_MUTATION'
+    else:
+        assert resumed[1]['worker_retryable'] is True
+        assert attempted[0][attempted[0].index('--exit-step') + 1] == 'D1'
     acceptance = json.loads((run / bd._ACCEPTANCE_REPORT).read_text())
     assert acceptance["status"] == "PENDING"
     assert acceptance["accepted_ids"] == ["p1"]
     assert Path(task["response_path"]).exists()
     repairs = bd._read_jsonl(run / bd._REPAIR_WORKLIST)
-    assert [r["status"] for r in repairs] == ["PROJECT_WORKER_ERROR"]
+    assert [r["status"] for r in repairs] == [
+        'ROUTE_REENTRY_BLOCKED' if mutated_route else 'PROJECT_WORKER_ERROR']
 
 
 # Execution identity is measured through the same AI-review consumer as

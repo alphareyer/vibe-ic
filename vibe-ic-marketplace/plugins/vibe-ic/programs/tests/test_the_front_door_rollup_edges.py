@@ -470,6 +470,68 @@ def test_source_drift_revalidation_refuses_changes_during_consumer(
     assert current['result']['observed_canonical_consumer']['status'] == 'PASS'
 
 
+@pytest.mark.parametrize('review', ['PASS', 'FAIL', 'missing', 'stale'])
+@pytest.mark.parametrize('changed_source', [False, True])
+def test_explicit_d1_retries_only_current_ai_failed_changed_producer(
+        tmp_path, monkeypatch, review, changed_source):
+    import ai_signed_judgement as ai
+    import step_output_collector as versions
+    project, plugin, _, _, before = _recorded_d1_checkpoint(tmp_path, monkeypatch)
+    checkpoint_freshness = V._phase1_checkpoint_freshness
+    def neutral_checkpoint(project, knobs=None):
+        # Keep the real front-door runtime closure. Only its producer-identity
+        # reader points at the neutral producer recorded by this fixture.
+        with monkeypatch.context() as producer_root:
+            producer_root.setattr(V, 'PROGRAMS_DIR', plugin / 'programs')
+            return checkpoint_freshness(project, knobs)
+    monkeypatch.setattr(V, '_phase1_checkpoint_freshness', neutral_checkpoint)
+    _sign_d1_checkpoint(project)
+    signature = project / 'reports/audit/ai_judgements/D1.json'
+    if review == 'missing':
+        signature.unlink()
+    elif review in ('FAIL', 'stale'):
+        payload = json.loads(signature.read_text())
+        payload['verdict'] = 'FAIL'
+        if review == 'stale':
+            payload['evidence_sha256'] = '0' * 64
+        signature.write_text(json.dumps(payload))
+    if changed_source:
+        source = plugin / 'programs/fake_l_producer.py'
+        source.write_text(source.read_text() + '\n# Later neutral producer revision.\n')
+    docs_before = {p.name: p.read_bytes() for p in
+                   (project / 'phase1/generated_docs').glob('L*.json')}
+    called = []
+    rc, report = _drive_main(
+        project, monkeypatch, phase1=('FAIL', 1, None), phase2=('PASS', 0),
+        reuse_phase1=None, extra_argv=('--entry-step', 'D1', '--exit-step', 'D1'),
+        after_phase=called.append)
+    retry = review == 'FAIL' and changed_source
+    assert called == (['phase1'] if retry else []), report
+    if review == 'PASS':
+        assert report['verdict'] == 'PASS' and rc == 0
+    else:
+        assert report['verdict'] != 'PASS' and rc == 1
+    if retry:
+        assert report['phase1_generated_docs']['state'] == 'REGENERATE'
+        assert report['phase1_generated_docs']['reason'] == 'PRODUCER_CHANGED'
+        archived = list((project / '.vibeic-state/superseded_generated_docs').iterdir())
+        assert len(archived) == 1
+        assert {p.name: p.read_bytes() for p in archived[0].glob('L*.json')} == docs_before
+        assert 'PRODUCER_CHANGED' in (archived[0] / 'WHY.txt').read_text()
+        assert not list((project / 'phase1/generated_docs').glob('L*.json'))
+        assert report['phases'][0]['verdict'] == 'FAIL'
+        assert versions.latest_pass(project, 'D1') is None
+        # The existing historical proof is retained; only the live producer
+        # identity is voided by the normal supersede path before rerunning.
+        assert {p: p.read_bytes() for p in before if p.name != 'step_identity.json'} == {
+            p: value for p, value in before.items() if p.name != 'step_identity.json'}
+    else:
+        assert {p.name: p.read_bytes() for p in
+                (project / 'phase1/generated_docs').glob('L*.json')} == docs_before
+        assert {p: p.read_bytes() for p in before} == before
+        assert ai.check(project, 'D1', expected_verdict='FAIL')[0] == (review == 'FAIL')
+
+
 def _save_complete_acceptance(project, sid, status, *, runner, excluded=""):
     """Use the actual version writer; the phase producer's result stays separate."""
     import step_output_collector as versions
