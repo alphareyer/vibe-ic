@@ -508,7 +508,9 @@ def test_explicit_d1_retries_only_current_ai_failed_changed_producer(
     retry = review == 'FAIL' and changed_source
     assert called == (['phase1'] if retry else []), report
     if review == 'PASS':
-        assert report['verdict'] == 'PASS' and rc == 0
+        assert report['phases'][0] == {'name': 'phase1', 'verdict': 'PASS', 'rc': 0}
+        assert versions.latest_pass(project, 'D1')['canonical_pass'] is True
+        assert rc == 0
     else:
         assert report['verdict'] != 'PASS' and rc == 1
     if retry:
