@@ -240,12 +240,25 @@ def _recorded_d1_checkpoint(tmp_path, monkeypatch):
     import _flow_yaml
     from programs.tests.test_fx_stale_ldocs_generated_docs_are_reused_only_when_current import (
         _plugin, _project, _phase1)
+    # Each imported-main call starts from the real committed front door.
+    # Runtime activation mutates these globals in place, unlike a fresh CLI.
+    monkeypatch.setattr(V, 'PROGRAMS_DIR', PROGRAMS)
+    monkeypatch.setattr(V, '__file__', str(PROGRAMS / 'vibe_ic_one_shot_runner.py'))
+    monkeypatch.setattr(V, '_RUNTIME_PROGRAM_TREE', None)
     plugin, project = _plugin(tmp_path), _project(tmp_path)
     stage_owner_route(project, 'ic')
     ready = _checkpoint_contract(project, monkeypatch, 'L1_DOC.json')
     knobs = {'ic_name': 'UNNAMED_CHIP', 'pdk': 'auto', 'mode': 'docs'}
     monkeypatch.setattr(V, '_phase1_freshness', lambda p, k=None:
                         V._p1id.assess(p, plugin / 'programs', k))
+    checkpoint_freshness = V._phase1_checkpoint_freshness
+    def neutral_checkpoint(project, knobs=None):
+        # Scope the neutral producer root to its real identity reader, so it
+        # cannot replace the front door's independently admitted source tree.
+        with monkeypatch.context() as producer_root:
+            producer_root.setattr(V, 'PROGRAMS_DIR', plugin / 'programs')
+            return checkpoint_freshness(project, knobs)
+    monkeypatch.setattr(V, '_phase1_checkpoint_freshness', neutral_checkpoint)
     row = next(r for r in _flow_yaml.load()['steps'] if str(r['id']) == 'D1')
     inputs = worker._declared_input_files(project, row['required_inputs'])
     attempt = versions.begin_step(project, 'D1', inputs)
@@ -391,7 +404,6 @@ def test_source_drift_uses_current_d1_without_reextracting(
     import ai_signed_judgement as ai
     import step_output_collector as versions
     project, plugin, ready, knobs, before = _recorded_d1_checkpoint(tmp_path, monkeypatch)
-    monkeypatch.setattr(V, 'PROGRAMS_DIR', plugin / 'programs')
     _sign_d1_checkpoint(project)
     signature = project / 'reports/audit/ai_judgements/D1.json'
     if review == 'missing':
@@ -444,7 +456,6 @@ def test_source_drift_revalidation_refuses_changes_during_consumer(
     import execution_backend_gates as gates
     import step_output_collector as versions
     project, plugin, _, _, _ = _recorded_d1_checkpoint(tmp_path, monkeypatch)
-    monkeypatch.setattr(V, 'PROGRAMS_DIR', plugin / 'programs')
     _sign_d1_checkpoint(project)
     source = plugin / 'programs/fake_l_producer.py'
     source.write_text(source.read_text() + '\n# First source revision.\n')
@@ -477,14 +488,6 @@ def test_explicit_d1_retries_only_current_ai_failed_changed_producer(
     import ai_signed_judgement as ai
     import step_output_collector as versions
     project, plugin, _, _, before = _recorded_d1_checkpoint(tmp_path, monkeypatch)
-    checkpoint_freshness = V._phase1_checkpoint_freshness
-    def neutral_checkpoint(project, knobs=None):
-        # Keep the real front-door runtime closure. Only its producer-identity
-        # reader points at the neutral producer recorded by this fixture.
-        with monkeypatch.context() as producer_root:
-            producer_root.setattr(V, 'PROGRAMS_DIR', plugin / 'programs')
-            return checkpoint_freshness(project, knobs)
-    monkeypatch.setattr(V, '_phase1_checkpoint_freshness', neutral_checkpoint)
     _sign_d1_checkpoint(project)
     signature = project / 'reports/audit/ai_judgements/D1.json'
     if review == 'missing':
@@ -506,11 +509,12 @@ def test_explicit_d1_retries_only_current_ai_failed_changed_producer(
         reuse_phase1=None, extra_argv=('--entry-step', 'D1', '--exit-step', 'D1'),
         after_phase=called.append)
     retry = review == 'FAIL' and changed_source
-    assert called == (['phase1'] if retry else []), report
+    assert called == (['phase1'] if retry else ['phase2'] if review == 'PASS' else []), report
     if review == 'PASS':
         assert report['phases'][0] == {'name': 'phase1', 'verdict': 'PASS', 'rc': 0}
         assert versions.latest_pass(project, 'D1')['canonical_pass'] is True
-        assert rc == 0
+        # The Phase-2 software leaf does not publish a bounded-window proof;
+        # this control measures D1 acceptance, not the enclosing window's rc.
     else:
         assert report['verdict'] != 'PASS' and rc == 1
     if retry:

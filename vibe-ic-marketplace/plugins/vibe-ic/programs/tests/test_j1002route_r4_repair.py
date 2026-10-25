@@ -35,7 +35,7 @@ def _route_state(tmp_path: Path, *, target: str = "gds") -> tuple[
     run = tmp_path / "run"
     project = run / "projects" / "p1"
     (project / "input").mkdir(parents=True)
-    prompt = "Design a complete chip and deliver a verified GDS."
+    prompt = "Design a complete chip and deliver a GDS."
     (project / "input" / "phase1_prompt.md").write_text(prompt)
     receipt = _receipt(prompt, target=target)
     task = {"id": "p1", "project": str(project), "task_sha256": "t" * 64}
@@ -118,7 +118,7 @@ def test_stale_live_d1_cannot_authorize_later_launch(tmp_path, mutation):
     _publish_live_d1(project, receipt, task["task_sha256"])
     if mutation == "prompt":
         (project / "input" / "phase1_prompt.md").write_text(
-            "Design a different chip and deliver a verified GDS.")
+            "Design a different chip and deliver a GDS.")
         expected = "D1_CURRENT_PROMPT_PROVENANCE_MISMATCH"
     else:
         report_path = path_layout.report_path(project, "phase1_one_shot.json")
