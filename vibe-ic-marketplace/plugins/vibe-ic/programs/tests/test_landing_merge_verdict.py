@@ -3598,12 +3598,23 @@ def test_reassert_changed_candidate_input_requests_bounded_revalidation(
     assert "full verify" not in changed.stderr.lower()
 
 
-def test_reassert_changed_named_dependency_blocks_reuse(sandbox, tmp_path):
+@pytest.mark.parametrize("selection_namespace", ["repo", "plugin"])
+def test_reassert_changed_named_dependency_blocks_reuse(sandbox, tmp_path, selection_namespace):
     good = tmp_path / "v_innocuous_green.json"
     doc = _write_reassert_receipt(sandbox, good)
     assert doc["base_selected_files"]
     repo = _clone_for_reassert(sandbox, tmp_path)
     dependency = doc["base_selected_files"][0]
+    if selection_namespace == "plugin":
+        # The real verdict producer stores pytest selection paths relative to
+        # the plugin root; git diff reports them relative to the repository.
+        prefix = "vibe-ic-marketplace/plugins/vibe-ic/"
+        doc["selected_files"] = [dependency.removeprefix(prefix)]
+        doc["base_selected_files"] = [dependency.removeprefix(prefix)]
+        doc.pop("receipt_sha256")
+        doc["receipt_sha256"] = hashlib.sha256(json.dumps(
+            doc, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        good.write_text(json.dumps(doc))
     _advance_main(repo, dependency, "def test_changed_dependency():\n    assert True\n")
     changed = _reassert(repo, good)
     assert changed.returncode == 1, changed.stdout + changed.stderr

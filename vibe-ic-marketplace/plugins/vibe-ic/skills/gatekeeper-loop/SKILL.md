@@ -557,7 +557,7 @@ Each tick must:
         (machine gates; the PR is VERSION-LESS so the version gate DEFERS)
         on base=origin/main head=<headRef>. Before repeating an already
         completed V2 acceptance, run `tools/gatekeeper-verify-merge.sh
-        --reassert <verdict.json> --base origin/main`. A valid unchanged
+        --reassert <verdict.json> --reassert-head <headRef> --base origin/main`. A valid unchanged
         receipt is consumed directly. Unrelated base movement also reuses the
         receipt. Only concrete changed candidate/evidence/dependency paths
         trigger bounded revalidation of the impacted checks; missing,

@@ -329,7 +329,11 @@ def manifest(name):
     value = doc.get(name)
     if not isinstance(value, list) or any(not isinstance(p, str) for p in value):
         refuse(f"missing or malformed {name}")
-    return set(value)
+    # The real verdict producer records pytest selections relative to the
+    # plugin root. Compare those with repo-relative git paths in one namespace.
+    prefix = "vibe-ic-marketplace/plugins/vibe-ic/"
+    return {prefix + path if name in {"selected_files", "base_selected_files"}
+            and path.startswith("programs/") else path for path in value}
 
 candidate_fork = git("merge-base", was_base, was_head)
 candidate_paths = paths_between(candidate_fork, was_head)
