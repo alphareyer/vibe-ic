@@ -322,3 +322,26 @@ def test_two_valid_native_d62_bridges_cannot_splice_gds_and_unrelated_odb(tmp_pa
         stream.validate_bridge(tmp_path, ref)
     assert stream.validate_bridge(a[0], a[2])['odb'] == a[3]['odb']
     assert stream.validate_bridge(b[0], b[2])['odb'] == b[3]['odb']
+
+
+def test_reviewed_native_clearer_retains_exact_fill_and_rejects_shape_reverse(monkeypatch):
+    import ast
+    import hashlib
+    source = stream.native_script().read_text()
+    assert stream.patched_native_source(source) == source
+    assert stream.operation_sources()['native/librelane/scripts/klayout/stream_out.py'] == hashlib.sha256(source.encode()).hexdigest()
+    tree = ast.parse(source)
+    clearer = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'should_clear_cell')
+    namespace = {}
+    exec(compile(ast.Module(body=[clearer], type_ignores=[]), '<native-clearer>', 'exec'), namespace)
+    clear = namespace['should_clear_cell']
+    assert not clear('neutral', 'neutral', 0, 0)
+    assert not clear('VIA_generated', 'neutral', 0, 1)
+    assert not clear('neutral_DEF_FILL', 'neutral', 0, 2)
+    assert clear('foreign_DEF_FILL', 'neutral', 0, 3)
+    assert clear('ordinary_macro', 'neutral', 0, 4)
+    damaged = source.replace('if cell_name == f"{design_name}_DEF_FILL":', 'if False:')
+    # Even a mistakenly updated digest must not authorize changed clearing logic.
+    monkeypatch.setattr(stream, 'NATIVE_FILL_STREAM_SHA256', hashlib.sha256(damaged.encode()).hexdigest())
+    with pytest.raises(Refusal, match='FILL_STREAM_NATIVE_VERSION_UNSUPPORTED'):
+        stream.patched_native_source(damaged)
