@@ -7632,7 +7632,7 @@ def _stage_author_knowledge_digests(project: Path) -> Tuple[str, Dict[str, Any]]
         extras["declaration_required_count"] = n_decl_required
     refinement_hint = ""
     l6_path = _pl.generated_docs_dir(project) / "L6_CONTROL_LOGIC.json"
-    if l6_path.is_file():
+    if _pl.rtl_input(project) == "structured" and l6_path.is_file():
         try:
             l6 = json.loads(l6_path.read_text())
         except (OSError, ValueError):

@@ -374,3 +374,32 @@ def test_ordinary_d1_frontdoor_uses_bound_factgraph_schema(tmp_path):
     assert proposed.returncode != 0
     path.write_bytes(path.read_bytes() + b"\n# A subsequent author edit.\n")
     assert identity.assess(tmp_path, PLUGIN / "programs")["reason"] == identity.DESIGN_INPUT_CHANGED
+
+
+def test_original_input_handoff_excludes_stale_l6_proposal(tmp_path):
+    import _path_layout as layout
+    from design_one_shot_runner import _stage_author_knowledge_digests
+
+    prompt = tmp_path / "input/phase1_prompt.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("Module name: neutral_select\nImplement a combinational selector.\n")
+    l6 = tmp_path / "phase1/generated_docs/L6_CONTROL_LOGIC.json"
+    l6.parent.mkdir(parents=True)
+    l6.write_text(json.dumps({
+        "behavioral_refinement": {"source": "inferred", "status": "proposed",
+                                  "source_text_sha256": "old-source-identity"},
+        "fsm_transitions": [{"from": "OLD_A", "to": "OLD_B",
+                             "guard": {"port": "old_port", "op": "==", "value": 1}}],
+    }))
+    before = l6.read_bytes()
+    previous = layout._RTL_INPUT
+    try:
+        layout.select_rtl_input(tmp_path, "original", "1", "2")
+        hint, extras = _stage_author_knowledge_digests(tmp_path)
+    finally:
+        layout._RTL_INPUT = previous
+    assert extras["input_authority"] == "original"
+    assert extras["read_prompt_from"] == str(prompt)
+    assert "behavioral_refinement" not in extras
+    assert "BEHAVIORAL PROPOSAL" not in hint
+    assert l6.read_bytes() == before
