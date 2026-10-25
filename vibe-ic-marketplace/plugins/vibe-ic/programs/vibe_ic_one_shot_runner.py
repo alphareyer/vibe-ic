@@ -4038,11 +4038,15 @@ def _main() -> int:
             "verdict": "FAIL" if window_verdict == "FAIL" else "NOT_MEASURED",
             "verdict_reasons": window_reasons,
             "whole_flow_verdict": "NOT_MEASURED", "audit_verdict": "NOT_MEASURED",
+            "halted_at": halted_at or None,
+            "advisories": advisories,
+            "phase1_checkpoint_review": _phase1_checkpoint_review,
             "audit_scope": "bounded; whole-flow audit not refreshed",
             "completion_audit_axis": {"state": "NOT_MEASURED",
                                       "reason": "bounded; whole-flow audit not refreshed"},
             "ai_judgements": p2_window.get("ai_judgements", {}),
-            "bounded_disclosures": p2_window.get("bounded_disclosures", []),
+            "bounded_disclosures": [*_fd_disclosures,
+                                    *p2_window.get("bounded_disclosures", [])],
             "not_refreshed_here": p2_window.get("not_refreshed_here", []),
         }
         out = _pl.report_path(project, "vibe_ic_one_shot.json")
