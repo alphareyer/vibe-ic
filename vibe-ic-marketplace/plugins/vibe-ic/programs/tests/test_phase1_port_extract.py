@@ -8,8 +8,11 @@ largest interface table when a spec splits clock/reset, input and output into
 SEPARATE tables. This validates the three structural fixes — and asserts the
 gates' single-best contract is preserved (union is opt-in).
 """
+import json
 import sys
 from pathlib import Path
+
+import pytest
 
 PLUGIN = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PLUGIN / "programs"))
@@ -222,3 +225,124 @@ def test_genuine_verilog_regions_still_extracted():
     assert {p["name"] for p in PX.extract_ports(mod)} == {"clk", "a", "q"}
     snip = "```\ninput clk,\noutput q\n```"
     assert {p["name"] for p in PX.extract_ports(snip)} >= {"clk", "q"}
+
+
+def _selected_header_prompt(kind, fenced=False):
+    """Neutral context declarations differ from the requested public header."""
+    if kind == "width":
+        example = ("module legacy_stage(input CLK, input [11:0] DataIn, "
+                   "output DataOut);\nendmodule")
+        target = ("module PacketStage (\n  input CLK,\n"
+                  "  input [11:0] DataIn,\n  output [11:0] DataOut\n);")
+    else:
+        example = ("module parent_stage(input [2:0] ParentBus, "
+                   "output [2:0] ParentResult);\nendmodule")
+        target = ("module PacketStage (\n  input CLK,\n"
+                  "  input DataIn,\n  output DataOut\n);")
+    if fenced:
+        example = "```verilog\n" + example + "\n```"
+        target = "```verilog\n" + target + "\n```"
+    return ("Implement a module named PacketStage with the following interface.\n"
+            "An earlier module is shown only as context:\n" + example +
+            "\nThe requested module header is:\n" + target + "\n")
+
+
+@pytest.mark.parametrize("kind", ["width", "parent"])
+@pytest.mark.parametrize("fenced", [False, True])
+def test_selected_header_excludes_context_and_preserves_declared_case(kind, fenced):
+    text = _selected_header_prompt(kind, fenced)
+    rows = PX.extract_code_block_ports(text, target="PacketStage")
+    width = 12 if kind == "width" else 1
+    assert [(p["name"], p["dir"], p["width"]) for p in rows] == [
+        ("CLK", "input", 1), ("DataIn", "input", width),
+        ("DataOut", "output", width)]
+    assert all(p["rtl_name"] == p["name"] for p in rows)
+    assert all(p["source_line"] in text for p in rows)
+
+
+def test_selected_header_uses_only_its_own_parameter_scope():
+    text = ("module example #(parameter WORD_BITS=2) "
+            "(output [WORD_BITS-1:0] Result); endmodule\n"
+            "module Requested #(parameter WORD_BITS=13) "
+            "(input [WORD_BITS-1:0] Value, output [WORD_BITS-1:0] Result);\n")
+    got = PX.extract_ports(text, target="Requested")
+    assert got == [{"name": "Value", "dir": "input", "width": 13},
+                   {"name": "Result", "dir": "output", "width": 13}]
+    assert PX.extract(text, target="Requested")["ports"] == got
+
+
+def test_selected_target_does_not_fall_back_to_an_unrelated_code_module():
+    text = "module context_only(input Other); endmodule\n"
+    assert PX.extract_code_block_ports(text, target="Absent") == []
+    assert PX.extract_ports(text, target="Absent") == []
+
+
+def test_selected_target_preserves_prose_only_interface_support():
+    text = ("Implement a module named prose_stage.\n"
+            "- input CLK\n- output Result (6 bits)\n")
+    assert PX.extract_ports(text, target="prose_stage") == [
+        {"name": "CLK", "dir": "input", "width": 1},
+        {"name": "Result", "dir": "output", "width": 6}]
+
+
+def test_selected_target_preserves_headerless_strict_code_fragments():
+    text = ("Module Name: fragment_core\n"
+            "// module commented_example(input Ghost); endmodule\n"
+            "```verilog\ninput CLK,\noutput [5:0] Result;\n```\n")
+    assert PX.selected_module_header(text, "fragment_core") is None
+    assert PX.selected_module_code(text, "fragment_core") == text
+    assert PX.extract_ports(text, target="fragment_core") == [
+        {"name": "CLK", "dir": "input", "width": 1},
+        {"name": "Result", "dir": "output", "width": 6}]
+
+
+def test_selected_header_ignores_commented_decoy_and_unstated_width_claim():
+    text = ("// module Selected(input Ghost, output [29:0] Result); endmodule\n"
+            "A 30-bit internal datapath is not a port-width declaration.\n"
+            "module Selected(input CLK, output Result);\n")
+    rows = PX.extract_code_block_ports(text, target="Selected")
+    assert [(p["name"], p["width"]) for p in rows] == [("CLK", 1), ("Result", 1)]
+
+
+def test_selected_header_reads_existing_neutral_rtl_artifact():
+    from _hostpaths import require_repo
+
+    rtl = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+                       "tests", "fixtures", "iface_table_roles", "neutral_reg.v")
+    text = ("module unrelated(input Ghost); endmodule\n" + rtl.read_text())
+    rows = PX.extract_code_block_ports(text, target="neutral_reg")
+    assert [(p["name"], p["dir"], p["width"]) for p in rows] == [
+        ("clk", "input", 1), ("reset_n", "input", 1),
+        ("cs", "input", 1), ("we", "input", 1),
+        ("address", "input", 8), ("write_data", "input", 32),
+        ("read_data", "output", 32), ("error", "output", 1)]
+
+
+@pytest.mark.parametrize("kind", ["width", "parent"])
+@pytest.mark.parametrize("fenced", [False, True])
+def test_selected_header_reaches_actual_l1_and_l9_consumers(tmp_path, kind, fenced):
+    import phase1_doc_one_shot_runner as R
+
+    text = _selected_header_prompt(kind, fenced)
+    docs = tmp_path / "input" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "design.md").write_text(text)
+    (tmp_path / "input" / "phase1_prompt.md").write_text(text)
+    R.gen_l1_datasheet(tmp_path, {"design.md": text})
+    R.gen_l9_integration_spec(tmp_path, {"design.md": text}, {})
+    R._post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(tmp_path)
+    generated = tmp_path / "phase1" / "generated_docs"
+    l1 = json.loads((generated / "L1_DATASHEET.json").read_text())
+    l9 = json.loads((generated / "L9_INTEGRATION_SPEC.json").read_text())
+    width = 12 if kind == "width" else 1
+    expected = {"CLK": ("input", 1), "DataIn": ("input", width),
+                "DataOut": ("output", width)}
+    assert {p.get("rtl_name") or p["name"]: (
+        p.get("direction") or p.get("mode"), p.get("width"))
+        for p in l1["pin_table"]} == expected
+    for key in ("ports", "top_ports", "top_module_pins"):
+        # The ordinary JSON contract consumer dereferences name itself.
+        # A source-cased annotation must not mask a lowercased public port.
+        assert {p["name"]: (
+            p.get("direction") or p.get("mode"), p.get("width"))
+            for p in l9[key]} == expected

@@ -253,3 +253,72 @@ def test_same_sentence_host_install_commands_remain_nonfunctional(tmp_path):
     content = "\n".join(row.get("content", "") for row in actual["frs_sections"])
     assert output in content
     assert instruction not in content, actual["frs_sections"]
+
+
+@pytest.mark.parametrize("declaration", [
+    "Implement a module named probe_core.",
+    "Module Name: probe_core",
+    "The module **`probe_core`** has the following hardware interfaces defined.",
+])
+def test_unheaded_explicit_design_retains_complete_functional_requirements(tmp_path, declaration):
+    requirements = ("The output must remain asserted until the input is acknowledged.\n"
+                    + "Every accepted transaction must be returned in arrival order.\n" * 80
+                    + "The final transaction must also be returned.\n")
+    text = declaration + "\n- output alpha (5 bits)\n\n" + requirements
+    R.gen_l2_frs(tmp_path, {"design.md": text})
+    actual = json.loads((tmp_path / "phase1/generated_docs/L2_FRS.json").read_text())
+    assert [row["content"] for row in actual["frs_sections"]] == [text.strip()]
+    assert actual["frs_sections"][0]["evidence"] == "input/docs/design.md"
+    assert actual["no_frs_sections_in_input"] is False
+
+
+@pytest.mark.parametrize("fenced,context", [(False, ""), (True, ""),
+    (False, "module parent_unit(input ParentBus, output ParentResult);\nendmodule\n")])
+def test_unheaded_source_header_preserves_requirements_without_inventing_an_owner(tmp_path, fenced, context):
+    text = (context + "The result must remain asserted until acknowledged.\n"
+            "module packet_stage(input DataIn, output [11:0] DataOut);\n")
+    if fenced:
+        text = "The result must remain asserted until acknowledged.\n```verilog\n" + text + "```\n"
+    R.gen_l2_frs(tmp_path, {"design.md": text})
+    actual = json.loads((tmp_path / "phase1/generated_docs/L2_FRS.json").read_text())
+    assert [row["content"] for row in actual["frs_sections"]] == [text.strip()]
+    assert actual["frs_sections"][0]["evidence"] == "input/docs/design.md"
+
+
+@pytest.mark.parametrize("filename,text", [
+    ("README.md", "A collection of HDL utilities. Install the host compiler before use.\n"),
+    ("setup.md", "Run pip install tools.\nInstall the host compiler.\n"),
+    ("Makefile", "Implement a module named probe_core.\nRun pip install tools.\n"),
+    ("README.md", "This guide explains how to implement a module named probe_core.\n"),
+    ("setup.md", "Module Name: probe_core\nRun pip install tools.\nInstall the host compiler.\n"),
+    ("design.md", "Do not implement a module named probe_core.\nThe old output is unused.\n"),
+    ("design.md", "Module Name: first_core\nModule Name: second_core\nUnknown ownership.\n"),
+    ("README.md", "For example:\nmodule sample_unit(input DataIn, output DataOut);\nendmodule\n"),
+])
+def test_unheaded_fallback_does_not_promote_setup_or_ambiguous_documentation(tmp_path, filename, text):
+    R.gen_l2_frs(tmp_path, {filename: text})
+    actual = json.loads((tmp_path / "phase1/generated_docs/L2_FRS.json").read_text())
+    assert actual["frs_sections"] == []
+    assert actual["no_frs_sections_in_input"] is True
+
+
+def test_unheaded_fallback_does_not_duplicate_existing_headed_requirements(tmp_path):
+    text = ("Module Name: probe_core\n\n## Output behavior\n"
+            "The output must remain stable until acknowledged.\n")
+    R.gen_l2_frs(tmp_path, {"design.md": text})
+    actual = json.loads((tmp_path / "phase1/generated_docs/L2_FRS.json").read_text())
+    assert [(row["title"], row["content"]) for row in actual["frs_sections"]] == [
+        ("Output behavior", "The output must remain stable until acknowledged.")]
+
+
+def test_checked_in_functional_preamble_still_uses_existing_headed_producer(tmp_path):
+    from programs.tests._hostpaths import require_repo
+    source = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+                          "tests", "fixtures", "phase1_local", "neutral_functional_preamble",
+                          "functional_preamble.md")
+    R.gen_l2_frs(tmp_path, {source.name: source.read_text()})
+    actual = json.loads((tmp_path / "phase1/generated_docs/L2_FRS.json").read_text())
+    assert [row["title"] for row in actual["frs_sections"]] == [
+        "Functional Overview", "Block handling"]
+    assert all(row["evidence"] == f"input/docs/{source.name}"
+               for row in actual["frs_sections"])

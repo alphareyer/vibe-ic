@@ -22085,6 +22085,7 @@ def gen_l1_datasheet(project: Path,
                      extracted: Dict[str, str]) -> LDocResult:
     """L1: pin table + electrical specs + package."""
     ic_name = _ic_name_from_docs(extracted, project)
+    selected_target = _extract_top_module_from_docs(extracted)
     pins: List[Dict[str, Any]] = []
     e_specs: List[Dict[str, Any]] = []
     evidence: Dict[str, List[Dict[str, str]]] = {}
@@ -22714,7 +22715,11 @@ def gen_l1_datasheet(project: Path,
         # v1.6.248 — for #109. Verilog port-decl / port-bind blocks
         # in markdown ```verilog``` fences or RST `.. code-block::
         # verilog` directives → L1.pin_table.
-        for vbody in _extract_verilog_blocks(text or ""):
+        # Scope code harvests to the already selected design. Unrelated
+        # example/parent modules cannot preempt its later canonical header.
+        code_text = (_ppx.selected_module_code(text or "", selected_target)
+                     if selected_target else text)
+        for vbody in _extract_verilog_blocks(code_text or ""):
             vbody = _strip_hdl_comments(vbody)
             for m in _RE_VERILOG_PORT_DECL.finditer(vbody):
                 name = m.group("name")
@@ -22832,7 +22837,9 @@ def gen_l1_datasheet(project: Path,
                 fname=fname,
                 width=entry.get("width"),
                 description=entry.get("description"),
-                extraction_strategy="markdown_bullet_inline_direction",
+                # Declare the row's shape through the existing provenance
+                # contract, so L9 does not require a conventional pin name.
+                extraction_strategy="markdown_inline_direction_port_bullet",
             )
             if len(ev) < 24:
                 ev.append({
@@ -22858,7 +22865,7 @@ def gen_l1_datasheet(project: Path,
         # spec only requires blank-line + 4-sp indent. Verilog token
         # gate on body remains; shell-log false positives still filtered.
         for vbody in _v1_6_406_extract_markdown_indented_verilog_blocks(
-                text or ""):
+                code_text or ""):
             vbody = _strip_hdl_comments(vbody)
             for m in _RE_VERILOG_PORT_DECL.finditer(vbody):
                 name = m.group("name")
@@ -23397,7 +23404,7 @@ def gen_l1_datasheet(project: Path,
         if not isinstance(_text, str) or not _text:
             continue
         try:
-            _cb = _ppx.extract_code_block_ports(_text)
+            _cb = _ppx.extract_code_block_ports(_text, target=selected_target)
         except Exception:
             continue
         for _entry in _cb or []:
@@ -24234,6 +24241,37 @@ def gen_l2_frs(project: Path,
         # `rst_underline` preserved for .rst / unknown).
         multi_shape_hits = _v1_6_334_extract_multi_shape_section_headers(
             text, source_path=fname, include_md_h1=True)
+        if not multi_shape_hits and _is_port_source_allowed(fname):
+            # A named design request or an explicit interface subject is a
+            # specification even without section headings. Preserve its whole
+            # requirement body here; this is prose carriage, not a synthesized
+            # behavioral contract or proof of structured extraction.
+            owner, explicit = _issue3234_explicit_parameter_owner({fname: text})
+            subjects = _doc_comportable_module_subjects({fname: text})
+            # A genuine source header is explicit structural authority too.
+            # FRS preserves its requirements without choosing between modules;
+            # typed interface selection remains the port producer's job.
+            header_owner = next((m.group("name") for m in
+                _RE_DOC_TOP_MODULE_REAL_DECL.finditer(text)
+                if _issue3234_position_is_current(text, m.start())
+                and _ppx.selected_module_header(text, m.group("name"))), None)
+            declared = ((bool(owner) if explicit else len(subjects) == 1)
+                        or header_owner is not None)
+            body = _v1_6_357_slice_section_body(text, 0, None, max_chars=None)
+            setup_body = _RE_DOC_TOP_MODULE_NAME_LABEL.sub("", body)
+            setup_body = _RE_DOC_TOP_MODULE_TOP_IS_NAMED.sub("", setup_body)
+            if (declared and body
+                    and not _is_install_verb_v1_6_315(Path(fname).stem)
+                    and not _l2_is_host_setup_section(
+                        "Setup", setup_body.strip(" \t\r\n.,;:"))):
+                sections.append({
+                    "section": "unheaded",
+                    "title": "Functional requirements",
+                    "content": body,
+                    "evidence": f"input/docs/{fname}",
+                })
+                ev.append({"literal": owner or header_owner or next(iter(subjects)),
+                           "label": "unheaded design owner"})
         for i, hit in enumerate(multi_shape_hits):
             sec_id = hit["section_id"]
             title = hit["title"]
@@ -51871,7 +51909,7 @@ def gen_l9_integration_spec(project: Path,
                 # v1.6.255 — reject `power`/`ground`/`bidir`/empty etc.
                 continue
             entry_l9 = {
-                "name": _canon_port_name(raw),
+                "name": p.get("rtl_name") or _canon_port_name(raw),
                 "mode": mode,
                 "direction": mode,
                 "io": p.get("io_standard", "see datasheet"),

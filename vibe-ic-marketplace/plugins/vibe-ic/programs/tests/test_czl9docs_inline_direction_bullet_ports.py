@@ -19,8 +19,11 @@ documentation-prose shapes that begin with the same word must NOT.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+
+import pytest
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
@@ -94,3 +97,78 @@ def test_documentation_prose_beginning_with_the_same_word_is_not_a_port():
 
 def test_a_stop_word_identifier_never_becomes_a_port():
     assert _F("- input ports\n- output signals\n- inout width\n") == []
+
+
+def _produce_interface(tmp_path, text):
+    docs = tmp_path / "input" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "design.md").write_text(text)
+    R.gen_l1_datasheet(tmp_path, {"design.md": text})
+    R.gen_l9_integration_spec(tmp_path, {"design.md": text}, {})
+    generated = tmp_path / "phase1" / "generated_docs"
+    return tuple(json.loads((generated / name).read_text()) for name in
+                 ("L1_DATASHEET.json", "L9_INTEGRATION_SPEC.json"))
+
+
+@pytest.mark.parametrize("name", ["alpha", "q", "X3"])
+def test_explicit_bullet_provenance_reaches_the_real_l9_producer(tmp_path, name):
+    text = f"Implement a module named probe_core.\n- output {name} (5 bits)\n"
+    l1, l9 = _produce_interface(tmp_path, text)
+    assert [(p["name"], p["mode"], p.get("width")) for p in l1["pin_table"]] == [
+        (name, "output", 5)]
+    for key in ("ports", "top_ports", "top_module_pins"):
+        assert [(p["name"], p["direction"], p.get("width")) for p in l9[key]] == [
+            (name.lower(), "output", 5)], l9[key]
+        assert l9[key][0]["evidence"] == "input/docs/design.md"
+
+
+def test_the_real_producer_does_not_invent_an_unstated_bullet_width(tmp_path):
+    l1, l9 = _produce_interface(
+        tmp_path, "Implement a module named probe_core.\n- output alpha\n")
+    assert [p["name"] for p in l1["pin_table"]] == ["alpha"]
+    for key in ("ports", "top_ports", "top_module_pins"):
+        assert [(p["name"], p.get("width")) for p in l9[key]] == [("alpha", None)]
+
+
+def test_non_port_bullets_do_not_acquire_l9_provenance(tmp_path):
+    text = ("Implement a module named probe_core.\n"
+            "- Input validation is performed by the host.\n"
+            "- Output format follows the tool convention.\n"
+            "- output the result to the console when done\n")
+    l1, l9 = _produce_interface(tmp_path, text)
+    assert l1["pin_table"] == []
+    assert all(l9[key] == [] for key in ("ports", "top_ports", "top_module_pins"))
+
+
+@pytest.mark.parametrize("width,bullet_width", [("8", " (4 bits)"), ("[SPAN-1:0]", "")])
+def test_bullet_promotion_preserves_the_richer_table_width(tmp_path, width, bullet_width):
+    text = ("Module Name: probe_core\n"
+            "| Signal | Width | Direction | Description |\n"
+            "|---|---|---|---|\n"
+            f"| alpha | {width} | output | Declared data result |\n"
+            f"\n- output alpha{bullet_width}\n")
+    l1, l9 = _produce_interface(tmp_path, text)
+    pin = next(p for p in l1["pin_table"] if p["name"] == "alpha")
+    for key in ("ports", "top_ports", "top_module_pins"):
+        port = next(p for p in l9[key] if p["name"] == "alpha")
+        for field in ("width", "msb", "lsb", "width_symbolic"):
+            assert port.get(field) == pin.get(field)
+    if width == "8":
+        assert pin["width"] == 8
+    else:
+        assert pin.get("width_symbolic") == "SPAN-1:0"
+
+
+def test_existing_repo_interface_still_reaches_the_actual_producer(tmp_path):
+    from programs.tests._hostpaths import require_repo
+    source = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+                          "tests", "fixtures", "phase1_local", "neutral_mmio_transport",
+                          "design.md")
+    l1, l9 = _produce_interface(tmp_path, source.read_text())
+    assert {p["name"] for p in l1["pin_table"]} == {
+        "clk", "reset_n", "cs", "we", "address", "write_data", "read_data", "error"}
+    for key in ("ports", "top_ports", "top_module_pins"):
+        ports = {p["name"]: p for p in l9[key]}
+        assert ports["address"]["width"] == 8
+        assert ports["read_data"]["direction"] == "output"
+        assert ports["read_data"]["width"] == 32

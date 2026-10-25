@@ -527,7 +527,7 @@ def _seed_structural_ports(project: Path, out_dir: Path) -> int:
         prompt = "\n".join(srcs[k] for k in sorted(srcs))
         if not prompt.strip():
             return 0
-        facts = _ppx.extract(prompt)
+        facts = _ppx.extract(prompt, target=_extract_top_module_from_docs(srcs))
         ports = facts.get("ports") or []
         if not ports:
             return 0

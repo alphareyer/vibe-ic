@@ -206,3 +206,15 @@ def test_the_prompt_doors_source_map_names_its_document(tmp_path):
     assert list(srcs) == ["phase1_prompt.md"], srcs
     assert srcs["phase1_prompt.md"] == _PORTFUL
     assert PROMPT._prompt_text_for(proj) == _PORTFUL
+
+
+def test_the_prompt_seed_consumes_only_the_selected_header(tmp_path):
+    text = ("Implement a module named PacketStage.\n"
+            "module parent_stage(input OtherBus, output ParentResult); endmodule\n"
+            "module PacketStage(input CLK, input [11:0] DataIn, output [11:0] DataOut);\n")
+    proj, out = _stub_project(tmp_path, text)
+    assert PROMPT._seed_structural_ports(proj, out) == 3
+    l9 = json.loads((out / "L9_INTEGRATION_SPEC.json").read_text())
+    for key in ("ports", "top_ports", "top_module_pins"):
+        assert [(p["name"], p["direction"]) for p in l9[key]] == [
+            ("CLK", "input"), ("DataIn", "input"), ("DataOut", "output")]

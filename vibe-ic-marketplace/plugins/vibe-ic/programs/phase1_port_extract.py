@@ -22,7 +22,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # vibe-ic#712 — the ONE negation vocabulary. A width cell that DENIES a range
@@ -36,8 +36,9 @@ from _hdl_code_text import strip_hdl_comments_and_strings  # noqa: E402
 from _specrtl_common import (  # noqa: E402
     parse_verilog_ports, _parse_md_table_ports, Port, strip_comments,
     _strip_subprograms, _PORT_DECL as _PORT_DECL_SPAN, _parse_module_params,
-    WIDTH_UNKNOWN,
+    _module_port_region, WIDTH_UNKNOWN,
 )
+from rtl_interface_recover import recover_interface_from_text  # noqa: E402
 
 # `parameter NAME = VALUE` / `localparam NAME = VALUE` (Verilog form).
 _PARAM_DECL = re.compile(
@@ -388,7 +389,85 @@ def _stated_width(cell: str) -> int:
     return WIDTH_UNKNOWN
 
 
-def extract_code_block_ports(text: str) -> List[Dict[str, Any]]:
+def selected_module_header(text: str, target: str) -> Optional[str]:
+    """The selected module's source header, including a header-only template.
+
+    The caller supplies the implementation target already resolved from design
+    intent. This reader never chooses a target from module frequency or order.
+    Comments and quoted prose cannot declare a module; offsets remain those of
+    the original input so returned evidence is an exact source substring.
+    """
+    if not target or not re.fullmatch(r"[A-Za-z_]\w*", target):
+        return None
+    scanned = strip_hdl_comments_and_strings(text)
+    region = _module_port_region(scanned, prefer=target)
+    if region is None or not re.match(
+            rf"module\s+{re.escape(target)}\b", region):
+        return None
+    start = scanned.find(region)
+    end = start + len(region)
+    if end < len(scanned) and scanned[end] == ")":
+        end += 1
+        while end < len(scanned) and scanned[end].isspace():
+            end += 1
+        if end < len(scanned) and scanned[end] == ";":
+            end += 1
+    return text[start:end]
+
+
+def _declares_module(text: str) -> bool:
+    return bool(re.search(r"\bmodule\s+[A-Za-z_]\w*\s*[#(;]",
+                          strip_hdl_comments_and_strings(text)))
+
+
+def selected_module_code(text: str, target: str) -> Optional[str]:
+    """The selected source module, bounded before any following module.
+
+    Non-ANSI headers need their own body port declarations and parameters.
+    A template with no endmodule must not borrow those from another module.
+    With no module declaration at all, preserve the existing strict fenced or
+    indented port-fragment readers. An unrelated actual module is not a fragment.
+    """
+    header = selected_module_header(text, target)
+    if header is None:
+        return None if _declares_module(text) else text
+    scanned = strip_hdl_comments_and_strings(text)
+    masked_header = strip_hdl_comments_and_strings(header)
+    start = scanned.find(masked_header)
+    after_header = start + len(header)
+    following = re.search(r"\bmodule\s+[A-Za-z_]\w*\s*[#(;]",
+                          scanned[after_header:])
+    end = (after_header + following.start() if following else len(text))
+    terminator = re.search(r"\bendmodule\b", scanned[after_header:end])
+    if terminator:
+        end = after_header + terminator.end()
+    return text[start:end]
+
+
+def _selected_header_port_rows(text: str, target: str) -> Optional[List[Dict[str, Any]]]:
+    if selected_module_header(text, target) is None:
+        return None
+    code = selected_module_code(text, target)
+    if code is None:
+        return None
+    clean = _strip_subprograms(strip_hdl_comments_and_strings(code))
+    declarations = list(_PORT_DECL_SPAN.finditer(clean))
+    out = []
+    for port in recover_interface_from_text(clean, target):
+        name = port["name"]
+        declaration = next((m for m in declarations if name in
+                            [n.strip() for n in m.group(3).split(",")]), None)
+        if declaration is None:
+            raise ValueError(f"SELECTED_MODULE_PORT_EVIDENCE_MISSING: {target}.{name}")
+        line = _source_line(code, declaration.start())
+        out.append({**port, "rtl_name": name, "width_cell": "",
+                    "source": "verilog_code_region", "source_line": line,
+                    "description": line,
+                    "extraction_strategy": CODE_REGION_PORT_STRATEGY})
+    return out
+
+
+def extract_code_block_ports(text: str, target: Optional[str] = None) -> List[Dict[str, Any]]:
     """Every port a document DECLARES in a Verilog/SystemVerilog code region or
     in a markdown signal table (or, see `extract_structured_spec_ports`, under
     a structured spec's `ports:` key), each carrying the source line it was
@@ -408,7 +487,16 @@ def extract_code_block_ports(text: str) -> List[Dict[str, Any]]:
     extraction_strategy}`; `width` is the integer width
     `parse_verilog_ports` derives (`_specrtl_common.WIDTH_UNKNOWN` when a
     symbolic bound cannot be resolved), never a made-up 1.
+
+    When ``target`` is supplied, its declared header is authoritative over
+    unrelated example modules. Missing targets never fall back to another code
+    module. Tables/structured prose remain supported when no target header is
+    present. Omitting ``target`` retains the existing union reader.
     """
+    if target:
+        selected = _selected_header_port_rows(text, target)
+        if selected is not None:
+            return selected
     out: List[Dict[str, Any]] = []
     seen: set = set()
     # Tables first: they are precise on the whole text and are the shape a spec
@@ -428,7 +516,8 @@ def extract_code_block_ports(text: str) -> List[Dict[str, Any]]:
                     "source_line": ctx.get("row", ""),
                     "description": ctx.get("description") or None,
                     "extraction_strategy": SIGNAL_TABLE_PORT_STRATEGY})
-    for a, b in _verilog_region_spans(text):
+    for a, b in (_verilog_region_spans(text)
+                 if not target or not _declares_module(text) else []):
         raw = text[a:b]
         # Both blank in place (comment / subprogram characters become spaces and
         # newlines), so an offset in `clean` is the SAME offset in `raw` and the
@@ -465,7 +554,7 @@ def extract_code_block_ports(text: str) -> List[Dict[str, Any]]:
     return out
 
 
-def extract_ports(prompt: str) -> List[Dict]:
+def extract_ports(prompt: str, target: Optional[str] = None) -> List[Dict]:
     """Union of markdown-interface-table ports (precise on the whole text) and
     inline-Verilog-declared ports — the latter parsed ONLY from real Verilog code
     regions so a prose sentence can never inject a phantom port."""
@@ -477,7 +566,7 @@ def extract_ports(prompt: str) -> List[Dict]:
     # trailing `// comment`, which is most of them, and this one read whole
     # documents as Verilog. Same file: same answer.
     table_inline = [{"name": e["name"], "dir": e["dir"], "width": e["width"]}
-                    for e in extract_code_block_ports(prompt)]
+                    for e in extract_code_block_ports(prompt, target=target)]
     if table_inline:
         return table_inline
     # only fall back to the structured-prose signal-definition list when no table
@@ -1369,11 +1458,11 @@ def emit_interface_prose(content: Dict[str, Any],
         content["no_interface_prose_in_input"] = True
 
 
-def extract(prompt: str) -> Dict:
+def extract(prompt: str, target: Optional[str] = None) -> Dict:
     """The structural fact bundle from a prompt (ports/params/reset/enums → L8R,
     regmap → L4)."""
     return {
-        "ports": extract_ports(prompt),
+        "ports": extract_ports(prompt, target=target),
         "parameters": extract_params(prompt),
         "reset": extract_reset(prompt),
         "regmap": extract_regmap(prompt),
