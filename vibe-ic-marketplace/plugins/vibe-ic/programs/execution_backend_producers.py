@@ -1813,7 +1813,9 @@ def produce_signoff(project, params):
             import latchup_esd_spacing_check as geometry
             perc_inputs['lef_context'] = geometry.current_lef_context(
                 project, current['folder'], current['views']['def'])
-        if not R._emit_perc_equivalent(project, top, pdk, container, notes, **perc_inputs):
+        if not R._emit_perc_equivalent(
+                project, top, pdk, container, notes,
+                image=params['image_id'], **perc_inputs):
             raise em.Refusal('BACKEND_PERC_UNMEASURED', sid)
     elif sid == '29':
         sim = project / 'phase3/stage3/sim_postlayout'

@@ -23,6 +23,7 @@ from _atomic_artefact import write_json
 from flow109_admission import AdmissionRefusal, require_launch_admission
 import execution_backend_gates as backend_gates
 import execution_backend_producers as backend_producers
+import phase3_one_shot_runner as phase3_runner
 
 SCHEMA = "vibeic.flow109.final-perc.v1"
 INPUT = "input/flow109/D66.json"
@@ -241,6 +242,7 @@ def _expected_extracted(project):
     if not root.is_dir():
         return None
     candidates = (sorted(root.glob("*.spice")) + sorted(root.glob("*.cir"))
+                  + sorted(root.glob("*.sp"))
                   + sorted(root.glob("*_pex.v")))
     return candidates[0].resolve() if candidates else None
 
@@ -362,6 +364,51 @@ def _manual_and_limits(summary):
     return manual, failed, incomplete, unsupported
 
 
+def _native_cvc_current(project, prepared, summary):
+    rows = [row for row in summary.get("categories", [])
+            if isinstance(row, dict)
+            and row.get("category") == "Native CVC electrical rules"]
+    if len(rows) != 1:
+        raise AdmissionRefusal("D66_NATIVE_CVC_EVIDENCE_ABSENT",
+                               "exactly one native CVC category required")
+    row = rows[0]
+    try:
+        receipt_path = _bound(project, row.get("producer_receipt"),
+                              "native CVC producer receipt")
+        report_path = _bound(project, row.get("evidence"), "native CVC report")
+    except AdmissionRefusal as exc:
+        raise AdmissionRefusal("D66_NATIVE_CVC_EVIDENCE_MISMATCH", str(exc)) from exc
+    receipt = _read(receipt_path, "D66_NATIVE_CVC_EVIDENCE_MISMATCH")
+    backend = prepared["manifest"]["backend"]
+    if (receipt.get("schema") != "vibeic/native-cvc-result/1"
+            or receipt.get("producer") !=
+            "phase3_one_shot_runner._native_cvc_category"
+            or receipt.get("tool") != "cvc_rv"
+            or receipt.get("image") != backend["image_id"]
+            or receipt.get("top") != backend["top"]):
+        raise AdmissionRefusal("D66_NATIVE_CVC_PRODUCER_INVALID",
+                               "typed current producer identity required")
+    expected_inputs = {
+        "extracted_netlist": prepared["subjects"]["extracted_netlist"],
+        "adopted_netlist": prepared["subjects"]["adopted_netlist"],
+    }
+    if receipt.get("inputs") != expected_inputs or receipt.get("report") != row.get("evidence"):
+        raise AdmissionRefusal("D66_NATIVE_CVC_EVIDENCE_MISMATCH",
+                               "current final netlists/report binding differs")
+    try:
+        _bound(project, receipt.get("pdk_sources"), "native CVC PDK sources")
+    except AdmissionRefusal as exc:
+        raise AdmissionRefusal("D66_NATIVE_CVC_EVIDENCE_MISMATCH", str(exc)) from exc
+    parsed = phase3_runner._parse_native_cvc_report(
+        report_path.read_text(errors="replace"))
+    visible = {key: row.get(key) for key in
+               ("result", "completed", "instances", "nets", "devices", "counts", "note")}
+    if receipt.get("parsed") != parsed or visible != parsed:
+        raise AdmissionRefusal("D66_NATIVE_CVC_EVIDENCE_MISMATCH",
+                               "report contents, receipt, and category differ")
+    return parsed
+
+
 def _output_records(project):
     return {name: _record(project, Path(project) / name) for name in OUTPUTS}
 
@@ -440,6 +487,7 @@ def execute(project, context):
             gate = backend_gates.evaluate(project, canonical)
             _assert_current(prepared)
             summary = _read(project / OUTPUTS[0], "D66_PERC_RESULT_INVALID")
+            _native_cvc_current(project, prepared, summary)
             status, reason, automated, manual, unsupported = _owner_status(
                 producer, gate, summary)
             outputs = _output_records(project)
@@ -484,6 +532,7 @@ def validate_final_perc(project, receipt_ref):
             or record.get("outputs") != _output_records(project)):
         raise AdmissionRefusal("D66_COMPONENT_SUBJECT_CHANGED", "final subject/output binding")
     summary = _read(project / OUTPUTS[0], "D66_PERC_RESULT_INVALID")
+    _native_cvc_current(project, prepared, summary)
     status, reason, automated, manual, unsupported = _owner_status(
         record.get("producer_result") or {}, record.get("consumer_result") or {}, summary)
     if (record.get("perc_summary") != summary or record.get("component_status") != status

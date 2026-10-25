@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -112,7 +113,9 @@ def _canonical_d65(project, geometry_def, *, damage=None):
 
 
 def _case(project, monkeypatch, *, producer="PASS", gate="PASS",
-          automated_fail=False, omit_manual=None, d65_kind="wrapper", d65_damage=None):
+          automated_fail=False, omit_manual=None, d65_kind="wrapper", d65_damage=None,
+          native_cvc=True, native_cvc_fail=False, cvc_damage=None,
+          real_consumer=False):
     import flow109_final_perc as perc
 
     top = "tiny_perc"
@@ -142,14 +145,54 @@ def _case(project, monkeypatch, *, producer="PASS", gate="PASS",
         "backend": {"image_id": perc.EDA_IMAGE, "pdk_root": "/foss/pdks",
                     "pdk_name": "gf180mcuD", "top": top}})
     summary = _summary(automated_fail=automated_fail, omit_manual=omit_manual)
+    if native_cvc:
+        count = 2 if native_cvc_fail else 0
+        report_text = ("CVC: 2(2) instances, 4(4) nets, 2(2) devices.\n"
+                       f"CVC: HI-Z Inputs: {count}\nCVC: Total: {count}\n"
+                       "CVC: End: now\n")
+        report = _put(project, "reports/phase3/cvc_native/report.rpt", report_text)
+        pdk_sources = _put(project, "reports/phase3/cvc_native/pdk-sources.sha256",
+                           "a" * 64 + "  /pdk/cvc/cvcrc\n")
+        parsed = perc.phase3_runner._parse_native_cvc_report(report_text)
+        receipt_payload = {
+            "schema": "vibeic/native-cvc-result/1",
+            "producer": "phase3_one_shot_runner._native_cvc_category",
+            "tool": "cvc_rv", "image": perc.EDA_IMAGE, "top": top,
+            "native_rc": 0,
+            "inputs": {"extracted_netlist": subjects["extracted_netlist"],
+                       "adopted_netlist": subjects["adopted_netlist"]},
+            "pdk_sources": pdk_sources, "report": report, "parsed": parsed,
+        }
+        if cvc_damage == "forged":
+            receipt_payload["producer"] = "tests.synthetic_producer"
+        elif cvc_damage == "forged_input":
+            receipt_payload["inputs"]["adopted_netlist"] = {
+                **subjects["adopted_netlist"], "sha256": "f" * 64}
+        receipt = _put(project, "reports/phase3/cvc_native/result.json", receipt_payload)
+        summary["categories"].append({
+            "category": "Native CVC electrical rules", "status": "AUTOMATED",
+            "tool": "cvc_rv + PDK-declared libs.tech/librelane/cvc",
+            **parsed, "native_rc": 0, "evidence": report,
+            "producer_receipt": receipt,
+        })
+        if native_cvc_fail:
+            summary["verdict"] = "PERC_EQUIV_FAIL"
+            summary["automated_failed"].append("Native CVC electrical rules")
     calls = []
 
     def fake_produce(_project, params):
         calls.append(params)
         _put(project, perc.OUTPUTS[0], summary)
-        _put(project, perc.OUTPUTS[1], "PERC equivalent control\n")
-        _put(project, perc.OUTPUTS[2], "# Manual review remains open\n")
+        _put(project, perc.OUTPUTS[1],
+             f"OVERALL VERDICT: {summary['verdict']}\n" +
+             "\n".join(row["category"] for row in summary["categories"]))
+        _put(project, perc.OUTPUTS[2],
+             f"**Overall verdict:** `{summary['verdict']}`\n" +
+             "\n".join(row["category"] for row in summary["categories"]))
         _put(project, perc.OUTPUTS[3], {"status": gate})
+        if cvc_damage == "mismatched":
+            (project / "reports/phase3/cvc_native/report.rpt").write_text(
+                report_text.replace(f"Total: {count}", "Total: 9"))
         return {"verdict": producer, "canonical_receipts": [{
             "schema": "vibeic/backend-producer-receipt/1", "step_id": "28",
             "verdict": producer}]}
@@ -157,8 +200,17 @@ def _case(project, monkeypatch, *, producer="PASS", gate="PASS",
     monkeypatch.setattr(perc, "require_launch_admission", lambda *args, **kwargs: None)
     monkeypatch.setattr(perc, "_d65_geometry_current", lambda *args, **kwargs: None)
     monkeypatch.setattr(perc.backend_producers, "produce", fake_produce)
-    monkeypatch.setattr(perc.backend_gates, "evaluate",
-                        lambda project, row: {"status": gate, "step": row})
+    if real_consumer:
+        import perc_signoff_check
+
+        def consume(project, row):
+            audit = perc_signoff_check.audit(project)
+            return {"status": "PASS" if audit["rc"] == 0 else "FAIL",
+                    "step": row, "audit": audit}
+        monkeypatch.setattr(perc.backend_gates, "evaluate", consume)
+    else:
+        monkeypatch.setattr(perc.backend_gates, "evaluate",
+                            lambda project, row: {"status": gate, "step": row})
     context = {"requested_step": "D66", "native_step_id": "flow109.D66",
                "context_sha256": "b" * 64}
     return perc, context, subjects, calls, d65_outputs
@@ -295,3 +347,100 @@ def test_missing_required_manual_disclosure_cannot_become_pass(tmp_path, monkeyp
     assert result["component_status"] == "NOT_MEASURED"
     assert result["reason"] == "D66_REQUIRED_REVIEW_CATEGORY_ABSENT"
     assert result["flow109_acceptance"] == result["whole_ic_acceptance"] == "NOT_MEASURED"
+
+
+def test_native_cvc_report_is_graded_from_contents_not_process_rc():
+    import phase3_one_shot_runner as runner
+
+    population = "CVC: 2(2) instances, 4(4) nets, 2(2) devices.\n"
+    positive = population + "CVC: HI-Z Inputs: 0\nCVC: Total: 0\nCVC: End: now\n"
+    negative = population + "CVC: HI-Z Inputs: 2\nCVC: Total: 2\nCVC: End: now\n"
+    assert runner._parse_native_cvc_report(positive)["result"] == "PASS"
+    parsed = runner._parse_native_cvc_report(negative)
+    assert parsed["result"] == "FAIL"
+    assert parsed["counts"]["HI-Z Inputs"] == parsed["counts"]["Total"] == 2
+    assert runner._parse_native_cvc_report(positive.removesuffix("CVC: End: now\n"))[
+        "result"] == "INCOMPLETE"
+    assert runner._parse_native_cvc_report(
+        "CVC: Total: 0\nCVC: End: now\n")["result"] == "INCOMPLETE"
+
+
+def test_native_cvc_producer_publishes_bound_report_and_receipt(tmp_path, monkeypatch):
+    import librelane_contract
+    import phase3_one_shot_runner as runner
+
+    top = "neutral_top"
+    extracted = tmp_path / "phase3/stage3/extracted/neutral_top.sp"
+    adopted = tmp_path / f"phase3/stage3/pnr/{top}_pnr.v"
+    extracted.parent.mkdir(parents=True)
+    adopted.parent.mkdir(parents=True)
+    extracted.write_text(".subckt neutral_top VDD VSS\n.ends\n")
+    adopted.write_text("module neutral_top; endmodule\n")
+    monkeypatch.setattr(runner, "_pdk_dir_of", lambda _pdk: "/pdk/current")
+    monkeypatch.setattr(runner, "_pdk_std_cell_library", lambda _pdk: "cells")
+    monkeypatch.setattr(runner, "_design_supply_nets",
+                        lambda _pdk: ({"VDD"}, {"VSS"}))
+    monkeypatch.setattr(librelane_contract, "native_tool_command",
+                        lambda _image, command: ("none", command))
+
+    def fake_run(argv, **_kwargs):
+        assert "--cpus" in argv and argv[argv.index("--cpus") + 1] == "4"
+        out = tmp_path / "reports/phase3/cvc_native"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.rpt").write_text(
+            "CVC: 2(2) instances, 4(4) nets, 2(2) devices.\n"
+            "CVC: HI-Z Inputs: 0\nCVC: Total: 0\nCVC: End: now\n")
+        (out / "pdk-sources.sha256").write_text("a" * 64 + "  /pdk/cvcrc\n")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(librelane_contract, "run_container", fake_run)
+    category = runner._native_cvc_category(
+        tmp_path, top, SimpleNamespace(), "registry/image@sha256:" + "1" * 64)
+    assert category["result"] == "PASS"
+    assert category["counts"]["Total"] == 0
+    receipt_path = tmp_path / category["producer_receipt"]["path"]
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["producer"] == "phase3_one_shot_runner._native_cvc_category"
+    assert receipt["report"] == category["evidence"]
+    assert receipt["inputs"]["extracted_netlist"]["sha256"] == _sha(extracted)
+    assert receipt["inputs"]["adopted_netlist"]["sha256"] == _sha(adopted)
+
+
+def test_d66_refuses_when_existing_owner_did_not_publish_native_cvc(tmp_path, monkeypatch):
+    perc, context, _subjects, calls, _d65_outputs = _case(
+        tmp_path, monkeypatch, native_cvc=False)
+    result = perc.execute(tmp_path, context)
+    assert calls
+    assert result["component_status"] == "NOT_MEASURED"
+    assert result["reason"] == "D66_NATIVE_CVC_EVIDENCE_ABSENT"
+
+
+@pytest.mark.parametrize("damage,reason", [
+    ("forged", "D66_NATIVE_CVC_PRODUCER_INVALID"),
+    ("forged_input", "D66_NATIVE_CVC_EVIDENCE_MISMATCH"),
+    ("mismatched", "D66_NATIVE_CVC_EVIDENCE_MISMATCH"),
+])
+def test_d66_refuses_forged_or_mismatched_native_cvc(
+        tmp_path, monkeypatch, damage, reason):
+    perc, context, _subjects, _calls, _outputs = _case(
+        tmp_path, monkeypatch, cvc_damage=damage)
+    result = perc.execute(tmp_path, context)
+    assert result["component_status"] == "NOT_MEASURED"
+    assert result["reason"] == reason
+
+
+@pytest.mark.parametrize("native_fail,expected_rc,expected_status", [
+    (False, 0, "NOT_MEASURED"),
+    (True, 1, "FAIL"),
+])
+def test_native_cvc_reaches_actual_perc_consumer(
+        tmp_path, monkeypatch, native_fail, expected_rc, expected_status):
+    perc, context, _subjects, _calls, _outputs = _case(
+        tmp_path, monkeypatch, native_cvc_fail=native_fail, real_consumer=True)
+    result = perc.execute(tmp_path, context)
+    assert result["consumer_result"]["audit"]["rc"] == expected_rc
+    assert result["component_status"] == expected_status
+    if native_fail:
+        assert result["reason"] == "D66_AUTOMATED_PERC_FAILED"
+        assert result["consumer_result"]["audit"]["automated_failed"] == [
+            "Native CVC electrical rules"]
