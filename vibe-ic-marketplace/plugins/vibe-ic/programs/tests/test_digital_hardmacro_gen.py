@@ -264,6 +264,44 @@ def test_lef_tcl_exposes_upstreams_two_other_knobs():
     assert "-hide" in pin and "-pinonly" in pin   # MAGIC_WRITE_LEF_PINONLY
 
 
+def test_magic_abstract_frame_is_bound_to_complete_actual_gds_box():
+    lef = """VERSION 5.7 ;
+MACRO macro_a
+  CLASS BLOCK ;
+  FOREIGN macro_a ;
+  ORIGIN 0.000 0.000 ;
+  SIZE 100.000 BY 50.000 ;
+  PIN clk
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER met2 ;
+      RECT -1.000 -2.000 101.000 52.000 ;
+    END
+  END clk
+END macro_a
+"""
+    bbox = (-3.25, -4.5, 104.75, 55.5)
+    out, report = mod.align_lef_frame_to_gds(lef, "macro_a", bbox)
+
+    import digital_hardmacro_check as gate
+    parsed = gate.parse_lef(out, "macro_a")
+    assert parsed["size"] == pytest.approx((108.0, 60.0))
+    assert parsed["frame"][:2] == pytest.approx((-3.25, -4.5))
+    assert parsed["origin_ll"] == pytest.approx((-3.25, -4.5))
+    assert "RECT -1.000 -2.000 101.000 52.000" in out
+    assert report["geometry_modified"] is False
+    assert report["gds_bbox_um"] == list(bbox)
+
+
+def test_frame_binding_refuses_foreign_macro_or_degenerate_gds_box():
+    lef = "MACRO macro_a\n  ORIGIN 0 0 ;\n  SIZE 1 BY 1 ;\nEND macro_a\n"
+    with pytest.raises(ValueError, match="LEF_MACRO_IDENTITY_INVALID"):
+        mod.align_lef_frame_to_gds(lef, "other", (0.0, 0.0, 1.0, 1.0))
+    with pytest.raises(ValueError, match="GDS_BBOX_INVALID"):
+        mod.align_lef_frame_to_gds(lef, "macro_a", (0.0, 0.0, 0.0, 1.0))
+
+
 def test_a_pinless_abstract_is_never_staged(tmp_path, monkeypatch):
     """MEASURED: the GDS-only route produced an outline plus obstructions and
     zero PINs. That looks like a delivered view and is not one, so it is not

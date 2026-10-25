@@ -116,6 +116,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shlex
@@ -163,10 +164,12 @@ try:
 except ImportError:  # pragma: no cover
     _gds_geometry_count = None  # type: ignore[assignment]
 try:
-    from digital_hardmacro_check import gds_top_cells, base_name
+    from digital_hardmacro_check import (gds_top_cells, base_name,
+                                         parse_gds_bbox_extent)
 except ImportError:  # pragma: no cover
     gds_top_cells = None       # type: ignore[assignment]
     base_name = None           # type: ignore[assignment]
+    parse_gds_bbox_extent = None  # type: ignore[assignment]
 try:
     from magic_port_extract_emit import build_shell_preamble
 except ImportError:  # pragma: no cover
@@ -1192,6 +1195,78 @@ def resolve_stdcell_rails(site: Optional[MagicSite], pdk_root: str,
 _LEF_HAS_PIN_RE = re.compile(r"(?m)^\s*PIN\s+\S+")
 
 
+def align_lef_frame_to_gds(lef_text: str, design: str,
+                           gds_bbox: Tuple[float, float, float, float]
+                           ) -> Tuple[str, Dict[str, Any]]:
+    """Make Magic's abstract reserve the complete, actual GDS top-cell box.
+
+    Magic reads the signed-off GDS and then the routed DEF so that the former
+    supplies geometry and the latter supplies attributed ports.  A DEF
+    ``DIEAREA`` can be smaller than real stream geometry (seal/rail shapes may
+    extend on every side); in that case Magic writes the DEF box into ``SIZE``
+    and ``ORIGIN 0 0`` even though the GDS it just read has a larger, shifted
+    bounding box.  The result is not placeable: the parent reserves less area
+    than the child occupies.
+
+    This normalisation uses the same hierarchical GDS parser as the independent
+    checker.  It changes only the selected MACRO's declarative ``ORIGIN`` and
+    ``SIZE`` after Magic has produced the complete pin/OBS abstract.  No GDS or
+    pin/obstruction geometry is translated, deleted, clipped, or invented.
+    ``ORIGIN (-llx, -lly)`` declares the macro origin inside the actual box;
+    ``SIZE (urx-llx) BY (ury-lly)`` reserves every real GDS coordinate.
+    """
+    if (not isinstance(gds_bbox, tuple) or len(gds_bbox) != 4
+            or any(type(v) not in (int, float) for v in gds_bbox)):
+        raise ValueError("IP_KIT_GDS_BBOX_INVALID")
+    llx, lly, urx, ury = map(float, gds_bbox)
+    values = (llx, lly, urx, ury)
+    if any(not math.isfinite(v) for v in values):
+        raise ValueError("IP_KIT_GDS_BBOX_INVALID")
+    width, height = urx - llx, ury - lly
+    if width <= 0 or height <= 0:
+        raise ValueError("IP_KIT_GDS_BBOX_INVALID")
+
+    lines = lef_text.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines)
+              if (_MACRO_OPEN_RE.match(line.rstrip("\n"))
+                  and _MACRO_OPEN_RE.match(line.rstrip("\n")).group(1) == design)]
+    if len(starts) != 1:
+        raise ValueError(f"IP_KIT_LEF_MACRO_IDENTITY_INVALID: {design}")
+    start = starts[0]
+    end = next((i for i in range(start + 1, len(lines))
+                if re.match(r"^[ \t]*END[ \t]+" + re.escape(design)
+                            + r"[ \t]*$", lines[i].rstrip("\n"))), None)
+    if end is None:
+        raise ValueError(f"IP_KIT_LEF_MACRO_UNTERMINATED: {design}")
+    header_end = next((i for i in range(start + 1, end)
+                       if re.match(r"^[ \t]*(?:PIN|OBS)\b", lines[i])), end)
+    size_rows = [i for i in range(start + 1, header_end)
+                 if re.match(r"^[ \t]*SIZE\b", lines[i], re.I)]
+    origin_rows = [i for i in range(start + 1, header_end)
+                   if re.match(r"^[ \t]*ORIGIN\b", lines[i], re.I)]
+    if len(size_rows) != 1 or len(origin_rows) > 1:
+        raise ValueError(f"IP_KIT_LEF_FRAME_AMBIGUOUS: {design}")
+    indent = re.match(r"^([ \t]*)", lines[size_rows[0]]).group(1)
+    old_size = lines[size_rows[0]].strip()
+    lines[size_rows[0]] = f"{indent}SIZE {width:.6f} BY {height:.6f} ;\n"
+    origin_line = f"{indent}ORIGIN {-llx:.6f} {-lly:.6f} ;\n"
+    old_origin = "LEF-default"
+    if origin_rows:
+        old_origin = lines[origin_rows[0]].strip()
+        lines[origin_rows[0]] = origin_line
+    else:
+        lines.insert(size_rows[0], origin_line)
+    return "".join(lines), {
+        "source": "hierarchical GDS top-cell bounding box",
+        "gds_bbox_um": [llx, lly, urx, ury],
+        "old_size": old_size,
+        "old_origin": old_origin,
+        "new_size_um": [width, height],
+        "new_origin_um": [-llx, -lly],
+        "geometry_modified": False,
+    }
+
+
 def magic_env_for(magicrc: str, pdk_root: str) -> Dict[str, str]:
     """`PDK` and `PDK_ROOT` as the SYSTEM magicrc expects to read them.
 
@@ -1571,7 +1646,9 @@ def merge_duplicate_pin_declarations(lef_text: str) -> Tuple[str, Dict[str, Any]
 
 def _accept_lef(produced: Path, out_lef: Path, rc: int,
                 tool_output: str,
-                def_text: str = "") -> Tuple[bool, str]:
+                def_text: str = "",
+                gds_bbox: Optional[Tuple[float, float, float, float]] = None
+                ) -> Tuple[bool, str]:
     """The verdict on what magic wrote. ONE copy, whichever site wrote it.
 
     A PIN-LESS ABSTRACT IS WORSE THAN NO ABSTRACT — it is an outline and a
@@ -1655,6 +1732,18 @@ def _accept_lef(produced: Path, out_lef: Path, rc: int,
             f"{sorted(bare)[:8]}"
             + (" …" if len(bare) > 8 else "")
             + ". A malformed primary deliverable is not staged.")
+    if gds_bbox is not None:
+        dm = _DEF_DESIGN_RE.search(def_text or "")
+        if not dm:
+            return False, "cannot bind LEF frame to GDS without DEF design identity"
+        try:
+            text, frame_report = align_lef_frame_to_gds(
+                text, dm.group(1), gds_bbox)
+        except ValueError as exc:
+            return False, str(exc)
+        print(f"[{PROGRAM}] LEF frame bound to actual GDS bbox: "
+              f"ORIGIN {frame_report['new_origin_um']} SIZE "
+              f"{frame_report['new_size_um']}; no geometry modified.")
     out_lef.parent.mkdir(parents=True, exist_ok=True)
     out_lef.write_text(text)
     return True, ""
@@ -1662,7 +1751,9 @@ def _accept_lef(produced: Path, out_lef: Path, rc: int,
 
 def _write_lef_here(top: str, gds: Path, def_file: Path, out_lef: Path,
                     pdk_root: str, magicrc: str, full_lef: bool,
-                    pinonly: bool, timeout_s: int) -> Tuple[bool, str]:
+                    pinonly: bool, timeout_s: int,
+                    gds_bbox: Optional[Tuple[float, float, float, float]] = None
+                    ) -> Tuple[bool, str]:
     """Magic in THIS process's environment — the path taken inside the image."""
     # Native admission permits dynamic paths only in the frozen project/output
     # namespace.  Keep Magic's staged GDS/DEF/Tcl there so the observed leaf
@@ -1719,13 +1810,15 @@ def _write_lef_here(top: str, gds: Path, def_file: Path, out_lef: Path,
         (out_lef.parent / "digital_lef.tcl").write_text(script.read_text())
         return _accept_lef(work / f"{top}.lef", out_lef, cp.rc,
                            cp.err or cp.out,
-                           def_file.read_text(errors="replace"))
+                           def_file.read_text(errors="replace"), gds_bbox)
 
 
 def _write_lef_in_container(site: "MagicSite", top: str, gds: Path,
                             def_file: Path, out_lef: Path, pdk_root: str,
                             magicrc: str, full_lef: bool, pinonly: bool,
-                            timeout_s: int) -> Tuple[bool, str]:
+                            timeout_s: int,
+                            gds_bbox: Optional[Tuple[float, float, float, float]] = None
+                            ) -> Tuple[bool, str]:
     """Magic where the runner already dispatches every other EDA tool.
 
     The inputs cross with `docker cp` rather than through a bind mount: the
@@ -1782,7 +1875,7 @@ def _write_lef_in_container(site: "MagicSite", top: str, gds: Path,
                 return False, (f"magic exited {rc} and wrote no LEF; "
                                f"last output: {' | '.join(tail) or '(none)'}")
             return _accept_lef(produced, out_lef, rc, err or out,
-                               def_file.read_text(errors="replace"))
+                               def_file.read_text(errors="replace"), gds_bbox)
         finally:
             site.close()
 
@@ -1791,7 +1884,8 @@ def write_lef_with_magic(top: str, gds: Path, def_file: Path, out_lef: Path,
                          pdk_root: str, full_lef: bool, pinonly: bool,
                          timeout_s: int = 900, *, container: str = "",
                          site: Optional["MagicSite"] = None,
-                         magicrc: Optional[str] = None
+                         magicrc: Optional[str] = None,
+                         gds_bbox: Optional[Tuple[float, float, float, float]] = None
                          ) -> Tuple[bool, str]:
     """(ok, reason). Never raises; a missing capability is a stated reason.
 
@@ -1828,9 +1922,9 @@ def write_lef_with_magic(top: str, gds: Path, def_file: Path, out_lef: Path,
     if site.in_container:
         return _write_lef_in_container(site, top, gds, def_file, out_lef,
                                        pdk_root, magicrc, full_lef, pinonly,
-                                       timeout_s)
+                                       timeout_s, gds_bbox)
     return _write_lef_here(top, gds, def_file, out_lef, pdk_root, magicrc,
-                           full_lef, pinonly, timeout_s)
+                           full_lef, pinonly, timeout_s, gds_bbox)
 
 
 # ── the run ───────────────────────────────────────────────────────────────
@@ -2102,11 +2196,21 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
         else:
             rec.status, rec.reason = "REFUSED", str(exc)
             return RC_REFUSED, rec
-    geom = _require(_gds_geometry_count, "_gds_geometry_count")(gds.read_bytes())
+    gds_raw = gds.read_bytes()
+    geom = _require(_gds_geometry_count, "_gds_geometry_count")(gds_raw)
     if geom <= 0:
         rec.status, rec.reason = "REFUSED", (
             f"{gds.name} carries no geometry record — not a layout")
         return RC_REFUSED, rec
+    gds_bbox = _require(parse_gds_bbox_extent,
+                        "parse_gds_bbox_extent")(gds_raw)
+    if gds_bbox is None:
+        rec.status, rec.reason = "REFUSED", (
+            f"{gds.name} carries geometry but its hierarchical top-cell "
+            "bounding box is not measurable")
+        return RC_REFUSED, rec
+    rec.lef_policy["gds_bbox_um"] = list(gds_bbox)
+    rec.lef_policy["frame_source"] = "hierarchical GDS top-cell bounding box"
 
     # 3. the layout must contain the cell the abstracts will name
     tops = _require(gds_top_cells, "gds_top_cells")(gds.read_bytes())
@@ -2294,7 +2398,8 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
                         design, gds, magic_def, lef_path, pdk_root, full_lef,
                         pinonly, container=container, site=site,
                         magicrc=(str(pdk_binding.magicrc)
-                                 if pdk_binding else None))
+                                 if pdk_binding else None),
+                        gds_bbox=gds_bbox)
                 else:
                     # A private working copy only. The signed-off routed DEF is
                     # immutable and is never rewritten to make a delivery.
@@ -2305,7 +2410,8 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
                             design, gds, magic_def, lef_path, pdk_root,
                             full_lef, pinonly, container=container, site=site,
                             magicrc=(str(pdk_binding.magicrc)
-                                     if pdk_binding else None))
+                                     if pdk_binding else None),
+                            gds_bbox=gds_bbox)
         if not ok:
             rec.status, rec.reason = "SKIPPED_NO_CAPABILITY", why
             rec.notes.append(
