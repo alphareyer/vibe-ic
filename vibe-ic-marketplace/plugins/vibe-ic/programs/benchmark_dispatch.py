@@ -173,12 +173,8 @@ _RUNNER_REPORT_NAMES = ("phase1_one_shot.json", "phase2_one_shot.json",
 _RUNNER_CONTEXT_ENV = "VIBEIC_RUNNER_INVOCATION_CONTEXT"
 
 
-def _runner_source_snapshot(argv: list[str]) -> dict:
-    """Identity of the executable and actual script, including invocation options.
-
-    The dispatcher is a consumer, not a substitute for argv[1]'s producer.
-    Resolve executable names through PATH just as subprocess does.
-    """
+def _runner_source_snapshot(argv: list[str], *, consumer: str | None = None) -> dict:
+    """Bind argv, resolved executable, runner and issued dispatcher source."""
     def source(value: str) -> dict:
         path = Path(value).resolve(strict=True)
         raw = path.read_bytes()
@@ -186,17 +182,14 @@ def _runner_source_snapshot(argv: list[str]) -> dict:
 
     executable = shutil.which(argv[0]) or argv[0]
     return {"argv": list(argv), "executable": source(executable),
-            "runner": source(argv[1]), "consumer": source(__file__)}
+            "runner": source(argv[1]), "consumer": source(consumer or __file__)}
 
 
 def _bind_runner_report(summary: dict, project: Path, producer: str,
                         report_name: str, *, context: dict | None = None) -> dict:
-    """Called by the actual report writer, before publishing its measured data.
-
-    Standalone producers have no dispatch generation and retain their ordinary
-    format. A dispatched producer states its generation and material itself;
-    the caller must not add this field to a report it merely found on disk.
-    This is provenance, never a successful gate verdict.
+    """Bind measured reports at the writer, preserving standalone output format.
+    Dispatched writers assert their own generation/material; never bind found files.
+    Provenance does not assert a successful gate verdict.
     """
     if context is None:
         raw = os.environ.get(_RUNNER_CONTEXT_ENV)
@@ -206,7 +199,14 @@ def _bind_runner_report(summary: dict, project: Path, producer: str,
     project = Path(project).resolve()
     if context["project"] != str(project):
         return summary  # an internal isolated child has its own report subject
-    if (context["source"] != _runner_source_snapshot(context["argv"])
+    # Runtime retention imports this helper from a byte-identical copy. The
+    # consumer is still the dispatcher that issued this invocation, not the
+    # copy's location. Revalidate the issued source AND the imported helper's
+    # bytes; relocating a helper must not admit a different implementation.
+    consumer = context["source"]["consumer"]
+    if (context["source"] != _runner_source_snapshot(
+                context["argv"], consumer=consumer["path"])
+            or hashlib.sha256(Path(__file__).read_bytes()).hexdigest() != consumer["sha256"]
             or report_name not in _RUNNER_REPORT_NAMES):
         raise ValueError("RUNNER_REPORT_UNBOUND: producer context/source differs")
     producer_path = Path(producer).resolve(strict=True)

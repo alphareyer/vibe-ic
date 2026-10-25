@@ -528,42 +528,42 @@ def _expert_answer_pending(project: Path) -> Tuple[bool, str]:
 def _phase1_decision(project: Path, force_skip: bool,
                      knobs: Optional[Dict[str, Any]] = None, *,
                      checkpoint: bool = False) -> Tuple[bool, str]:
-    """Decide whether to run Phase 1 and in which mode.
-
-    Returns (run, mode) where:
-      run  -> True if phase1 must run before phase2
-      mode -> "prompt" (Path A NL inputs), "docs" (Path B vendor docs),
-              "expert_second_pass" (#2204: the L documents already exist AND a
-              delivered IC-Expert answer is on disk that the expert track's own
-              record says nobody has read — the SECOND pass of the hand-off,
-              which re-runs the expert track ALONE and re-extracts nothing),
-              or "" when run is False.
-
-    Path-B fix (v-orch): when a project carries POPULATED vendor docs
-    (input/docs/ or phase1/input_doc/) but no generated L*.json yet,
-    phase2 hard-requires the L docs, so the orchestrator MUST auto-run
-    phase1 in docs mode rather than skip it. Previously docs-only
-    projects skipped phase1 and dead-ended at the phase2 precondition.
-
-    chip-AGNOSTIC — path existence + L-doc count only.
-    """
+    """Select prompt/docs input extraction or an unread expert answer's second pass.
+    Return (run, mode); explicit skips and current supplied-only L docs remain intact.
+    Missing extraction outcomes recover through docs mode only with design input."""
     if force_skip:
         return (False, "")
     gd = _pl.generated_docs_dir(project)
     L_count = len(list(gd.glob("L*.json"))) if gd.is_dir() else 0
     # Already has the full L-doc set → the EXTRACTION has nothing to do.
     if L_count >= 13:
-        # #2204 — but "the L documents exist" is not "Phase 1 is finished".
-        # Phase 1's second track is a two-pass hand-off, and its second pass is
-        # a state this project either is or is not in. Ask.
+        # Existing L docs may still have an unread expert answer.
         pending, _why = _expert_answer_pending(project)
         if pending:
+            # Recover absent extraction; preserve known failures and valid legacy outcomes.
+            path, _legacy = _pl.report_path_for_reading(project, "phase1_one_shot.json")
+            try:
+                summary = json.loads(path.read_text())
+                if not isinstance(summary, dict):
+                    raise ValueError("first-pass summary is not an object")
+                pass1 = summary.get("pass1")
+                verdicts = ("PASS", "PASS_WITH_WAIVERS", "FAIL")
+                if isinstance(pass1, dict):
+                    available = (pass1.get("verdict") in verdicts
+                                 and type(pass1.get("rc")) is int
+                                 and pass1["rc"] >= 0)
+                else:
+                    available = (summary.get("mode") != "expert_second_pass"
+                                 and summary.get("verdict") in verdicts)
+            except (OSError, ValueError):
+                available = False
+            if not available and _design_input_present(project):
+                print("[phase1] RECOVER_PHASE1_FIRST_PASS — no usable extraction "
+                      "summary to carry; running docs mode before expert consumption")
+                return (True, "docs")
             return (True, _P1_MODE_EXPERT_SECOND_PASS)
-        # FX_STALE_LDOCS — and "the L documents exist" is not "they are what
-        # the CURRENT producer would write". A skip keyed on existence is a
-        # stale cache: a phase-1 producer fix never reached an existing
-        # project (measured, subservient f4). Reuse needs the producer's own
-        # identity to match; see `_phase1_producer_identity`.
+        # Reuse requires current producer identity, not L-doc existence.
+        # Edited documents retain the existing refusal path.
         fresh = (_phase1_checkpoint_freshness(project, knobs) if checkpoint
                  else _phase1_freshness(project, knobs))
         if fresh["state"] == _p1id.REUSE or (
