@@ -2707,6 +2707,7 @@ def test_a_retryable_worker_error_is_retried_not_refused_at_the_front_door(
         assert resumed[1]['worker_error'] == 'ROUTE_REENTRY_ROUTE_MUTATION'
     else:
         assert resumed[1]['worker_retryable'] is True
+        assert attempted[0][attempted[0].index('--entry-step') + 1] == 'D1'
         assert attempted[0][attempted[0].index('--exit-step') + 1] == 'D1'
     acceptance = json.loads((run / bd._ACCEPTANCE_REPORT).read_text())
     assert acceptance["status"] == "PENDING"

@@ -5518,7 +5518,7 @@ def _ensure_phase1_frontdoor(runner: Path, project: Path, runner_budget,
                 "reason": f"front-door input is unreadable: {exc}"}
 
     argv = _solver_argv(runner, project, "D1", "D1", delivery_route)
-    argv.append("--no-dashboard")
+    argv += ["--entry-step", "D1", "--no-dashboard"]
     process = runner_budget.run(argv)
     diagnostic = _runner_diagnostics(process, argv, project, require_phase2=False)
     diagnostics = {"runner_diagnostics": diagnostic} if diagnostic else {}

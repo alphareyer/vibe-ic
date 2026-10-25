@@ -125,7 +125,7 @@ def test_stale_live_d1_cannot_authorize_later_launch(tmp_path, mutation):
         report = json.loads(report_path.read_text())
         report["verdict"] = "FAIL"
         report_path.write_text(json.dumps(report, sort_keys=True))
-        expected = "D1_CURRENT_REPORT_NOT_PASS"
+        expected = "D1_SNAPSHOT_GATE_REPORT_DIGEST_MISSING"
     state = bd._validated_route_reentry_state(
         bench="rtllm", dataset=None, fmt=None, run_p=run, pid="p1",
         result=result, route_worklist=[task], allow_d1_only=False,

@@ -630,6 +630,9 @@ def test_late_signed_canonical_checkpoint_is_admitted_without_rewriting_producer
     assert result.get('d1_gate_error', 'CURRENT_D1_ADMITTED') == 'CURRENT_D1_ADMITTED', result
     assert result['d1_gate']['verdict'] == 'PASS'
     assert result['runner_rc'] == (0 if whole_verdict == 'PASS' else 1)
+    issued_argv = result['runner_invocation']['argv']
+    assert [issued_argv[i + 1] for i, item in enumerate(issued_argv[:-1])
+            if item == '--entry-step'] == ['D1']
 
 
 def test_current_signature_cannot_override_a_failed_checkpoint_consumer(
