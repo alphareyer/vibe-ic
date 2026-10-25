@@ -72,19 +72,13 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 import re
 
 from _prose_polarity import LINE_END_BREAKS, is_denied, sentence_scope
+from fsm_prose_synth import _parse_onehot_map
+from port_parser import parse_ports as _parse_ports
 
 
 # --------------------------------------------------------------------------- #
 # Ports (shared reader — bullet form OR Verilog module header).
 # --------------------------------------------------------------------------- #
-def _parse_ports(prompt):
-    import os
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import port_parser
-    return port_parser.parse_ports(prompt)
-
-
 def _is_moore(prompt: str) -> bool:
     """A prompt that NAMES itself Moore is not ours — the Moore solver owns it.
 
@@ -309,10 +303,16 @@ def _is_latching_output(prompt: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Emission
 # --------------------------------------------------------------------------- #
-def _emit(top, clk, rst, in_name, out_name, states, code, w,
-          out_expr_cases, nxt_cases, reset_idx, is_async, active_high):
+def _emit(top, clk, rst, in_name, out_name, states, trans, mout,
+          reset_state, level, encoding=(None, None)):
     """Common RTL skeleton for both forms (state reg + Mealy comb output + comb
-    next-state). out_expr_cases / nxt_cases are pre-rendered `S_x: ...` body lines."""
+    next-state), sharing binary code selection and transition/output rendering."""
+    code, w = encoding
+    if code is None:
+        code = dict(zip(states, range(len(states))))
+        w = max(1, max(code.values()).bit_length())
+    reset_idx = code[reset_state]
+    is_async, active_high = level
     rst_lvl = rst if active_high else f"!{rst}"
     edge = f"posedge {clk}" + (
         f" or {'posedge' if active_high else 'negedge'} {rst}" if is_async else "")
@@ -331,7 +331,8 @@ def _emit(top, clk, rst, in_name, out_name, states, code, w,
               "    // next-state (depends on state and input)",
               "    always @(*) begin",
               "        case (state)"]
-    lines += nxt_cases
+    lines += [f"            S_{s}: nstate = {in_name} ? S_{trans[s]['1']} : S_{trans[s]['0']};"
+              for s in states]
     lines += [f"            default: nstate = {w}'d{reset_idx};",
               "        endcase",
               "    end",
@@ -343,7 +344,8 @@ def _emit(top, clk, rst, in_name, out_name, states, code, w,
               "    // Mealy output (depends on state AND input)",
               "    always @(*) begin",
               "        case (state)"]
-    lines += out_expr_cases
+    lines += [f"            S_{s}: {out_name} = {in_name} ? 1'b{mout[s]['1']} : 1'b{mout[s]['0']};"
+              for s in states]
     lines += [f"            default: {out_name} = 1'b0;",
               "        endcase",
               "    end",
@@ -360,56 +362,41 @@ def _synth_table(prompt, top, clk, rst, in_name, out_name, level):
     reset_state = _parse_reset_state(prompt, known)
     if reset_state is None:
         return None
-    is_async, active_high = level
-    code = {s: i for i, s in enumerate(states)}
-    w = max(1, (len(states) - 1).bit_length())
-    nxt_cases, out_cases = [], []
-    for s in states:
-        nxt_cases.append(
-            f"            S_{s}: nstate = {in_name} ? S_{trans[s]['1']} : S_{trans[s]['0']};")
-        out_cases.append(
-            f"            S_{s}: {out_name} = {in_name} ? 1'b{mout[s]['1']} : 1'b{mout[s]['0']};")
-    return _emit(top, clk, rst, in_name, out_name, states, code, w,
-                 out_cases, nxt_cases, code[reset_state], is_async, active_high)
+    encoding = _parse_onehot_map(prompt, states, codes=True)
+    if encoding is None:
+        return None
+    return _emit(top, clk, rst, in_name, out_name, states, trans, mout,
+                 reset_state, level, encoding)
 
 
-def _synth_sequence(prompt, top, clk, rst, in_name, out_name, level):
+def _synth_sequence(prompt, top, clk, rst, in_name, out_name, level, dialect=False):
     if _is_latching_output(prompt):           # 'forever/until reset' -> not Mealy
         return None
-    pat = _parse_target_sequence(prompt)
-    if pat is None:
-        return None
+    pat = (_dia_target_sequence if dialect else _parse_target_sequence)(prompt)
     overlapping = _overlap_mode(prompt)
-    if overlapping is None:                   # overlap semantics MUST be stated
+    # If the prose explicitly says non-overlapping, honour it; the RTLLM detector
+    # default (and what this family states with "continuous input/loop detection")
+    # is the standard OVERLAPPING KMP automaton.
+    if dialect and overlapping is None:
+        overlapping = True
+    if pat is None or len(pat) < 2 or overlapping is None:
         return None
-    if len(pat) < 2:
-        return None
+    return _emit_sequence(top, clk, rst, in_name, out_name, pat, overlapping, level)
+
+
+def _emit_sequence(top, clk, rst, in_name, out_name, pat, overlapping, level):
     out, nxt = _build_sequence_fsm(pat, overlapping)
-    L = len(pat)
-    is_async, active_high = level
-    # recognizer states 0..L-1; reset state is 0 (no prefix matched yet — "behaves as
-    # though the previous inputs were empty"). Internal encoding is FREE.
-    states = [f"P{j}" for j in range(L)]
-    code = {f"P{j}": j for j in range(L)}
-    w = max(1, (L - 1).bit_length())
-    nxt_cases, out_cases = [], []
-    for j in range(L):
-        nxt_cases.append(
-            f"            S_P{j}: nstate = {in_name} ? S_P{nxt[j]['1']} : S_P{nxt[j]['0']};")
-        out_cases.append(
-            f"            S_P{j}: {out_name} = {in_name} ? 1'b{out[j]['1']} : 1'b{out[j]['0']};")
-    return _emit(top, clk, rst, in_name, out_name, states, code, w,
-                 out_cases, nxt_cases, 0, is_async, active_high)
+    states = [f"P{j}" for j in range(len(pat))]
+    trans = {f"P{j}": {b: f"P{k}" for b, k in row.items()} for j, row in nxt.items()}
+    mout = {f"P{j}": row for j, row in out.items()}
+    return _emit(top, clk, rst, in_name, out_name, states, trans, mout, states[0], level)
 
 
-def synth(prompt_text: str, top: str = "TopModule"):
-    if _is_moore(prompt_text):                # never steal a Moore problem
-        return None
-    ins, outs = _parse_ports(prompt_text)
+def _fsm_ports(ins, outs):
     if not ins or len(outs) != 1 or outs[0][1] != 1:
         # NATIVE VE path needs a bullet/header interface; fall through to the
         # RTLLM-prose dialect (which reads its interface through the bridge).
-        return _dia_synth(prompt_text, top)
+        return None
     out_name = outs[0][0]
     names = [n for n, _ in ins]
     clk = next((n for n in names if n.lower() in ("clk", "clock")), None)
@@ -418,14 +405,25 @@ def synth(prompt_text: str, top: str = "TopModule"):
                 or n.lower() in ("rst", "rst_n", "arst", "areset", "aresetn", "resetn")),
                None)
     if not clk or not rst:
-        return _dia_synth(prompt_text, top)
+        return None
     # any non-clk/non-reset multi-bit port would be silently dropped -> SKIP
     if any(w != 1 for n, w in ins if n not in (clk, rst)):
-        return _dia_synth(prompt_text, top)
+        return None
     fsm_ins = [n for n, w in ins if w == 1 and n not in (clk, rst)]
     if len(fsm_ins) != 1:                     # Mealy table/sequence is a single 1-bit input
+        return None
+    return clk, rst, fsm_ins[0], out_name
+
+
+
+def synth(prompt_text: str, top: str = "TopModule"):
+    if _is_moore(prompt_text):                # never steal a Moore problem
+        return None
+    ins, outs = _parse_ports(prompt_text)
+    ports = _fsm_ports(ins, outs)
+    if ports is None:
         return _dia_synth(prompt_text, top)
-    in_name = fsm_ins[0]
+    clk, rst, in_name, out_name = ports
 
     level = _parse_reset_level(prompt_text)
     if level is None:
@@ -472,14 +470,8 @@ _DIA_ACTIVE_LOW_PROSE_RE = re.compile(
 
 def _dia_parse_ports(text):
     """(ins, outs) read through the RTLLM prose bridge then port_parser."""
-    import os
-    import sys
-    here = os.path.dirname(os.path.abspath(__file__))
-    if here not in sys.path:
-        sys.path.insert(0, here)
     import prose_port_block_read as _bridge
-    import port_parser
-    return port_parser.parse_ports(_bridge.bridge_prompt(text))
+    return _parse_ports(_bridge.bridge_prompt(text))
 
 
 def _dia_module_name(text, top):
@@ -531,55 +523,18 @@ def _dia_synth(prompt_text, top):
     if not _says_mealy(prompt_text):
         return None
     ins, outs = _dia_parse_ports(prompt_text)
-    if not ins or len(outs) != 1 or outs[0][1] != 1:
+    ports = _fsm_ports(ins, outs)
+    if ports is None:
         return None
-    out_name = outs[0][0]
-    names = [n for n, _ in ins]
-    clk = next((n for n in names if n.lower() in ("clk", "clock")), None)
-    rst = next((n for n in names
-                if "reset" in n.lower()
-                or n.lower() in ("rst", "rst_n", "arst", "areset", "aresetn",
-                                 "resetn", "reset_n")),
-               None)
-    if not clk or not rst:
-        return None
-    if any(w != 1 for n, w in ins if n not in (clk, rst)):
-        return None
-    fsm_ins = [n for n, w in ins if w == 1 and n not in (clk, rst)]
-    if len(fsm_ins) != 1:                            # single 1-bit data input
-        return None
-    in_name = fsm_ins[0]
+    clk, rst, in_name, out_name = ports
 
     # A latched 'forever/until reset' output is a MOORE recognizer, not a Mealy pulse
     # -> not this family (left to behavioral_fsm_synth). SKIP.
-    if _is_latching_output(prompt_text):
-        return None
-    pat = _dia_target_sequence(prompt_text)
-    if pat is None or len(pat) < 2:                  # no unique stated sequence -> SKIP
-        return None
-    # If the prose explicitly says non-overlapping, honour it; the RTLLM detector
-    # default (and what this family states with "continuous input/loop detection")
-    # is the standard OVERLAPPING KMP automaton.
-    mode = _overlap_mode(prompt_text)
-    overlapping = True if mode is None else mode
-
     # RTLLM reset: async (the prose drives it on a clock/RST edge) — emit a posedge
     # clk + reset edge. Polarity PARSED from the name's `_n` suffix / active-low prose.
     active_high = _dia_reset_polarity(rst, prompt_text)
-    out, nxt = _build_sequence_fsm(pat, overlapping)
-    L = len(pat)
-    states = [f"P{j}" for j in range(L)]
-    code = {f"P{j}": j for j in range(L)}
-    w = max(1, (L - 1).bit_length())
-    nxt_cases, out_cases = [], []
-    for j in range(L):
-        nxt_cases.append(
-            f"            S_P{j}: nstate = {in_name} ? S_P{nxt[j]['1']} : S_P{nxt[j]['0']};")
-        out_cases.append(
-            f"            S_P{j}: {out_name} = {in_name} ? 1'b{out[j]['1']} : 1'b{out[j]['0']};")
-    module = _dia_module_name(prompt_text, top)
-    return _emit(module, clk, rst, in_name, out_name, states, code, w,
-                 out_cases, nxt_cases, 0, True, active_high)
+    return _synth_sequence(prompt_text, _dia_module_name(prompt_text, top), clk, rst,
+                           in_name, out_name, (True, active_high), dialect=True)
 
 
 if __name__ == "__main__":

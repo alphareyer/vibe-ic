@@ -30,6 +30,7 @@ import full_moore_fsm_synth as F  # noqa: E402
 from _hostpaths import corpus_path  # noqa: E402
 
 import pytest
+import re
 
 #: The repo's existing tool gate (197 files use this shape). Without
 #: it this module raises FileNotFoundError on a host that lacks the
@@ -64,12 +65,12 @@ MEALY_SEQ = _HDR + (
 
 
 # --------------------------------------------------------------------------- #
-def _compiles(rtl, tmp_path):
+def _compiles(rtl, tmp_path, *sources):
     if not _HAVE_TOOLS:
         pytest.skip("iverilog/vvp not installed on this host")
     f = tmp_path / "m.sv"
     f.write_text(rtl)
-    cp = subprocess.run(["iverilog", "-g2012", "-o", str(tmp_path / "a.out"), str(f)],
+    cp = subprocess.run(["iverilog", "-g2012", "-o", str(tmp_path / "a.out"), str(f), *map(str, sources)],
                         capture_output=True, text=True)
     return cp.returncode == 0, cp.stderr
 
@@ -87,13 +88,9 @@ def _host_score(prob, tmp_path):
     rtl = M.synth(pr.read_text(errors="replace"), "TopModule")
     if not rtl:
         return None
-    dut = tmp_path / "dut.sv"
-    dut.write_text(rtl)
-    vvp = tmp_path / "sim.vvp"
-    cp = subprocess.run(["iverilog", "-g2012", "-o", str(vvp), str(dut), str(rf), str(ts)],
-                        capture_output=True, text=True)
-    assert cp.returncode == 0, f"compile failed: {cp.stderr}"
-    run = subprocess.run(["vvp", str(vvp)], capture_output=True, text=True)
+    ok, err = _compiles(rtl, tmp_path, rf, ts)
+    assert ok, f"compile failed: {err}"
+    run = subprocess.run(["vvp", str(tmp_path / "a.out")], capture_output=True, text=True)
     out = run.stdout + run.stderr
     import re
     m = re.search(r"Mismatches:\s*(\d+)\s+in", out)
@@ -260,3 +257,38 @@ def test_corpus_fire_list_is_exactly_two(tmp_path):
                    for pf in _DS.glob("*_prompt.txt")
                    if M.synth(pf.read_text(errors="replace"), "TopModule"))
     assert fires == ["Prob088_ece241_2014_q5b", "Prob129_ece241_2013_q8"], fires
+
+
+def _pinned_prompt(codes):
+    prompt = MEALY_TABLE.replace("into state A", "into state B")
+    names = dict(A="Idle", B="Wait", x="payload", z="flag", clk="clock", areset="rst_n")
+    prompt = re.sub(r"\b(?:A|B|x|z|clk|areset)\b", lambda m: names[m[0]], prompt)
+    prompt = prompt.replace("active-high", "active-low")
+    if len(codes) == 3:
+        prompt += "Done --payload=0 (flag=0)--> Idle\nDone --payload=1 (flag=1)--> Wait\n"
+        prompt = prompt.replace("Wait --payload=0 (flag=1)--> Wait", "Wait --payload=0 (flag=1)--> Done")
+    return prompt + "Use one-hot encoding: " + ", ".join(
+        f"{s}={c}" for s, c in zip(("Idle", "Wait", "Done"), codes)) + ".\n"
+
+
+@pytest.mark.parametrize("codes", [("2'b01", "2'b10"), ("3'b010", "3'b100", "3'b001"), ("4'b0010", "4'b1000")])
+def test_pinned_encoding_reset_and_default(codes, tmp_path):
+    rtl = M.synth(_pinned_prompt(codes))
+    width = int(codes[0].split("'")[0])
+    assert rtl is not None and f"localparam SW = {width};" in rtl
+    for state, code in zip(("Idle", "Wait", "Done"), codes):
+        assert f"S_{state} = {width}'d{int(code.split('b')[1], 2)};" in rtl
+    reset = f"{width}'d{int(codes[1].split('b')[1], 2)}"
+    assert f"default: nstate = {reset};" in rtl
+    assert f"if (!rst_n) state <= {reset};" in rtl
+    assert "posedge clock or negedge rst_n" in rtl
+    ok, err = _compiles(rtl, tmp_path)
+    assert ok, err
+
+
+@pytest.mark.parametrize("constraint", ["Idle=2'b01", "Idle=2'b00, Wait=2'b10", "Idle=2'b01, Wait=2'b01",
+    "Idle=2'b01, Wait=3'b010", "Idle=1'b01, Wait=2'b10", "Idle=2'h1, Wait=2'h2",
+    "Idle=2'b01, Wait=2'b10, Idle=2'b01", "Idle=2'b01, Wait=2'b10, Idle=2'b11", "binary encoding"])
+def test_ambiguous_encoding_falls_through(constraint):
+    prompt = _pinned_prompt(("2'b01", "2'b10")).split("Use one-hot encoding:")[0]
+    assert M.synth(prompt + "Use encoding: " + constraint) is None
