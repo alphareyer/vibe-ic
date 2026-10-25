@@ -2512,6 +2512,20 @@ def _repair_record_path(run_p: Path, task: dict) -> Path:
             f"repair-of-{parent_hash}.json")
 
 
+def _requires_public_source_repair_contract(task: dict) -> bool:
+    """Source-completion declarations apply when original RTL was supplied.
+
+    A prompt-only generation repair instead binds the immutable generated
+    parent and challenge through the ordinary AI repair record.
+    """
+    public = task.get("public_original_input") or {}
+    return not (
+        (task.get("program_routing") or {}).get("nature") == "spec_generation"
+        and public.get("status") == "NOT_PROVIDED"
+        and public.get("files") == []
+        and task.get("public_original_input_paths") == [])
+
+
 def _validate_repair_record(path: Path, task: dict, repaired_hash: str,
                             challenge: dict) -> tuple[dict | None, list[str]]:
     """Bind an AI repair's author and rationale to parent/new/test hashes."""
@@ -2547,6 +2561,9 @@ def _validate_repair_record(path: Path, task: dict, repaired_hash: str,
         reasons.append("AI repair record rationale must explain the repair")
     contract = record.get("repair_contract")
     public = task.get("public_original_input") or {}
+    if contract is None and not _requires_public_source_repair_contract(task):
+        return (None, reasons) if reasons else (
+            {**record, "path": str(path), "sha256": _sha256_text(raw)}, [])
     if public.get("status") != "PRESENT" or not public.get("source_sha256"):
         reasons.append("source-bounded repair requires immutable public original input")
     if not isinstance(contract, dict):
@@ -8888,7 +8905,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
     repair_outcomes = iter(_ordered_parallel_map(
         [(p["id"], p["project"], True, None, p["result"].get("exit"),
           ({"repair_contract": ((p.get("repair_provenance") or {}).get("repair_contract")),
-            "require_repair_contract": True,
+            "require_repair_contract": _requires_public_source_repair_contract(p["task"]),
             **({"expected_repaired_output_sha256": p["repaired_output_sha256"]}
                if p.get("repaired_output_sha256") is not None else {})}
            if p["task"].get("candidate_origin") == "AI_REPAIR" or p["kind"] == "run"
@@ -9092,7 +9109,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                         "author": {"kind": "AI", "model": "required"},
                         "oracle_accessed": False,
                         "rationale": "required",
-                        "repair_contract": {
+                        **({"repair_contract": {
                             "schema": "vibeic.source_bounded_completion.v1",
                             "prompt_sha256": task.get("prompt_sha256"),
                             "source_sha256": (task.get("public_original_input") or {}).get(
@@ -9105,7 +9122,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                             "oracle_accessed": False,
                             "preservation": "complete exact-path declaration required",
                             "elaboration_matrix": "complete exact-path declaration required",
-                        },
+                        }} if _requires_public_source_repair_contract(task) else {}),
                     },
                     "verified_prompt_evidence":
                         (verdict.get("override") or {}).get(
@@ -9136,7 +9153,8 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             supplied_rtl=supplied_rtl,
             repair_contract=(repair_contract
                              if task.get("candidate_origin") == "AI_REPAIR" else None),
-            require_repair_contract=(task.get("candidate_origin") == "AI_REPAIR"),
+            require_repair_contract=(task.get("candidate_origin") == "AI_REPAIR"
+                                     and _requires_public_source_repair_contract(task)),
             required_top=_required_scorer_top(_entry(bench), fmt))
         if (not got.get("ok")
                 or _sha256_text(str(got.get("completion") or ""))

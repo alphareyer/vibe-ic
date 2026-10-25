@@ -1150,8 +1150,9 @@ def _write_ai_repair_record(run: Path, task: dict, challenge: dict) -> dict:
     repaired_hash = bd._sha256_text(bd._candidate_text(rtl_files))
     candidate = rtl_files[0].read_text()
     public = task["public_original_input"]
-    source_path = public["files"][0]["relative_path"]
-    original = (project / "input/public_original/files" / source_path).read_text()
+    source_path = public["files"][0]["relative_path"] if public["files"] else ""
+    original = ((project / "input/public_original/files" / source_path).read_text()
+                if source_path else "")
     author = {"kind": "AI", "model": "test-repair-model"}
     record = {
         "schema": bd._AI_REPAIR_RECORD_SCHEMA,
@@ -1191,13 +1192,15 @@ def _write_ai_repair_record(run: Path, task: dict, challenge: dict) -> dict:
                 "configurations": [{"name": "default"}]},
         },
     }
+    if not public["files"]:
+        record.pop("repair_contract")
     path = bd._repair_record_path(run, task)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record))
     return record
 
 
-def _dispatched_parent_task(tmp_path: Path) -> tuple[Path, dict, Path]:
+def _dispatched_parent_task(tmp_path: Path, *, supplied_source=True) -> tuple[Path, dict, Path]:
     """Build the review worklist shape emitted after a dispatched runner call."""
     run = tmp_path / "run"
     (run / "responses").mkdir(parents=True)
@@ -1207,7 +1210,8 @@ def _dispatched_parent_task(tmp_path: Path) -> tuple[Path, dict, Path]:
     rtl.write_text(
         "module dut(input wire a, output wire y); assign y = ~a; endmodule\n")
     prompt = (project / "input/phase1_prompt.md").read_text()
-    bio._stage_public_original("p1", prompt, {"dut.v": rtl.read_text()}, project)
+    bio._stage_public_original("p1", prompt,
+                               {"dut.v": rtl.read_text()} if supplied_source else {}, project)
     runner = tmp_path / "fixture-runner" / "vibe_ic_one_shot_runner.py"
     runner.parent.mkdir()
     runner.write_text('''import pathlib, sys
@@ -1623,9 +1627,10 @@ def test_supplied_rtl_accepts_only_explicit_step2_reentry(tmp_path):
 
 
 @_NEEDS_SIMULATOR
+@pytest.mark.parametrize('supplied_source', [True, False])
 def test_ai_repair_reenters_at_validation_without_regeneration(
-        tmp_path, monkeypatch):
-    run, task, runner = _dispatched_parent_task(tmp_path)
+        tmp_path, monkeypatch, supplied_source):
+    run, task, runner = _dispatched_parent_task(tmp_path, supplied_source=supplied_source)
     project = Path(task["project"])
     task["verification_execution"] = {
         "backend": "host", "selection": "explicit test host"}
@@ -1640,6 +1645,7 @@ def test_ai_repair_reenters_at_validation_without_regeneration(
     repairs = bd._read_jsonl(run / bd._REPAIR_WORKLIST)
     assert repairs[0]["status"] == "AI_SEMANTIC_REPAIR_REQUIRED"
     assert repairs[0]["challenge_result"]["status"] == "FAIL"
+    assert ('repair_contract' in repairs[0]['repair_record_requirements']) == supplied_source
 
     working_rtl.write_text(
         "module dut(input wire a, output wire y); assign y = a; endmodule\n")
@@ -1701,6 +1707,27 @@ def test_ai_repair_reenters_at_validation_without_regeneration(
         "phases"]
     assert phases["phase4_debugging"]["ai_semantic_repair"]["actor"] == \
         "test-repair-model"
+
+
+@pytest.mark.parametrize('mutation', [
+    'prompt_sha256', 'parent_rtl_sha256', 'repaired_rtl_sha256',
+    'challenge_sha256', 'source_sha256', 'source_completion'])
+def test_prompt_only_repair_keeps_identity_and_source_completion_guards(tmp_path, mutation):
+    run, task, _ = _dispatched_parent_task(tmp_path, supplied_source=False)
+    challenge = {'sha256': 'c' * 64}
+    record = _write_ai_repair_record(run, task, challenge)
+    if mutation == 'source_sha256':
+        task['public_original_input']['source_sha256'] = '0' * 64
+    elif mutation == 'source_completion':
+        task['program_routing']['nature'] = 'rtl_completion'
+    else:
+        record[mutation] = '0' * 64
+    path = bd._repair_record_path(run, task)
+    path.write_text(json.dumps(record))
+    _, reasons = bd._validate_repair_record(
+        path, task, bd._sha256_text(bd._candidate_text(bd._rtl_files(Path(task['project'])))),
+        challenge)
+    assert reasons
 
 
 def test_dispatched_ai_repair_consumes_changed_rtl_before_regate(
