@@ -272,13 +272,17 @@ def _width_example_spec(header, width=16, *, explicit_owner=True):
     return example + "Build the inverter with the following exact interface:\n" + header
 
 
-def test_separate_width_illustration_is_advisory_through_native_program_contract(tmp_path):
+@pytest.mark.parametrize("source_form", ["verilog", "named_prose"])
+def test_separate_width_illustration_is_advisory_through_native_program_contract(tmp_path, source_form):
     import hashlib
     import benchmark_dispatch as bd
     from _hostpaths import require_repo
     rtl = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
                        "fixtures", "librelane_lint_frontend", "plain.v").read_text()
-    spec = _width_example_spec(rtl)
+    interface = ("Implement a module named plain with the following interface.\n"
+                 " - input value_i (8 bits)\n - output value_o (8 bits)\n"
+                 if source_form == "named_prose" else rtl)
+    spec = _width_example_spec(interface)
     tb = '''module tb;
 reg [7:0] value_i; wire [7:0] value_o; integer n;
 plain u(.value_i(value_i), .value_o(value_o));
@@ -314,6 +318,7 @@ endmodule
 
 
 @pytest.mark.parametrize("case", ["same_width", "no_separate_owner", "wrong_candidate_width",
+                                  "wrong_candidate_name", "phantom_named_candidate",
                                   "unknown_source_width", "unknown_output_width",
                                   "missing_source_interface", "no_rtl"])
 def test_real_or_unresolved_width_examples_remain_blocking(case):
@@ -322,6 +327,12 @@ def test_real_or_unresolved_width_examples_remain_blocking(case):
                                explicit_owner=case != "no_separate_owner")
     if case == "wrong_candidate_width":
         rtl = rtl.replace("[7:0]", "[3:0]")
+    elif case in {"wrong_candidate_name", "phantom_named_candidate"}:
+        spec = _width_example_spec(
+            "Implement a module named DesiredUnit.\n"
+            " - input data_i (8 bits)\n - output data_o (8 bits)\n")
+        if case == "phantom_named_candidate":
+            rtl = rtl.replace("module neutral", "module named")
     elif case == "unknown_source_width":
         spec = spec.replace("[7:0]", "[WIDTH-1:0]")
     elif case == "unknown_output_width":
@@ -333,6 +344,21 @@ def test_real_or_unresolved_width_examples_remain_blocking(case):
         rtl = None
     _, examples = _we_items(spec, rtl, None)
     assert examples and all(it["block_eligible"] is True for it in examples)
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Implement a module named PacketUnit.", "PacketUnit"),
+    ("Implement a module named `PacketUnit`.", "PacketUnit"),
+    ("Implement a module Named PacketUnit.", "PacketUnit"),
+    ("module named(input a,output y); endmodule", "named"),
+    ("module named #(parameter W=8)(input [W-1:0] a,output y); endmodule", "named"),
+    ("module named; input a; output y; endmodule", "named"),
+    ('module named(input a,output y); initial $display("module named TopModule"); endmodule', "named"),
+    ("// Implement a module named PhantomUnit.\n", None),
+    ('"Implement a module named PhantomUnit."', None),
+])
+def test_module_name_reader_distinguishes_named_prose_from_hdl_and_phantoms(text, expected):
+    assert SC._SRC.extract_spec_contract(text, confirm=False).module == expected
 
 
 if __name__ == "__main__":
