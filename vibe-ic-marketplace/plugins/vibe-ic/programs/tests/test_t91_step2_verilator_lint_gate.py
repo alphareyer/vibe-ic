@@ -256,6 +256,71 @@ def test_direct_mode_is_unchanged_and_adds_no_row(tmp_path, monkeypatch):
     assert step is not None and step(project) is None and calls == []
 
 
+def _standalone_rtl(tmp_path):
+    src = rtl(tmp_path, 'plain.v',
+              'module plain(input [7:0] value_i, output [7:0] value_o); '
+              'assign value_o = ~value_i; endmodule\n')
+    project = tmp_path / 'design'
+    put(project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json', {'top_module': 'plain'})
+    return project, src
+
+
+@pytest.mark.parametrize('valid', [True, False])
+def test_bounded_no_pdk_consumes_native_project_lint(tmp_path, valid):
+    project, src = _standalone_rtl(tmp_path)
+    if not valid:
+        src.write_text('module plain(input [7:0] value_i, output [7:0] value_o); '
+                       'assign value_o = ; endmodule\n')
+    runner = importlib.import_module('design_one_shot_runner')
+    row = runner.step_rtl_lint_tool(project, bounded_rtl=True)
+    assert row.status == ('PASS' if valid else 'FAIL'), row.detail
+    context = row.extras['native_context']
+    assert context['top'] == 'plain' and context['files'] == [str(src.resolve())]
+    assert context['defines'] == []
+    assert context['native_returncode'] == context['transport_returncode']
+    assert context['native_returncode'] == (0 if valid else 1)
+    assert isinstance(json.loads((project / 'reports/phase2/lint/rtl_hygiene.json').read_text()), list)
+    assert not (project / 'phase3/librelane/step2/lint_config.json').exists()
+
+
+@pytest.mark.parametrize('choice', ['unbounded', 'step_switch', 'selected_pdk', 'malformed_pdk'])
+def test_no_pdk_native_lint_does_not_replace_explicit_or_physical_contract(tmp_path, choice):
+    project, _ = _standalone_rtl(tmp_path)
+    if choice == 'step_switch':
+        put(project / 'phase3/librelane_switch.json', {'steps': {'2': 'librelane'}})
+    if choice == 'malformed_pdk':
+        path = project / 'input/project.json'
+        path.parent.mkdir(parents=True)
+        path.write_text('{')
+    runner = importlib.import_module('design_one_shot_runner')
+    row = runner.step_rtl_lint_tool(project, bounded_rtl=choice != 'unbounded',
+                                    pdk_name='declared-tech' if choice == 'selected_pdk' else None)
+    assert row.status == 'FAIL', row.detail
+    assert 'LL_PHASE2_PDK_' in row.detail
+    assert not (project / 'reports/phase2/lint/rtl_hygiene.json').exists()
+
+
+@pytest.mark.parametrize('native_rc,transport_rc', [(None, 127), (0, 125)])
+def test_native_lint_failed_transport_is_not_a_design_pass(tmp_path, monkeypatch,
+                                                          native_rc, transport_rc):
+    project, src = _standalone_rtl(tmp_path)
+    runner = importlib.import_module('design_one_shot_runner')
+
+    def failed_transport(*args, **kwargs):
+        out = project / 'reports/phase2/lint'
+        put(out / 'rtl_hygiene.json', [])
+        put(out / 'native-elaboration-failed/context.json', {
+            'top': 'plain', 'files': [str(src.resolve())],
+            'native_returncode': native_rc, 'transport_returncode': transport_rc,
+            'status': 'NOT_MEASURED'})
+        return SimpleNamespace(returncode=1, stdout='', stderr='native transport failed')
+
+    monkeypatch.setattr(runner._pr, 'run', failed_transport)
+    row = runner.step_rtl_lint_tool(project, bounded_rtl=True)
+    assert row.status == 'NOT_MEASURED', row.detail
+    assert row.extras['completed'] is False
+
+
 def test_dual_mode_blocks_on_the_union_and_names_the_arm(tmp_path, monkeypatch):
     project, src, _, tool = _design(tmp_path, 'dual', MULTI, 0, 1)
     _, step = _runner(monkeypatch, tool)

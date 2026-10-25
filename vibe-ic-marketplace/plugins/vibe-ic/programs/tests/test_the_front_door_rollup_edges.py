@@ -392,6 +392,7 @@ def test_bounded_rtl_request_reaches_the_real_lint_consumer(tmp_path):
     import hashlib
     import subprocess
     import emit_attestation
+    import benchmark_io_adapter as bio
     from programs.tests._hostpaths import require_repo
     fixture = require_repo() / 'vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/librelane_lint_frontend/plain.v'
     source = fixture.read_text()
@@ -431,7 +432,24 @@ def test_bounded_rtl_request_reaches_the_real_lint_consumer(tmp_path):
         lint_path = project / 'reports/phase2/lint/rtl_hygiene.json'
         assert lint_path.is_file(), result.stdout + result.stderr
         lint = json.loads(lint_path.read_text())
-        assert lint['verdict'] == ('PASS' if valid else 'FAIL'), lint
+        assert isinstance(lint, list), lint
+        child = json.loads(_pl.report_path(project, 'phase2_one_shot.json').read_text())
+        measured = next(row for row in child['steps'] if row['name'] == 'rtl_lint_tool')
+        assert measured['status'] == ('PASS' if valid else 'FAIL'), child
+        context = measured['extras']['native_context']
+        assert isinstance(context['native_returncode'], int), context
+        assert (context['native_returncode'] == 0) is valid, context
+        assert context['input_sha256'], context
+        if valid:
+            assert context['status'] == 'MEASURED', context
+        else:
+            assert lint, 'the compiler rejection must retain its actual findings'
+        collected = bio.collect('verilogeval', project.name, project,
+                                supplied_rtl=True, required_top='plain')
+        assert collected['ok'] is valid, collected
+        if valid:
+            assert bio.collect('verilogeval', project.name, project,
+                               required_top='plain')['ok'] is False
         assert emit_attestation.phase1_provenance(project) == provenance
         assert {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in original} == original
 
