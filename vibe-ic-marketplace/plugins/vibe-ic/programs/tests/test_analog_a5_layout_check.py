@@ -752,6 +752,11 @@ def test_documented_die_bounds_actual_gds_and_rejects_long_row(tmp_path):
     assert 'A5_LAYOUT_EXCEEDS_DOCUMENTED_DIE' in {f['rule'] for f in findings}
     gds.write_bytes(build_gds(1000, 1300.001))
     assert gate.die_fit(project, 'cell')['status'] == 'FAIL'
+    # A small footprint still fails if its actual coordinates leave the die.
+    gds.write_bytes(build_gds(1000, 900, origin_um=(-1, 0)))
+    assert gate.die_fit(project, 'cell')['status'] == 'FAIL'
+    gds.write_bytes(build_gds(1000, 900, origin_um=(301, 0)))
+    assert gate.die_fit(project, 'cell')['status'] == 'FAIL'
 
 
 def test_die_size_conflict_and_nonfinite_dimensions_are_not_accepted(tmp_path):

@@ -230,11 +230,7 @@ def documented_die_size(project: Path):
 
 
 def die_fit(project: Path, block: str):
-    """Measure the actual hierarchical GDS footprint against the source die.
-
-    A macro's local origin may be translated at placement; its width and
-    height may not be scaled or replaced by its painted-device area.
-    """
+    """Require the actual hierarchical GDS bbox inside the source-sized die."""
     from analog_lef_gds_outline_check import parse_gds_bbox_extent
     size, sources = documented_die_size(project)
     if size is None:
@@ -244,10 +240,12 @@ def die_fit(project: Path, block: str):
     if extent is None:
         return {"status": "FAIL", "reason": "actual GDS extent unavailable", "sources": sources}
     footprint = [extent[2] - extent[0], extent[3] - extent[1]]
-    return {"status": "PASS" if all(a <= b for a, b in zip(footprint, size)) else "FAIL",
+    inside = (extent[0] >= 0 and extent[1] >= 0
+              and extent[2] <= size[0] and extent[3] <= size[1])
+    return {"status": "PASS" if inside else "FAIL",
             "bbox_um": list(extent), "footprint_um": footprint,
             "die_size_um": size, "sources": sources,
-            "placement": "translation permitted; no rotation, scaling or die enlargement"}
+            "placement": "actual bbox within [0, 0, die_width, die_height]; no assumed translation, rotation or scaling"}
 
 GATE = "analog_a5_layout_check"
 SKILL = "analog-layout"
