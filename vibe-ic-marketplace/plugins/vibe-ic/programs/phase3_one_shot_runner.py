@@ -77920,6 +77920,7 @@ def _native_cvc_category(project: Path, top: str, pdk: PdkConfig,
     out = _pl.reports_phase3_dir(project) / "cvc_native"
     out.mkdir(parents=True, exist_ok=True)
     report = out / "report.rpt"
+    receipt_path = out / "result.json"
     shell = f"""set -eu
 cvc={shlex.quote(cvc_dir)}
 out={shlex.quote(str(out))}
@@ -77948,11 +77949,20 @@ cvc_rv cvcrc > cvc.stdout 2> cvc.stderr
             "--cpus", "4", "--pids-limit", "512",
             "-v", f"{Path(project).resolve()}:{Path(project).resolve()}",
             image, "--skip", *command]
+    # A fixed output name is part of the Step-28 contract, so invalidate both
+    # prior authority files before this invocation.  cvc_rv can return without
+    # touching its report; existence after launch must therefore mean THIS
+    # launch wrote it, never that an older PASS survived.
+    report.unlink(missing_ok=True)
+    receipt_path.unlink(missing_ok=True)
     try:
         proc = _ll.run_container(argv, supervised=True, log=out / "docker.log")
     except Exception as exc:
         return {**base, "result": "INCOMPLETE",
                 "note": f"native CVC launch failed: {exc}"}
+    if proc.returncode != 0:
+        return {**base, "result": "INCOMPLETE", "native_rc": proc.returncode,
+                "note": "native CVC invocation failed; report is not evidence"}
     if not report.is_file():
         return {**base, "result": "INCOMPLETE", "native_rc": proc.returncode,
                 "note": "cvc_rv wrote no report"}
@@ -77961,7 +77971,6 @@ cvc_rv cvcrc > cvc.stdout 2> cvc.stderr
     ref = lambda path: {"path": str(Path(path).relative_to(project)),
                         "sha256": sha(path)}
     pdk_sources = out / "pdk-sources.sha256"
-    receipt_path = out / "result.json"
     receipt = {
         "schema": "vibeic/native-cvc-result/1",
         "producer": "phase3_one_shot_runner._native_cvc_category",

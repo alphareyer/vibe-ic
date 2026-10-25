@@ -372,6 +372,12 @@ def _native_cvc_current(project, prepared, summary):
         raise AdmissionRefusal("D66_NATIVE_CVC_EVIDENCE_ABSENT",
                                "exactly one native CVC category required")
     row = rows[0]
+    if (row.get("result") == "INCOMPLETE"
+            or isinstance(row.get("native_rc"), bool)
+            or not isinstance(row.get("native_rc"), int)
+            or row["native_rc"] != 0):
+        raise AdmissionRefusal("D66_NATIVE_CVC_PRODUCER_INVALID",
+                               "successful current native CVC invocation required")
     try:
         receipt_path = _bound(project, row.get("producer_receipt"),
                               "native CVC producer receipt")
@@ -385,7 +391,8 @@ def _native_cvc_current(project, prepared, summary):
             "phase3_one_shot_runner._native_cvc_category"
             or receipt.get("tool") != "cvc_rv"
             or receipt.get("image") != backend["image_id"]
-            or receipt.get("top") != backend["top"]):
+            or receipt.get("top") != backend["top"]
+            or receipt.get("native_rc") != row["native_rc"]):
         raise AdmissionRefusal("D66_NATIVE_CVC_PRODUCER_INVALID",
                                "typed current producer identity required")
     expected_inputs = {

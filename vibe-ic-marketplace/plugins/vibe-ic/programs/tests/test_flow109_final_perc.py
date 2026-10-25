@@ -168,11 +168,14 @@ def _case(project, monkeypatch, *, producer="PASS", gate="PASS",
         elif cvc_damage == "forged_input":
             receipt_payload["inputs"]["adopted_netlist"] = {
                 **subjects["adopted_netlist"], "sha256": "f" * 64}
+        elif cvc_damage == "failed_launch":
+            receipt_payload["native_rc"] = 17
         receipt = _put(project, "reports/phase3/cvc_native/result.json", receipt_payload)
         summary["categories"].append({
             "category": "Native CVC electrical rules", "status": "AUTOMATED",
             "tool": "cvc_rv + PDK-declared libs.tech/librelane/cvc",
-            **parsed, "native_rc": 0, "evidence": report,
+            **parsed, "native_rc": 17 if cvc_damage == "failed_launch" else 0,
+            "evidence": report,
             "producer_receipt": receipt,
         })
         if native_cvc_fail:
@@ -365,7 +368,11 @@ def test_native_cvc_report_is_graded_from_contents_not_process_rc():
         "CVC: Total: 0\nCVC: End: now\n")["result"] == "INCOMPLETE"
 
 
-def test_native_cvc_producer_publishes_bound_report_and_receipt(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", [
+    "success", "no_report", "failed", "failed_with_report",
+])
+def test_native_cvc_producer_publishes_bound_report_and_receipt(
+        tmp_path, monkeypatch, mode):
     import librelane_contract
     import phase3_one_shot_runner as runner
 
@@ -383,22 +390,32 @@ def test_native_cvc_producer_publishes_bound_report_and_receipt(tmp_path, monkey
     monkeypatch.setattr(librelane_contract, "native_tool_command",
                         lambda _image, command: ("none", command))
 
+    out = tmp_path / "reports/phase3/cvc_native"
+    out.mkdir(parents=True)
+    (out / "report.rpt").write_text(
+        "CVC: 9(9) instances, 9(9) nets, 9(9) devices.\n"
+        "CVC: HI-Z Inputs: 0\nCVC: Total: 0\nCVC: End: stale\n")
+    (out / "result.json").write_text('{"stale": true}\n')
+
     def fake_run(argv, **_kwargs):
         assert "--cpus" in argv and argv[argv.index("--cpus") + 1] == "4"
-        out = tmp_path / "reports/phase3/cvc_native"
-        out.mkdir(parents=True, exist_ok=True)
-        (out / "report.rpt").write_text(
-            "CVC: 2(2) instances, 4(4) nets, 2(2) devices.\n"
-            "CVC: HI-Z Inputs: 0\nCVC: Total: 0\nCVC: End: now\n")
+        if mode in {"success", "failed_with_report"}:
+            (out / "report.rpt").write_text(
+                "CVC: 2(2) instances, 4(4) nets, 2(2) devices.\n"
+                "CVC: HI-Z Inputs: 0\nCVC: Total: 0\nCVC: End: current\n")
         (out / "pdk-sources.sha256").write_text("a" * 64 + "  /pdk/cvcrc\n")
-        return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=0 if mode in {"success", "no_report"} else 17)
 
     monkeypatch.setattr(librelane_contract, "run_container", fake_run)
     category = runner._native_cvc_category(
         tmp_path, top, SimpleNamespace(), "registry/image@sha256:" + "1" * 64)
-    assert category["result"] == "PASS"
-    assert category["counts"]["Total"] == 0
-    receipt_path = tmp_path / category["producer_receipt"]["path"]
+    receipt_path = out / "result.json"
+    if mode != "success":
+        assert category["result"] == "INCOMPLETE"
+        assert "producer_receipt" not in category
+        assert not receipt_path.exists()
+        return
+    assert category["result"] == "PASS" and category["counts"]["Total"] == 0
     receipt = json.loads(receipt_path.read_text())
     assert receipt["producer"] == "phase3_one_shot_runner._native_cvc_category"
     assert receipt["report"] == category["evidence"]
@@ -417,6 +434,7 @@ def test_d66_refuses_when_existing_owner_did_not_publish_native_cvc(tmp_path, mo
 
 @pytest.mark.parametrize("damage,reason", [
     ("forged", "D66_NATIVE_CVC_PRODUCER_INVALID"),
+    ("failed_launch", "D66_NATIVE_CVC_PRODUCER_INVALID"),
     ("forged_input", "D66_NATIVE_CVC_EVIDENCE_MISMATCH"),
     ("mismatched", "D66_NATIVE_CVC_EVIDENCE_MISMATCH"),
 ])
