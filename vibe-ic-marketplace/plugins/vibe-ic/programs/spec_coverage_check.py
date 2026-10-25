@@ -142,9 +142,11 @@ except ImportError:  # packaged
     from .pulse_width_rearm_contract import extract_contract as _extract_pulse_contract
 
 try:
-    from _prose_polarity import is_denied as _prose_is_denied
+    from _prose_polarity import (is_denied as _prose_is_denied,
+                                 sentence_scope as _prose_sentence_scope)
 except ImportError:  # packaged
-    from ._prose_polarity import is_denied as _prose_is_denied  # type: ignore
+    from ._prose_polarity import (is_denied as _prose_is_denied,
+                                  sentence_scope as _prose_sentence_scope)  # type: ignore
 
 # The ONE offset-preserving blanker for HDL comments AND string literals
 # (vibe-ic#731). `_SRC.strip_comments` blanks comments only, and a Verilog
@@ -1625,6 +1627,70 @@ def _worked_example_is_covered_parent_gloss(coverage_tokens: List[str],
     except ValueError:
         return False
     return _binary_nibble_has_grouped_source(combined_text, lhs)
+
+
+_SEPARATE_WIDTH_ILLUSTRATION_RE = re.compile(
+    r"\b(?:for\s+example|for\s+instance|as\s+an?\s+illustration)\s*,?\s*"
+    r"(?:consider\s+)?(?:a|an)\s+(\d+)\s*[- ]\s*bit\s+"
+    r"(?:vector|word|value|operand|example|illustration)\b"
+    r"[^.;]*?\b(?:given|with)\s+(?:the\s+)?input\b",
+    re.I)
+
+
+def _worked_example_is_separate_width_illustration(
+        it: ChecklistItem, spec: str, rtl: Optional[str]) -> bool:
+    """True only for an explicitly separate, source-owned illustration.
+
+    The source must declare one concrete multi-bit input and output, and the
+    candidate must reproduce that complete interface exactly.  The prose must
+    separately own a concrete illustration width, in the same sentence as the
+    worked pair, that differs from both DUT widths.  Ambiguous/default widths,
+    real requirements and interface mismatches therefore remain blocking.
+    """
+    if not rtl or len(it.coverage_tokens) != 2:
+        return False
+    contract = _SRC.extract_spec_contract(spec, confirm=False)
+    inputs = [p for p in contract.ports if p.direction == "input"]
+    outputs = [p for p in contract.ports if p.direction == "output"]
+    if (len(inputs) != 1 or len(outputs) != 1
+            or inputs[0].width <= 1 or outputs[0].width <= 1):
+        return False
+    try:
+        top, ports = _SRC.parse_rtl_ports(rtl, contract.module)
+    except (TypeError, ValueError):
+        return False
+    if ((contract.module is not None and top != contract.module)
+            or {(p.name, p.direction, p.width) for p in ports}
+            != {(p.name, p.direction, p.width) for p in contract.ports}):
+        return False
+
+    for match in _WORKED_EXAMPLE_RE.finditer(spec):
+        if [match.group(1).lower(), match.group(3).lower()] != [
+                token.lower() for token in it.coverage_tokens]:
+            continue
+        lo, hi = _prose_sentence_scope(spec, match.start(), match.end())
+        clause = spec[lo:hi]
+        owner = _SEPARATE_WIDTH_ILLUSTRATION_RE.search(
+            clause[:match.start() - lo])
+        if (owner is None or _prose_is_denied(clause)
+                or re.search(r"\b(?:must|shall|required|requirement)\b", clause, re.I)):
+            continue
+        width = int(owner.group(1))
+        if width <= 1 or width in {inputs[0].width, outputs[0].width}:
+            continue
+        values = []
+        for token in it.coverage_tokens:
+            clean = token.replace("_", "")
+            try:
+                values.append(int(clean, 16) if clean.lower().startswith("0x")
+                              else int(clean, 2) if clean.lower().startswith("0b")
+                              else int(clean, 10))
+            except ValueError:
+                values = []
+                break
+        if values and all(0 <= value < (1 << width) for value in values):
+            return True
+    return False
 
 
 def _worked_example_structural_artifact(text: str, m) -> bool:
@@ -3681,6 +3747,9 @@ def run(stations: dict, rtl_text: Optional[str], tb_text: Optional[str],
                 #  3'b010"; cvdp_copilot_binary_to_BCD_0010: the single example
                 #  0010_0101_0111->257 split into 0010=2 / 0101=5 / 0111=7.)
                 if it.we_structural_artifact:
+                    corr = _prov.NO_CORROBORATION
+                elif _worked_example_is_separate_width_illustration(
+                        it, _all_spec, rtl_text):
                     corr = _prov.NO_CORROBORATION
                 # ORGANIC #780 r2 (field reopen) — the extraction-time artifact
                 # check sees only the SPEC, so a spec that lists the per-digit
