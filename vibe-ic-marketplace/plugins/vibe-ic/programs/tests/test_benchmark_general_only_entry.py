@@ -590,21 +590,28 @@ def _benchmark_checkpoint_transport(project, knobs, monkeypatch, observations,
         if mutate is not None:
             mutate(project, document, accepted)
         current.write_text(json.dumps(document) + '\n')
-        return SimpleNamespace(returncode=0 if accepted['verdict'] == 'PASS' else 1,
+        return SimpleNamespace(returncode=0 if document['verdict'] == 'PASS' else 1,
                                stdout='', stderr='')
 
     monkeypatch.setattr(dispatch.subprocess, 'run', transport)
 
 
+@pytest.mark.parametrize('whole_verdict', ['PASS', 'NOT_MEASURED'])
 def test_late_signed_canonical_checkpoint_is_admitted_without_rewriting_producer(
-        tmp_path, monkeypatch, checkpoint_execution):
+        tmp_path, monkeypatch, checkpoint_execution, whole_verdict):
     project, _, knobs, original, runner, budget, old_report = _benchmark_d1_checkpoint(
         tmp_path, monkeypatch)
     _sign_d1_checkpoint(project)
     old_bytes = old_report.read_bytes()
     docs_before = front._p1id.docs_snapshot(project)
     observations = []
-    _benchmark_checkpoint_transport(project, knobs, monkeypatch, observations)
+    def outside_d1_scope(project, document, accepted):
+        document['verdict'] = whole_verdict
+        if whole_verdict == 'NOT_MEASURED':
+            document['phases'].append(
+                {'name': 'phase2', 'verdict': 'NOT_MEASURED', 'rc': 1})
+    _benchmark_checkpoint_transport(
+        project, knobs, monkeypatch, observations, mutate=outside_d1_scope)
     result = dispatch._ensure_phase1_frontdoor(
         runner, project, budget, force_current=True, delivery_route='ic',
         route_receipt={}, task_sha256='b' * 64, source_sha256='a' * 64,
@@ -622,6 +629,7 @@ def test_late_signed_canonical_checkpoint_is_admitted_without_rewriting_producer
     # rejected because the untouched historical producer report is demanded.
     assert result.get('d1_gate_error', 'CURRENT_D1_ADMITTED') == 'CURRENT_D1_ADMITTED', result
     assert result['d1_gate']['verdict'] == 'PASS'
+    assert result['runner_rc'] == (0 if whole_verdict == 'PASS' else 1)
 
 
 def test_current_signature_cannot_override_a_failed_checkpoint_consumer(
@@ -676,7 +684,7 @@ def _seal_checkpoint_activation(project, result, arguments):
 @pytest.mark.parametrize('damage', [
     'missing_acceptance', 'failed_acceptance', 'wrong_folder', 'untyped_pass',
     'stale_invocation', 'changed_output', 'changed_input', 'failed_canonical_record',
-    'linked_canonical_record', 'escaped_folder',
+    'linked_canonical_record', 'escaped_folder', 'failed_phase1', 'duplicate_phase1',
 ])
 def test_checkpoint_fallback_refuses_invalid_current_proof(
         tmp_path, monkeypatch, checkpoint_execution, damage):
@@ -703,6 +711,10 @@ def test_checkpoint_fallback_refuses_invalid_current_proof(
             (project / 'phase1/generated_docs/L1_DOC.json').write_text('{"changed":true}')
         elif damage == 'changed_input':
             (project / 'input/docs/spec.md').write_text('changed after canonical acceptance')
+        elif damage == 'failed_phase1':
+            document['phases'][0]['verdict'] = 'FAIL'
+        elif damage == 'duplicate_phase1':
+            document['phases'].append(dict(document['phases'][0]))
         else:
             path = versions._versions_root(project) / accepted['folder'] / 'outputs.json'
             if damage == 'failed_canonical_record':

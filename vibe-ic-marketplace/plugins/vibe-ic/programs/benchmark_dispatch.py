@@ -5399,7 +5399,7 @@ def _d1_report_verdict(project: Path, report_name: str, report: dict, *,
     if report_name == "phase1_one_shot.json":
         verdict = report.get("verdict")
         return verdict if isinstance(verdict, str) else None
-    if report_name != "vibe_ic_one_shot.json" or report.get("verdict") != "PASS":
+    if report_name != "vibe_ic_one_shot.json":
         return None
     phases = report.get("phases")
     if not isinstance(phases, list):
