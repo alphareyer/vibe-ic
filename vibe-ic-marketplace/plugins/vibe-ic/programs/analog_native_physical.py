@@ -14,6 +14,7 @@ decks/limits must come from the design, not this adapter.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -336,6 +337,102 @@ def _current_native_views(views: dict) -> bool:
         and view.get("sha256") == _sha(Path(view["path"])) for view in views.values())
 
 
+def _portable_path(project: Path, value: str) -> str:
+    """Publish project-owned receipt paths relative to their transfer unit."""
+    path = Path(value)
+    try:
+        return str(path.resolve().relative_to(project.resolve()))
+    except (OSError, ValueError):
+        return str(path)
+
+
+def _portable_native_views(project: Path, views: dict) -> dict:
+    """Keep native-input identities while making project-owned paths portable."""
+    portable = {}
+    for role, view in (views or {}).items():
+        if not isinstance(view, dict):
+            portable[role] = view
+            continue
+        item = dict(view)
+        if item.get("path"):
+            item["path"] = _portable_path(project, item["path"])
+        if role.startswith("include:"):
+            role = "include:" + item.get("path", role.removeprefix("include:"))
+        portable[role] = item
+    return portable
+
+
+def _portable_measurement_state(project: Path, state: dict) -> dict:
+    """Return the receipt form of a completed native measurement study."""
+    portable = copy.deepcopy(state)
+    portable["native_inputs"] = _portable_native_views(project, portable.get("native_inputs") or {})
+    source = (portable.get("bindings") or {}).get("source")
+    if isinstance(source, dict) and source.get("path"):
+        source["path"] = _portable_path(project, source["path"])
+    for execution in portable.get("executions") or []:
+        if isinstance(execution, dict) and execution.get("log"):
+            execution["log"] = _portable_path(project, execution["log"])
+    return portable
+
+
+def _transferred_project_root(project: Path, work: Path, recorded: str) -> Path | None:
+    """Infer the old root only from the complete canonical A14 producer suffix."""
+    path = Path(recorded)
+    if not path.is_absolute():
+        return project.resolve()
+    try:
+        path.resolve().relative_to(project.resolve())
+        return project.resolve()
+    except (OSError, ValueError):
+        pass
+    suffix = work.resolve().relative_to(project.resolve()).parts
+    parts = path.parts
+    hits = [i for i in range(len(parts) - len(suffix) + 1)
+            if tuple(parts[i:i + len(suffix)]) == suffix]
+    if len(hits) != 1:
+        return None
+    return Path(*parts[:hits[0]])
+
+
+def _transferred_path(project: Path, producer_root: Path, recorded: str) -> Path | None:
+    """Resolve one receipt reference without accepting an escaping/foreign path."""
+    raw = Path(recorded)
+    if not raw.is_absolute():
+        candidate = project / raw
+    else:
+        try:
+            relative = raw.relative_to(producer_root)
+        except ValueError:
+            return None
+        candidate = project / relative
+    try:
+        resolved = candidate.resolve()
+        resolved.relative_to(project.resolve())
+    except (OSError, ValueError):
+        return None
+    return resolved
+
+
+def _transferred_native_views(project: Path, producer_root: Path, views: dict) -> dict | None:
+    """Rebind and hash-check project-owned inputs of a transferred study."""
+    if not isinstance(views, dict) or not views:
+        return None
+    rebound = {}
+    for role, view in views.items():
+        if not isinstance(view, dict) or not view.get("path") or not view.get("sha256"):
+            return None
+        # This is producer provenance, not an input consumed by A15.
+        if role == "native_binary":
+            rebound[role] = dict(view)
+            continue
+        path = _transferred_path(project, producer_root, view["path"])
+        if path is None or not path.is_file() or _sha(path) != view["sha256"]:
+            return None
+        new_role = "include:" + str(path) if role.startswith("include:") else role
+        rebound[new_role] = {**view, "path": str(path)}
+    return rebound
+
+
 def _pre_measurement_study(project: Path, net: Path, candidates: list,
                            measured_log: Callable) -> tuple[dict, dict] | None:
     """Reuse an explicitly adopted OP study; do not call it canonical TB evidence."""
@@ -613,10 +710,11 @@ def _resim(project: Path, name: str, container: str, image: str, pdk: str,
             if not current and state.get("status") != "FAIL":
                 state.update(status="NOT_MEASURED", detail="POST consumed model/include inputs changed: " + reason)
             result_path = destination / "result.json"
-            _write(result_path, state)
-            study_meta = {"result": str(result_path), "sha256": _sha(result_path),
-                "pre_result": pre_state["result"], "pre_result_sha256": pre_state["result_sha256"],
-                "native_inputs": state["native_inputs"]}
+            _write(result_path, _portable_measurement_state(project, state))
+            study_meta = {"result": _portable_path(project, str(result_path)), "sha256": _sha(result_path),
+                "pre_result": _portable_path(project, pre_state["result"]),
+                "pre_result_sha256": pre_state["result_sha256"],
+                "native_inputs": _portable_native_views(project, state["native_inputs"])}
             consumed_inputs["extracted:" + slug] = {"path": str(extracted), "sha256": _sha(extracted)}
             consumed_inputs.update({"post:" + slug + ":" + role: view
                                     for role, view in state["native_inputs"].items()})
@@ -654,8 +752,9 @@ def _resim(project: Path, name: str, container: str, image: str, pdk: str,
         missing = [key for key in limits if post.get(key) is None]
         violated = [key for key, lim in limits.items() if post.get(key) is not None and
                     (not math.isfinite(post[key]) or _violates(post[key], lim["min"], lim["max"]))]
-        records.append({"style": corner["style"], "post_testbench": str(post_tb),
-                        "post_netlist": str(post_net), "measurements": post,
+        records.append({"style": corner["style"],
+                        "post_testbench": _portable_path(project, str(post_tb)),
+                        "post_netlist": _portable_path(project, str(post_net)), "measurements": post,
                         "post_testbench_sha256": _sha(post_tb),
                         "post_netlist_sha256": _sha(post_net),
                         "missing": missing, "violations": violated,
@@ -673,7 +772,8 @@ def _resim(project: Path, name: str, container: str, image: str, pdk: str,
                    outputs, metrics={"pre": {**pre_state, "measurements": pre},
                                      "corners": records, "specs": rows,
                                      "max_delta_pct": max(deltas) if deltas else None},
-                   **({"native_inputs": consumed_inputs} if study_pre else {}))
+                   **({"native_inputs": _portable_native_views(project, consumed_inputs)}
+                      if study_pre else {}))
 
 
 def _statistics(project: Path, name: str, container: str, image: str, pdk: str,
@@ -698,27 +798,34 @@ def _statistics(project: Path, name: str, container: str, image: str, pdk: str,
                        missing_inputs=[str(spec)])
     reports = []
     for corner in corners:
-        deck = Path(corner["post_testbench"])
-        if not deck.is_file():
-            return _result("NOT_MEASURED", f"post-layout testbench absent: {deck}")
-        post_net = Path(corner.get("post_netlist") or "")
-        if not post_net.is_file() or corner.get("post_netlist_sha256") != _sha(post_net) or \
+        producer_root = _transferred_project_root(project, work, corner.get("post_testbench") or "")
+        deck = (_transferred_path(project, producer_root, corner.get("post_testbench") or "")
+                if producer_root is not None else None)
+        if deck is None or not deck.is_file():
+            return _result("NOT_MEASURED",
+                           f"post-layout testbench absent or foreign: {corner.get('post_testbench')}")
+        post_net = _transferred_path(project, producer_root, corner.get("post_netlist") or "")
+        if post_net is None or not post_net.is_file() or corner.get("post_netlist_sha256") != _sha(post_net) or \
                 corner.get("post_testbench_sha256") != _sha(deck):
             return _result("NOT_MEASURED", "post-layout circuit/testbench changed since A14")
         study_meta = corner.get("native_measurement_study")
         if study_meta:
             import analog_bound_measurements as measurements
-            result_path = Path(study_meta.get("result") or "__missing_post_study__")
+            result_path = _transferred_path(project, producer_root,
+                                            study_meta.get("result") or "__missing_post_study__")
+            if result_path is None:
+                return _result("NOT_MEASURED", "post-layout measurement-study receipt is foreign")
             state = _read(result_path)
+            views = _transferred_native_views(project, producer_root,
+                study_meta.get("native_inputs") or state.get("native_inputs"))
             if (not result_path.is_file() or study_meta.get("sha256") != _sha(result_path)
-                    or not _current_native_views(state.get("native_inputs"))):
+                    or views is None):
                 return _result("NOT_MEASURED", "post-layout measurement-study inputs changed since A14")
-            current, reason = measurements.validate_consumed_inputs(project, state["native_inputs"])
-            if not current:
-                return _result("NOT_MEASURED", "post-layout consumed model/include inputs changed since A14: " + reason)
             source = (state.get("bindings") or {}).get("source") or {}
-            if isinstance(source, dict) and source.get("path") and not _current_native_views({"source": source}):
-                return _result("NOT_MEASURED", "post-layout measurement-study source conditions changed since A14")
+            if isinstance(source, dict) and source.get("path"):
+                source_path = _transferred_path(project, producer_root, source["path"])
+                if source_path is None or not source_path.is_file() or source.get("sha256") != _sha(source_path):
+                    return _result("NOT_MEASURED", "post-layout measurement-study source conditions changed since A14")
         # The existing MC producer discovers its runnable deck. Give it an
         # isolated study containing exactly the extracted deck, so it cannot
         # silently choose the earlier schematic TB or replace pre-layout MC.
@@ -733,11 +840,39 @@ def _statistics(project: Path, name: str, container: str, image: str, pdk: str,
                 dest.symlink_to(source, target_is_directory=True)
         # Relative includes in the extracted TB must keep referring to their
         # actual producing files after the MC producer moves the deck again.
-        text = deck.read_text()
-        text = re.sub(r"(?im)^(\s*\.(?:include|lib)\s+)([^\s]+)",
-            lambda m: m[1] + str((deck.parent / m[2].strip("\"'")).resolve())
-            if not Path(m[2].strip("\"'")).is_absolute() else m[0], text)
-        (target / f"tb_{name}.sp").write_text(text)
+        include_re = re.compile(r"(?im)^(\s*\.(?:include|lib)\s+)([^\s]+)")
+        def relocated_include(match, source_dir, aliases=None):
+            token = match[2].strip("\"'")
+            path = (_transferred_path(project, producer_root, token)
+                    if Path(token).is_absolute() else (source_dir / token).resolve())
+            if path is None:
+                return match[0]
+            path = (aliases or {}).get(path, path)
+            return match[1] + str(path)
+        staged_net = target / post_net.name
+        staged_net.write_text(include_re.sub(
+            lambda match: relocated_include(match, post_net.parent), post_net.read_text()))
+        text = include_re.sub(lambda match: relocated_include(
+            match, deck.parent, {post_net.resolve(): staged_net.resolve()}), deck.read_text())
+        staged_deck = target / f"tb_{name}.sp"
+        staged_deck.write_text(text)
+        if study_meta:
+            expected = measurements.consumed_input_views(project, staged_deck)
+            received = {(str(Path(view["path"]).resolve()), view["sha256"])
+                        for role, view in views.items() if role.startswith("include:")}
+            for view in expected.values():
+                path = Path(view["path"]).resolve()
+                if path == staged_net.resolve():
+                    continue  # derived only after the sealed source netlist passed its hash check above
+                if (str(path), view["sha256"]) not in received:
+                    return _result("NOT_MEASURED",
+                        "post-layout consumed model/include inputs changed since A14")
+            validation_inputs = dict(expected)
+            validation_inputs["deck"] = {"path": str(staged_deck), "sha256": _sha(staged_deck)}
+            current, reason = measurements.validate_consumed_inputs(project, validation_inputs)
+            if not current:
+                return _result("NOT_MEASURED",
+                    "post-layout consumed model/include inputs changed since A14: " + reason)
         result = mc.run_block(study, name, container, pdk, n)
         coverage = mc._source_yield_coverage(project, str(spec.relative_to(project)),
                                               result.get("spec_yield") or {}, n)
