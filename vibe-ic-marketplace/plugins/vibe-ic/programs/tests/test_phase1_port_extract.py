@@ -11,6 +11,8 @@ gates' single-best contract is preserved (union is opt-in).
 import sys
 from pathlib import Path
 
+import pytest
+
 PLUGIN = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PLUGIN / "programs"))
 import _specrtl_common as S   # noqa: E402
@@ -222,3 +224,73 @@ def test_genuine_verilog_regions_still_extracted():
     assert {p["name"] for p in PX.extract_ports(mod)} == {"clk", "a", "q"}
     snip = "```\ninput clk,\noutput q\n```"
     assert {p["name"] for p in PX.extract_ports(snip)} >= {"clk", "q"}
+
+
+_PROSE_FIELD_CASES = [
+    ("Input ports:\n    Carry: Carry-in input.\n    Clk: Clock signal.\n"
+     "    Rst: Reset signal.\nOutput port:\n"
+     "    Q: 64-bit register representing the current count value.\n",
+     {"Carry": ("input", 1), "Clk": ("input", 1),
+      "Rst": ("input", 1), "Q": ("output", 64)}),
+    ("Outputs:\n    clock[7:0]: An 8-bit output representing an internal count.\n"
+     "    amber, cyan, magenta: Output status signals.\n",
+     {"clock": ("output", 8), "amber": ("output", 1),
+      "cyan": ("output", 1), "magenta": ("output", 1)}),
+    ("Input ports:\n    wdata: Write data input. The width [WIDTH-1:0] is configurable.\n"
+     "Output ports:\n    rdata: Read data output. The width [WIDTH-1:0] is configurable.\n"
+     "Parameter:\n    WIDTH = 8\n    DEPTH = 16\n",
+     {"wdata": ("input", 8), "rdata": ("output", 8)}),
+]
+
+
+@pytest.mark.parametrize("text,expected", _PROSE_FIELD_CASES)
+def test_explicit_prose_port_fields(text, expected):
+    actual = {row["name"]: (row["dir"], row["width"])
+              for row in PX.extract_prose_ports(text)}
+    assert actual == expected
+
+
+@pytest.mark.parametrize("text,expected", _PROSE_FIELD_CASES)
+def test_prose_port_field_shapes_reach_all_generated_aliases(tmp_path, text, expected):
+    import json
+    import subprocess
+    import phase1_doc_one_shot_runner as producer
+
+    source = tmp_path / "input/docs/interface.txt"
+    source.parent.mkdir(parents=True)
+    source.write_text(text)
+    run = subprocess.run([sys.executable, producer.__file__, str(tmp_path)],
+                         capture_output=True, text=True)
+    assert run.returncode == 0, run.stdout + run.stderr
+    generated = tmp_path / "phase1/generated_docs"
+    l1 = json.loads((generated / "L1_DATASHEET.json").read_text())
+    l9 = json.loads((generated / "L9_INTEGRATION_SPEC.json").read_text())
+    for rows in [l1["pin_table"], *(l9[key] for key in
+                                   ("ports", "top_ports", "top_module_pins"))]:
+        assert {row["name"]: ({"in": "input", "out": "output"}.get(
+                    row["mode"], row["mode"]), row["width"])
+                for row in rows} == expected
+
+
+def test_unresolved_prose_dimension_is_not_a_scalar():
+    rows = PX.extract_prose_ports(
+        "Input ports:\n    payload[UNDECLARED-1:0]: Input data.\n")
+    assert [(row["name"], row["dir"], row["width"]) for row in rows] == [
+        ("payload", "input", S.WIDTH_UNKNOWN)]
+
+
+def test_implementation_assignment_cannot_supply_an_undeclared_parameter():
+    rows = PX.extract_prose_ports(
+        "Input ports:\n    payload[SIZE-1:0]: Input data.\n"
+        "Implementation:\n    SIZE = 8\n")
+    assert [(row["name"], row["width"]) for row in rows] == [
+        ("payload", S.WIDTH_UNKNOWN)]
+
+
+def test_port_section_does_not_promote_later_internal_or_context_definitions():
+    text = ("Input ports:\n    Clk: Clock signal.\n"
+            "Internal registers:\n    shadow: 32-bit internal register.\n"
+            "Output format:\n    trace: 64-bit output record.\n"
+            "Implementation:\n    red, yellow, green: Internal signals.\n")
+    assert {row["name"]: row["dir"]
+            for row in PX.extract_prose_ports(text)} == {"Clk": "input"}

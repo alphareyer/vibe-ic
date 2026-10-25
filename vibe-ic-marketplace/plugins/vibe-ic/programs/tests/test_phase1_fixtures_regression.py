@@ -155,6 +155,31 @@ def test_neutral_io_analysis_prose(tmp_path):
     assert json.loads(Path(emitted.path).read_text())["pin_table"] == []
 
 
+def test_neutral_port_fields_reach_l1_and_every_l9_alias(tmp_path):
+    """The ordinary producer must publish the interface, not just raw notes."""
+    import subprocess
+    import sys
+    from programs import phase1_doc_one_shot_runner as producer
+
+    source = tmp_path / "input/docs/design_description.txt"
+    source.parent.mkdir(parents=True)
+    source.write_text(_load_fixture("neutral_port_fields")[source.name])
+    run = subprocess.run([sys.executable, producer.__file__, str(tmp_path)],
+                         capture_output=True, text=True)
+    assert run.returncode == 0, run.stdout + run.stderr
+    generated = tmp_path / "phase1/generated_docs"
+    l1 = json.loads((generated / "L1_DATASHEET.json").read_text())
+    l9 = json.loads((generated / "L9_INTEGRATION_SPEC.json").read_text())
+    expected = {"a": ("input", 16), "b": ("input", 16),
+                "Cin": ("input", 1), "y": ("output", 16),
+                "Co": ("output", 1)}
+    for rows in [l1["pin_table"], *(l9[key] for key in
+                                   ("ports", "top_ports", "top_module_pins"))]:
+        assert {row["name"]: ({"in": "input", "out": "output"}.get(
+                    row["mode"], row["mode"]), row["width"])
+                for row in rows} == expected
+
+
 def test_neutral_pvt_supply_rail(tmp_path):
     """#3283: a native supply table is not a missing regulator circuit."""
     from programs import phase1_doc_one_shot_runner as producer

@@ -449,5 +449,16 @@
     "version_observed": "v1.30.61, v1.30.96, and main 3ce036897d",
     "version_lkg": "",
     "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/opentitan_aes/l10_verification_shall.txt"
+  },
+  {
+    "issue": 3578,
+    "project": "neutral_port_fields",
+    "layer": "L1_DATASHEET and L9_INTEGRATION_SPEC",
+    "field": "pin_table; ports; top_ports; top_module_pins",
+    "expected": "The named scalar input Cin is present in L1.pin_table and all L9 port aliases, direction input, width 1. Existing a/b/y widths remain 16 and Co remains output width 1. Field parsing must derive section direction and declared prose, without a design-name or signal-name lookup table.",
+    "actual": "Current L1.pin_table and L9.ports/top_ports/top_module_pins contain only a(input,16), b(input,16), y(output,16), Co(output,1). Cin is absent structurally, while its source text survives verbatim in L9.notes. An independent D1 review rejected the current typed interface; raw notes do not substitute for the consumer's port census.",
+    "version_observed": "1.31.58 at d1a134de8353b95860e173798b50b6c0c9a59af0; also observed with report-binding PR3576 applied (head54f700a467d126f9d91fbb1fde717d14893a7372).",
+    "version_lkg": "Not measured for this exact typed-field contract. Published historical benchmark scores do not prove this current extractor contract passed.",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/neutral_port_fields/design_description.txt"
   }
 ]

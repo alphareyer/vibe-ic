@@ -36,7 +36,7 @@ from _hdl_code_text import strip_hdl_comments_and_strings  # noqa: E402
 from _specrtl_common import (  # noqa: E402
     parse_verilog_ports, _parse_md_table_ports, Port, strip_comments,
     _strip_subprograms, _PORT_DECL as _PORT_DECL_SPAN, _parse_module_params,
-    WIDTH_UNKNOWN,
+    _safe_eval_int, WIDTH_UNKNOWN,
 )
 
 # `parameter NAME = VALUE` / `localparam NAME = VALUE` (Verilog form).
@@ -509,6 +509,24 @@ def extract_params(prompt: str) -> List[Dict]:
     out: Dict[str, str] = {}
     for m in _PARAM_DECL.finditer(prompt):
         out.setdefault(m.group(1), m.group(2).strip())
+    # A prose parameter list states the same defaults without repeating the
+    # Verilog keyword: `Parameter:` followed by `WIDTH = 8`. Only this explicit
+    # section admits bare assignments; implementation assignments are not
+    # parameter declarations.
+    parameter_section = False
+    for line in prompt.splitlines():
+        core = re.sub(r'[^a-z ]', '', line.strip().lower()).strip()
+        if core in ("parameter", "parameters", "parameterized values"):
+            parameter_section = True
+            continue
+        if not parameter_section or not line.strip():
+            continue
+        assignment = re.fullmatch(
+            r'\s*(?:[-*]\s*)?`?([A-Za-z_]\w*)`?\s*=\s*(.+?)\s*[;,]?\s*', line)
+        if assignment:
+            out.setdefault(assignment.group(1), assignment.group(2).strip())
+        else:
+            parameter_section = False
     # markdown parameter table: a 2+-column row whose 1st cell is an identifier
     # and 2nd is a pure integer/expr default (and the row is NOT a port row — a
     # port row's 2nd cell is a direction in/out/input/output).
@@ -721,7 +739,7 @@ def _attach_regmap_fields(prompt: str, regs):
 # a word, not a colon). Optional leading width `[3:0]` / `[WIDTH-1:0]`.
 _PROSE_SIG = re.compile(
     r'^\s*[-*]\s*\**\s*(?:\[\s*([^\]]*?)\s*\]\s*)?`?\**\s*'
-    r'([A-Za-z_]\w*)\s*'
+    r'([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*'
     r'(?:\[\s*([^\]]*?)\s*\])?\**`?\**\s*:',
 )
 # The same definition shape with the bullet made optional, used ONLY while a
@@ -729,7 +747,7 @@ _PROSE_SIG = re.compile(
 # `_PROSE_SIG`'s: (leading-range, name, trailing-range).
 _PROSE_SIG_UNBULLETED = re.compile(
     r'^[ \t]*(?:\[\s*([^\]]*?)\s*\]\s*)?`?\**\s*'
-    r'([A-Za-z_]\w*)\s*'
+    r'([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*'
     r'(?:\[\s*([^\]]*?)\s*\])?\**`?\**\s*'
     # an optional parenthesised type/direction group: `clk (input)`,
     # `a (input [31:0])`, `z (output reg [31:0])`. It is where a spec that
@@ -761,9 +779,8 @@ _PROSE_STOP = frozenset((
 # `reset`, `data`, `state`, `signal`. Under an explicit `Input ports:` heading
 # that trade is wrong: `reset: Reset signal to initialize the counter` IS the
 # port, and dropping it publishes an interface that is missing a pin. Inside a
-# declared port section only the META words — the ones that can only ever be a
-# heading or an annotation — are rejected; the TitleCase-word rule still throws
-# out `Reset:` written as a descriptor.
+# declared port section only META words that denote headings or annotations
+# are rejected. Outside that section TitleCase descriptors remain excluded.
 _PROSE_STOP_META = frozenset((
     "inputs", "outputs", "input", "output", "note", "notes", "description",
     "functionality", "behavior", "behaviour", "overview", "constraints",
@@ -772,11 +789,48 @@ _PROSE_STOP_META = frozenset((
 ))
 
 
-def _width_from(expr: Optional[str]) -> int:
+def _width_from(expr: Optional[str], params: Optional[Dict[str, int]] = None) -> int:
     if not expr:
         return 1
-    m = re.fullmatch(r'\s*(\d+)\s*:\s*(\d+)\s*', expr)
-    return abs(int(m.group(1)) - int(m.group(2))) + 1 if m else 1
+    if expr.count(':') != 1:
+        return WIDTH_UNKNOWN
+    hi, lo = (_safe_eval_int(part, params or {}) for part in expr.split(':'))
+    return abs(hi - lo) + 1 if hi is not None and lo is not None else WIDTH_UNKNOWN
+
+
+def _prose_port_dimension(match, desc: str, name: str, prompt: str,
+                          params: Dict[str, int]) -> Dict[str, Any]:
+    """Read an explicitly stated dimension, retaining unresolved expressions."""
+    rng = match.group(1) or match.group(3)
+    paren = match.group(4) if match.lastindex and match.lastindex >= 4 else None
+    if not rng and paren:
+        stated = re.search(r'\[([^\]]+)\]', paren)
+        if stated:
+            rng = stated.group(1)
+    if not rng:
+        stated = re.search(r'\bwidth\s*\[([^\]]+)\]', desc, re.I)
+        if stated:
+            rng = stated.group(1)
+    if rng and ':' in rng:
+        width = _width_from(rng, params)
+        if width == WIDTH_UNKNOWN:
+            return {"width": WIDTH_UNKNOWN, "width_symbolic": f"[{rng}]"}
+        hi, lo = (_safe_eval_int(part, params) for part in rng.split(':'))
+        return {"width": width, "msb": hi, "lsb": lo}
+    bit_count = re.search(r'\b(\d+)\s*-?\s*bits?\b', desc, re.I)
+    if bit_count:
+        return {"width": int(bit_count.group(1))}
+    # Preserve the existing input-derived lower-bound recovery for a scalar
+    # definition whose declaration or indexed uses elsewhere state its width.
+    declared = re.search(_DECLARED % re.escape(name), prompt)
+    if declared:
+        hi, lo = int(declared.group(1)), int(declared.group(2))
+        return {"width": abs(hi - lo) + 1, "msb": hi, "lsb": lo}
+    indexed = re.findall(_INDEXED % re.escape(name), prompt)
+    if indexed:
+        hi = max(int(value) for value in indexed)
+        return {"width": hi + 1, "msb": hi, "lsb": 0}
+    return {"width": 1}
 
 
 def extract_prose_ports(prompt: str) -> List[Dict]:
@@ -788,20 +842,33 @@ def extract_prose_ports(prompt: str) -> List[Dict]:
     signal does not match)."""
     out: List[Dict] = []
     seen = set()
-    section = None  # 'input' | 'output' | None
+    params: Dict[str, int] = {}
+    defaults = extract_params(prompt)
+    for _ in range(len(defaults) + 1):
+        previous = len(params)
+        for item in defaults:
+            if item["name"] not in params:
+                value = _safe_eval_int(item["default"], params)
+                if value is not None:
+                    params[item["name"]] = value
+        if len(params) == previous:
+            break
+    section = None  # 'input' | 'output' | 'inout' | None
     for line in prompt.splitlines():
         # a short header line that names Inputs/Outputs sets the section — strip
         # leading bullets (`- `, `* `, `•`), markdown emphasis, numbering and the
         # trailing colon, then match the alphanumeric core.
         core = re.sub(r'[^a-z ]', '', line.strip().lower()).strip()
-        if core in ("inputs", "input ports", "input signals", "input",
+        if core in ("inputs", "input port", "input ports", "input signal", "input signals", "input",
                     "input interface"):
             section = "input"; continue
-        if core in ("outputs", "output ports", "output signals", "output",
+        if core in ("outputs", "output port", "output ports", "output signal", "output signals", "output",
                     "output interface"):
             section = "output"; continue
+        if core in ("inouts", "inout port", "inout ports", "inout signal", "inout signals", "inout",
+                    "inout interface"):
+            section = "inout"; continue
         m = _PROSE_SIG.match(line)
-        unbulleted = False
         if m is None and section is not None:
             # INSIDE a declared port section the definition lines often carry NO
             # bullet at all — `\tclk: Clock signal.`, `out [7:0]: 8-bit output`.
@@ -809,7 +876,6 @@ def extract_prose_ports(prompt: str) -> List[Dict]:
             # "a bare identifier, optionally a range, then a colon, on a line
             # under a header that already said these are the ports".
             m = _PROSE_SIG_UNBULLETED.match(line)
-            unbulleted = m is not None
             if m is None:
                 # The RUN of definition lines IS the list. Anything else — a
                 # blank line, the next heading, a sentence — ends it, so a
@@ -819,106 +885,33 @@ def extract_prose_ports(prompt: str) -> List[Dict]:
                 continue
         if not m:
             continue
-        name = m.group(2)
-        # section-DESCRIPTOR bullets ("- **Clock:** the `clk` signal is …",
-        # "- Reset: …", "- Inputs:") use a TitleCase English label, not the real
-        # signal name (which is the backtick token in the description). Skip them.
-        if name.lower() in (_PROSE_STOP_META if unbulleted else _PROSE_STOP):
-            continue
-        # A `[A-Z][a-z]{2,}` TitleCase English WORD (Address, Operation, Result,
-        # Default, Status…) heads a descriptor bullet — never a real port. Real
-        # ports are lowercase/snake_case (clk, coin_input) or short all-caps
-        # acronyms (A, B, OUT), which this does NOT match.
-        #
-        # EXCEPT when the line DIMENSIONS the name. MEASURED on the RTLLM
-        # `calendar` prompt: its three outputs are literally
-        #     Hours: 6-bit output representing the current hours
-        #     Mins:  6-bit output representing the current minutes
-        #     Secs:  6-bit output representing the current seconds
-        # under an explicit `Output ports:` heading, and all three match
-        # `[A-Z][a-z]{2,}`. Dropping them published a calendar whose interface
-        # was CLK and RST and nothing else — and that is worse than publishing
-        # nothing, because a non-empty port list walks past the extraction-gap
-        # halt and the design is emitted against an interface missing every
-        # output it has.
-        #
-        # The separator is EVIDENCE ON THE LINE, not a longer word list: a
-        # descriptor sentence ("Latency: one cycle from sample to output")
-        # states no bit width, while a port line that needs this exception
-        # states one — a bracket range on the name, a range in a parenthetical,
-        # or an `N-bit` phrase in the description. A descriptor that does state
-        # a bit width is indistinguishable from a port declaration by any
-        # evidence the document carries, and reading it as a port is then the
-        # honest reading. Only inside an EXPLICIT port section, where the
-        # heading has already said these lines are the interface.
-        if re.fullmatch(r'[A-Z][a-z]{2,}', name):
-            _dims = (m.group(1) or m.group(3)
-                     or (_RANGE.search(m.group(4)) if (
-                         m.lastindex and m.lastindex >= 4 and m.group(4))
-                         else None)
-                     or re.search(r'\b\d+\s*-?\s*bits?\b',
-                                  line.split(':', 1)[1] if ':' in line else '',
-                                  re.I))
-            if not (unbulleted and _dims):
-                continue
-        desc = line.split(':', 1)[1] if ':' in line else ""
-        # direction: explicit N-bit input/output in the description wins, else section
-        d = None
-        _paren = m.group(4) if m.lastindex and m.lastindex >= 4 else None
-        _pd = (re.search(r'\b(input|output|inout)\b', _paren, re.I)
-               if _paren else None)
-        dm = re.search(r'\b(\d+\s*-?\s*bit\s+)?(input|output|inout)\b', desc, re.I)
-        if _pd:
-            d = _pd.group(1).lower()
-        elif dm:
-            d = dm.group(2).lower()
-        elif re.search(r'\bclock\b|\breset\b|\bclk\b', desc, re.I) and section is None:
-            d = "input"
-        else:
-            d = section
-        if d is None:
-            continue
-        # KEEP THE DECLARED BOUNDS. `A[32:1]` is 32 bits wide AND indexes bit 32;
-        # normalising it to msb=31/lsb=0 loses the second fact, and the gate that
-        # reads it (`l1_pin_bus_width_actionable_check`) then reports "the design's
-        # own inputs index bit 32 of A but L1 declares 32 bits" against a row this
-        # very sentence could have satisfied.
-        rng = m.group(1) or m.group(3)
+        names = re.split(r'\s*,\s*', m.group(2))
+        desc = line[m.end():]
         paren = m.group(4) if m.lastindex and m.lastindex >= 4 else None
-        if not rng and paren:
-            pm = _RANGE.search(paren)
-            if pm:
-                rng = f"{pm.group(1)}:{pm.group(2)}"
-        msb = lsb = None
-        if rng:
-            rm = re.fullmatch(r'\s*(\d+)\s*:\s*(\d+)\s*', rng)
-            if rm:
-                msb, lsb = int(rm.group(1)), int(rm.group(2))
-        width = _width_from(rng)
-        if width == 1 and msb is None:
-            bm = re.search(r'(\d+)\s*-?\s*bit', desc)
-            if bm:
-                width = int(bm.group(1))
-        if width == 1 and msb is None:
-            # STILL unstated on its own line — read the width the design states
-            # for this identifier ELSEWHERE in the prompt. `reg [7:0] q` and
-            # `q[7]` are the same evidence the width gate derives its bound from,
-            # so reading them here is agreeing with the design, not guessing.
-            dm2 = re.search(_DECLARED % re.escape(name), prompt)
-            if dm2:
-                msb, lsb = int(dm2.group(1)), int(dm2.group(2))
-                width = abs(msb - lsb) + 1
-            else:
-                im = re.findall(_INDEXED % re.escape(name), prompt)
-                if im:
-                    msb, lsb = max(int(x) for x in im), 0
-                    width = msb + 1
-        if name not in seen:
+        if not desc.strip() and not (m.group(1) or m.group(3) or paren):
+            # An empty scalar label introduces another section; it does not
+            # define a port field that can inherit the previous direction.
+            section = None
+            continue
+        pd = re.search(r'\b(input|output|inout)\b', paren, re.I) if paren else None
+        dm = re.search(r'\b(input|output|inout)\b', desc, re.I)
+        direction = (pd.group(1).lower() if pd else
+                     dm.group(1).lower() if dm else section)
+        if direction is None and re.search(r'\b(clock|reset|clk)\b', desc, re.I):
+            direction = "input"
+        for name in names:
+            # An explicit port section already declares the role of each
+            # identifier-colon row. Capitalization is not evidence that a
+            # scalar is a descriptor; outside such a section keep that guard.
+            if name.lower() in (_PROSE_STOP_META if section else _PROSE_STOP):
+                continue
+            if section is None and re.fullmatch(r'[A-Z][a-z]{2,}', name):
+                continue
+            if direction is None or name in seen:
+                continue
             seen.add(name)
-            row = {"name": name, "dir": d, "width": width}
-            if msb is not None:
-                row["msb"], row["lsb"] = msb, lsb
-            out.append(row)
+            out.append({"name": name, "dir": direction,
+                        **_prose_port_dimension(m, desc, name, prompt, params)})
     return out
 
 
@@ -1147,6 +1140,8 @@ def extract_inline_direction_bullet_ports(text: str) -> List[Dict[str, Any]]:
 #
 # Chip-AGNOSTIC: anchors on the design's OWN declared port names, whatever they
 # are; no chip, vendor, protocol or signal-name literal participates.
+# Historical compatibility names re-exported by the docs runner. Source prose
+# is no longer selected or truncated according to these former budgets.
 MAX_INTERFACE_PROSE_BLOCK_CHARS = 600
 MAX_INTERFACE_PROSE_TOTAL_CHARS = 4000
 # vibe-ic#2060 item 3 (from #2059's measurement) — THIS PATTERN DOES NOT RETURN.
@@ -1250,122 +1245,33 @@ def block_mentions_port(block: str, names: List[str]) -> bool:
 
 
 def emit_interface_prose(content: Dict[str, Any],
-                               extracted: Dict[str, str]) -> None:
-    """Carry the input's own interface-constraining sentences into L9's prose
-    channel, verbatim, with provenance.
+                         extracted: Dict[str, str]) -> None:
+    """Preserve permitted extracted design input in the consumer's prose channel.
 
-    Selection rule, in two branches, because the honest answer depends on how
-    much prose there is:
-
-      WHOLE — when the extracted input fits inside the total budget, carry it
-        whole. This is not a shortcut: it is the SAME channel prompt mode
-        already hands these rules (`spec_conformance_check` sets
-        `spec_body = spec_raw` for a markdown spec), so for a short design
-        description "carry it all" is the least novel option available, and
-        selecting from it can only LOSE constraints. Measured on this base with
-        one RTL body violating three elements: port-anchored selection reached
-        2 of 3 (the third sentence names no port), the whole document reached
-        3 of 3.
-      ANCHORED — when it does not fit, carry the blocks that NAME one of the
-        design's declared ports, plus the block a colon lead-in introduces
-        (that is where the table the lead-in announces lives). Bullet-only
-        blocks are skipped: that is the port table, which L9 already holds
-        structurally.
-
-    Either way `interface_prose_provenance.selection` says which branch ran and
-    `truncated` says whether anything was cut, so a short channel is never
-    mistaken for a short input.
-
-    Writes `notes` (one of the declared prose keys the consumer walks) plus
-    `interface_prose_provenance`. When nothing is carried, writes the
-    honest-null `no_interface_prose_in_input` instead of an empty string."""
-    names = declared_port_names(content)
-
-    # WHOLE branch. Note it does NOT require a declared port: prose is prose,
-    # and the port list is only needed to SELECT from prose that does not fit.
-    whole = "\n\n".join(
-        (extracted.get(f) or "").strip()
-        for f in sorted(extracted) if (extracted.get(f) or "").strip())
-    if whole and len(whole) <= MAX_INTERFACE_PROSE_TOTAL_CHARS:
-        content["notes"] = whole
-        content["interface_prose_provenance"] = {
-            "selection": "whole",
-            "rule": ("the extracted input carried whole — it fits the budget, "
-                     "so selecting from it could only lose constraints"),
-            "documents": [f for f in sorted(extracted)
-                          if (extracted.get(f) or "").strip()],
-            "blocks": 1,
-            "chars": len(whole),
-            "truncated": False,
-            "anchored_on": names,
-        }
-        return
-
-    if not names:
-        # Too big to carry whole, and no declared port to select with. That is
-        # NOT_MEASURED — say so rather than emitting a silently empty channel.
-        content["no_interface_prose_in_input"] = True
-        content["interface_prose_provenance"] = {
-            "selection": "none",
-            "rule": "blocks naming a declared port name",
-            "not_measured": ("the input exceeds the prose budget and L9 "
-                             "declares no port to select with"),
-            "documents": [], "blocks": 0, "truncated": True}
-        return
-
-    kept: List[str] = []
-    docs: List[str] = []
-    truncated = False
-    total = 0
-    for fname in sorted(extracted):
-        text = extracted.get(fname) or ""
-        if not text.strip():
-            continue
-        blocks = [b for b in re.split(r"\n\s*\n", text)]
-        take_next = False
-        used_here = False
-        for block in blocks:
-            body = block.strip()
-            if not body:
-                continue
-            wanted = take_next or block_mentions_port(body, names)
-            # A lead-in ending in a colon introduces the block after it.
-            take_next = wanted and body.rstrip().endswith(":")
-            if not wanted:
-                continue
-            if is_bullet_only_block(body):
-                # the port table itself — L9 already carries it structurally.
-                continue
-            if len(body) > MAX_INTERFACE_PROSE_BLOCK_CHARS:
-                body = body[:MAX_INTERFACE_PROSE_BLOCK_CHARS]
-                truncated = True
-            if body in kept:
-                continue
-            if total + len(body) > MAX_INTERFACE_PROSE_TOTAL_CHARS:
-                truncated = True
-                break
-            kept.append(body)
-            total += len(body)
-            used_here = True
-        if used_here:
-            docs.append(fname)
-        if truncated and total >= MAX_INTERFACE_PROSE_TOTAL_CHARS:
-            break
-
+    The short-input path already carried the entire source. Input length must
+    not change that semantic contract: selecting port-bearing paragraphs drops
+    requirements that name no port, and slicing a paragraph can end mid-word.
+    Source eligibility belongs to the upstream extractor; this producer copies
+    its permitted documents without summarizing or imposing a character budget.
+    """
+    documents = [name for name in sorted(extracted)
+                 if isinstance(extracted.get(name), str)
+                 and extracted[name].strip()]
+    whole = "\n\n".join(extracted[name].strip() for name in documents)
     content["interface_prose_provenance"] = {
-        "selection": "anchored",
-        "rule": ("blocks of the input that name a declared port, plus the "
-                 "block a colon lead-in introduces; bullet-only blocks "
-                 "excluded (already carried structurally)"),
-        "chars": total,
-        "documents": docs,
-        "blocks": len(kept),
-        "truncated": truncated,
-        "anchored_on": names,
+        "selection": "whole" if whole else "none",
+        "rule": "the permitted extracted design input carried whole, without truncation",
+        "documents": documents,
+        "blocks": 1 if whole else 0,
+        "chars": len(whole),
+        "truncated": False,
+        "anchored_on": declared_port_names(content),
     }
-    if kept:
-        content["notes"] = "\n\n".join(kept)
+    if whole:
+        content["notes"] = whole
+        content.pop("no_interface_prose_in_input", None)
     else:
+        content.pop("notes", None)
         content["no_interface_prose_in_input"] = True
 
 
