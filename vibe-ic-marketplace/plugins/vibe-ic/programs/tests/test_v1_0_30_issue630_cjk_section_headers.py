@@ -285,6 +285,27 @@ def test_unheaded_source_header_preserves_requirements_without_inventing_an_owne
     assert actual["frs_sections"][0]["evidence"] == "input/docs/design.md"
 
 
+def test_unheaded_unnamed_module_interface_preserves_hierarchy_requirements(tmp_path):
+    text = ("Now consider a top-level module with the following interface.\n"
+            "- input alpha (4 bits)\n- output beta (4 bits)\n\n"
+            "The module must instantiate two child modules and connect their outputs in series.\n")
+    R.gen_l2_frs(tmp_path, {"design.md": text})
+    actual = json.loads((tmp_path / "phase1/generated_docs/L2_FRS.json").read_text())
+    assert [row["content"] for row in actual["frs_sections"]] == [text.strip()]
+    assert actual["frs_sections"][0]["evidence"] == "input/docs/design.md"
+
+
+@pytest.mark.parametrize("subject", [
+    "Do not implement a module with the following interface.",
+    "Documentation prose about a module without a declared interface.",
+])
+def test_port_bullets_do_not_make_denied_or_generic_prose_an_unnamed_design(tmp_path, subject):
+    text = subject + "\n- input alpha\n- output beta\n"
+    R.gen_l2_frs(tmp_path, {"design.md": text})
+    actual = json.loads((tmp_path / "phase1/generated_docs/L2_FRS.json").read_text())
+    assert actual["frs_sections"] == []
+
+
 @pytest.mark.parametrize("filename,text", [
     ("README.md", "A collection of HDL utilities. Install the host compiler before use.\n"),
     ("setup.md", "Run pip install tools.\nInstall the host compiler.\n"),

@@ -93,6 +93,71 @@ def test_typed_clock_and_reset_reach_release_doc_field(tmp_path):
     assert value["derived_from"] == [EMIT.L8_REL, EMIT.L9_REL]
 
 
+def _derive_source_clock_waveform(project, source, *, names=("clk",), domains=()):
+    _write(project)
+    inputs = project / "input/docs"
+    inputs.mkdir(parents=True)
+    (inputs / "timing.md").write_text(source)
+    path = project / EMIT.L9_REL
+    l9 = json.loads(path.read_text())
+    l9.pop("clocks", None)
+    l9["clock_domains"] = list(domains)
+    l9["top_ports"] = [{"name": name, "direction": "input",
+                         "description": "Clock input."} for name in names]
+    l9["ports"] += l9["top_ports"]
+    path.write_text(json.dumps(l9))
+    l8 = _l8(project)
+    l8["clocks"] = [{"name": name, "period_ns": 24} for name in names]
+    (project / EMIT.L8_REL).write_text(json.dumps(l8))
+    RUNNER._post_emit_derive_l9_clocks_v1_6_323(project)
+    assert getattr(RUNNER, HELPER)(project) == 1
+    return json.loads(path.read_text()), _l8(project)["clock_and_reset_waveform"]
+
+
+@pytest.mark.parametrize("source,expected", [
+    ("All DFFs should be triggered by the negative edge of clk.", "negedge"),
+    ("Data is sampled on the positive edge of clk.", "posedge"),
+    ("The input clock is clk; clear is synchronous.", None),
+    ("Clear on the negative edge of rst, sample on the positive edge of clk.", "posedge"),
+    ("Clear on the negative edge of rst; clk is the sampling clock.", None),
+    ("Data must not be sampled on the negative edge of clk.", None),
+    ("Historical behavior: sample on the negative edge of clk.", None),
+    ("For example, sample on the negative edge of clk.", None),
+    ("Data is sampled on both rising and falling edges of clk.", None),
+])
+def test_source_bound_clock_edge_reaches_l9_and_actual_l8_projection(tmp_path, source, expected):
+    l9, waveform = _derive_source_clock_waveform(tmp_path, source)
+    assert {row["name"]: row.get("edge") for row in l9["clocks"]} == {"clk": expected}
+    assert {row["name"]: row.get("edge") for row in waveform["clocks"]} == {"clk": expected}
+    assert waveform["clocks"][0]["period_ns"] == 24
+    if expected is None:
+        assert "No unique source-backed" in l9["clocks"][0]["notes"]
+
+
+def test_owning_typed_clock_edge_precedes_a_prose_fallback(tmp_path):
+    l9, waveform = _derive_source_clock_waveform(
+        tmp_path, "Data is sampled on the positive edge of clk.",
+        domains=[{"name": "clk", "edge": "negedge", "period_ns": 24}])
+    assert l9["clocks"][0]["edge"] == "negedge"
+    assert waveform["clocks"][0]["edge"] == "negedge"
+
+
+def test_clock_edge_clauses_remain_scoped_to_their_own_clock(tmp_path):
+    l9, waveform = _derive_source_clock_waveform(
+        tmp_path, "Sample on the negative edge of clk_read and the positive edge of clk_write.",
+        names=("clk_read", "clk_write"))
+    expected = {"clk_read": "negedge", "clk_write": "posedge"}
+    assert {row["name"]: row["edge"] for row in l9["clocks"]} == expected
+    assert {row["name"]: row["edge"] for row in waveform["clocks"]} == expected
+
+
+def test_conflicting_stated_clock_edges_are_not_defaulted_to_positive(tmp_path):
+    l9, waveform = _derive_source_clock_waveform(
+        tmp_path, "Sample on the negative edge of clk. Sample on the positive edge of clk.")
+    assert l9["clocks"][0].get("edge") is None
+    assert waveform["clocks"][0].get("edge") is None
+
+
 @pytest.mark.parametrize("clock,reset", [(False, True), (True, False)])
 def test_one_sided_fact_set_is_named_skip_and_writes_nothing(
         tmp_path, capsys, clock, reset):

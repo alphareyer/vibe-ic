@@ -118,7 +118,7 @@ def test_explicit_bullet_provenance_reaches_the_real_l9_producer(tmp_path, name)
         (name, "output", 5)]
     for key in ("ports", "top_ports", "top_module_pins"):
         assert [(p["name"], p["direction"], p.get("width")) for p in l9[key]] == [
-            (name.lower(), "output", 5)], l9[key]
+            (name, "output", 5)], l9[key]
         assert l9[key][0]["evidence"] == "input/docs/design.md"
 
 
@@ -172,3 +172,49 @@ def test_existing_repo_interface_still_reaches_the_actual_producer(tmp_path):
         assert ports["address"]["width"] == 8
         assert ports["read_data"]["direction"] == "output"
         assert ports["read_data"]["width"] == 32
+
+
+@pytest.mark.parametrize("name", ["one", "two", "some", "page", "ONE", "SOME"])
+def test_explicit_english_word_identifiers_reach_the_typed_interface(tmp_path, name):
+    text = f"Implement a module named probe_core.\n- output {name} (3 bits)\n"
+    l1, l9 = _produce_interface(tmp_path, text)
+    assert [(p["name"], p["mode"], p.get("width")) for p in l1["pin_table"]] == [
+        (name, "output", 3)]
+    for key in ("ports", "top_ports", "top_module_pins"):
+        assert [(p["name"], p["direction"], p.get("width")) for p in l9[key]] == [
+            (name, "output", 3)], l9[key]
+
+
+@pytest.mark.parametrize("name", ["A", "B", "Q"])
+def test_explicit_uppercase_single_letter_port_preserves_source_case(tmp_path, name):
+    text = f"Implement a module named probe_core.\n- input {name} (2 bits)\n"
+    l1, l9 = _produce_interface(tmp_path, text)
+    assert [(p["name"], p["mode"], p.get("width")) for p in l1["pin_table"]] == [
+        (name, "input", 2)]
+    for key in ("ports", "top_ports", "top_module_pins"):
+        assert [(p["name"], p["direction"], p.get("width")) for p in l9[key]] == [
+            (name, "input", 2)], l9[key]
+
+
+@pytest.mark.parametrize("name", ["one", "some", "page", "two"])
+def test_english_prose_noise_still_needs_explicit_declaration_provenance(name):
+    assert R._is_real_port_token(name) is False
+    assert R._is_real_port_token(name, pin={
+        "mode": "output", "extraction_strategy": "pin_table_keyword_scan"}) is False
+
+
+@pytest.mark.parametrize("name", ["new", "wire", "class", "module", "and", "this", "ref", "with"])
+def test_hdl_keywords_stay_excluded_from_explicit_bullets(tmp_path, name):
+    text = f"Implement a module named probe_core.\n- output {name} (3 bits)\n"
+    l1, l9 = _produce_interface(tmp_path, text)
+    assert l1["pin_table"] == []
+    assert all(l9[key] == [] for key in ("ports", "top_ports", "top_module_pins"))
+
+
+@pytest.mark.parametrize("strategy", ["narrative_prose_walk", "pin_table_keyword_scan"])
+def test_uppercase_prose_without_structural_provenance_is_still_dropped(strategy):
+    entries = [{"name": name, "mode": "output",
+                "extraction_strategy": strategy}
+               for name in ("ALPHA", "BETA", "ONE")]
+    assert R._v455_sanitize_and_merge_pins(
+        entries, {"design.md": "The output refers to ALPHA, BETA and ONE."}) == []

@@ -11680,7 +11680,10 @@ def _v455_sanitize_and_merge_pins(
         if _v2090_owner is not None:
             _v2090_record_exclusion(name, _v2090_owner)
             continue
-        if name.isupper() and name.isalpha():
+        declared_port = (_v2060_record_declares_a_port_table(entry)
+                         and str(entry.get("mode") or "").lower()
+                         in ("input", "output", "inout"))
+        if name.isupper() and name.isalpha() and not declared_port:
             if name in _PIN_PROSE_DENY and name not in backticked:
                 continue  # ALL-CAPS English prose word — hallucination
             if name not in backticked and not _in_port_context(name):
@@ -14849,12 +14852,13 @@ _VERILOG_RESERVED_KEYWORDS = frozenset({
     "throughout", "timeprecision", "timeunit", "type", "typedef",
     "union", "unique", "unique0", "untyped", "var", "virtual", "void",
     "wait_order", "weak", "with", "within",
-    # Common prose-flow English nouns that look like identifiers and
-    # have leaked from datasheet paragraphs into top_ports[] historically
-    # (e.g. "an org-wide spec mentions new revisions"). These are not
-    # reserved keywords per se but mass-noise tokens that can never be
-    # legitimate top-level chip ports. Strict prose-noise filter, not
-    # chip-specific.
+})
+
+# These words are prose noise without a declaration, but remain legal port
+# identifiers when a structured source explicitly supplies their direction.
+# Keep this classification separate from language keywords: provenance never
+# makes an unescaped Verilog/SystemVerilog keyword into a legal identifier.
+_PORT_PROSE_NOISE_WORDS = frozenset({
     "org", "the", "and", "for", "with", "from", "into", "this",
     "that", "these", "those", "all", "any", "some", "one", "two",
     "three", "page", "fig", "figure", "table", "section", "chapter",
@@ -15105,6 +15109,10 @@ def _v2060_record_declares_a_port_table(rec) -> bool:
         if not strat:
             continue
         strat = str(strat).strip()
+        # This legacy scanner names its destination, not a source table row.
+        # A direction keyword found in prose is not declaration provenance.
+        if strat == "pin_table_keyword_scan":
+            continue
         if strat in _PORT_TABLE_STRATEGIES:
             return True
         if strat.split("+", 1)[0] in _PORT_TABLE_STRATEGIES:
@@ -15231,6 +15239,9 @@ def _is_real_port_token(tok, l1_chip_name=None, pin=None):
     # mass-prose nouns. Lowercase compare because the deny set is
     # stored lowercase; tokens may come in any case.
     if tok.lower() in _VERILOG_RESERVED_KEYWORDS:
+        return False
+    if (tok.lower() in _PORT_PROSE_NOISE_WORDS
+            and not (_has_port_table_provenance and _has_functional_dir)):
         return False
     # Pure chip-version codes: leading letters + digits only (E4, IC-A, A1101).
     # #611 — but NOT when the pin was deliberately enumerated from a banked
@@ -22141,6 +22152,7 @@ def gen_l1_datasheet(project: Path,
                  optional: Optional[bool] = None,
                  interface_metadata: Optional[Dict[str, Any]] = None,
                  type_ref: Optional[str] = None,
+                 rtl_name: Optional[str] = None,
                  ) -> None:
         """v1.6.248 — shared pin-emit helper. Used by the legacy
         `input|output|inout` keyword scan AND the new RST grid /
@@ -22214,7 +22226,7 @@ def gen_l1_datasheet(project: Path,
             "name": name,
             "mode": mode,
             "aliases": _v1_6_363_aliases,
-            "rtl_name": name.lower(),
+            "rtl_name": rtl_name or name.lower(),
             "board_name": name,
             "io_standard": _v1_6_337_iostd,
             "no_io_standard_in_input": (
@@ -22840,6 +22852,7 @@ def gen_l1_datasheet(project: Path,
                 # Declare the row's shape through the existing provenance
                 # contract, so L9 does not require a conventional pin name.
                 extraction_strategy="markdown_inline_direction_port_bullet",
+                rtl_name=entry["name"],
             )
             if len(ev) < 24:
                 ev.append({
@@ -24255,8 +24268,22 @@ def gen_l2_frs(project: Path,
                 _RE_DOC_TOP_MODULE_REAL_DECL.finditer(text)
                 if _issue3234_position_is_current(text, m.start())
                 and _ppx.selected_module_header(text, m.group("name"))), None)
+            # A strict port declaration can belong to an unnamed module. Its
+            # affirmative interface subject supplies authority, not a made-up
+            # module identifier or a generic mention in documentation prose.
+            unnamed_interface = False
+            if not explicit and _l1_inline_direction_bullet_port_extract(text):
+                for subject in re.finditer(
+                        r"\b(?:a|the)\s+(?:top[- ]level\s+)?module\s+"
+                        r"(?:with|has)\s+(?:the\s+)?following\s+"
+                        r"(?:hardware\s+)?interfaces?\b", text, re.IGNORECASE):
+                    lo, hi = _prose_sentence_scope(text, subject.start(), subject.end())
+                    if (_issue3234_position_is_current(text, subject.start())
+                            and _prose_is_denied(text[lo:hi]) is None):
+                        unnamed_interface = True
+                        break
             declared = ((bool(owner) if explicit else len(subjects) == 1)
-                        or header_owner is not None)
+                        or header_owner is not None or unnamed_interface)
             body = _v1_6_357_slice_section_body(text, 0, None, max_chars=None)
             setup_body = _RE_DOC_TOP_MODULE_NAME_LABEL.sub("", body)
             setup_body = _RE_DOC_TOP_MODULE_TOP_IS_NAMED.sub("", setup_body)
@@ -24270,7 +24297,8 @@ def gen_l2_frs(project: Path,
                     "content": body,
                     "evidence": f"input/docs/{fname}",
                 })
-                ev.append({"literal": owner or header_owner or next(iter(subjects)),
+                ev.append({"literal": owner or header_owner or
+                           (next(iter(subjects)) if subjects else subject.group()),
                            "label": "unheaded design owner"})
         for i, hit in enumerate(multi_shape_hits):
             sec_id = hit["section_id"]
@@ -46994,7 +47022,7 @@ def _is_bullet_submodule_name(nm: str) -> bool:
     # `l9_submodule_conformance_check` then examines it and FAILs a
     # correct design with SUBMODULE_FILE_MISSING. Exact match only, so a
     # legitimate `signed_mult` / `case_decoder` is untouched.
-    if nm.lower() in _VERILOG_RESERVED_KEYWORDS:
+    if nm.lower() in (_VERILOG_RESERVED_KEYWORDS | _PORT_PROSE_NOISE_WORDS):
         return False
     # vowel + consonant for bare-alphabetic names
     if not any(c.isdigit() or c == "_" for c in nm):
@@ -63271,6 +63299,11 @@ def _post_emit_derive_l9_clocks_v1_6_323(project: Path) -> None:
     top_ports = l9.get("top_ports") or []
     if not isinstance(top_ports, list):
         return
+    from l8_clock_reset_waveform_emit import _described_clock_edges
+    from _prose_polarity import LINE_END_BREAKS
+    described_edges = _described_clock_edges(l9)
+    sources = _load_extracted_docs_for_post_pass(project)
+    edge_word = r"(?i:\b(?:rising|positive|posedge|falling|negative|negedge)\b)"
     clocks: List[Dict[str, Any]] = []
     seen: Set[str] = set()
     for p in top_ports:
@@ -63287,7 +63320,6 @@ def _post_emit_derive_l9_clocks_v1_6_323(project: Path) -> None:
         seen.add(name_raw)
         _entry: Dict[str, Any] = {
             "name": name_raw,
-            "edge": "posedge",
             "extraction_strategy":
                 "l9_top_port_clock_derive",
         }
@@ -63309,9 +63341,40 @@ def _post_emit_derive_l9_clocks_v1_6_323(project: Path) -> None:
                 None)
         if isinstance(_cd_src, dict):
             for _k in ("freq_hz", "freq_mhz", "period_ns",
-                       "role", "source", "domain_kind"):
+                       "role", "source", "domain_kind", "edge"):
                 if _cd_src.get(_k) is not None and _entry.get(_k) is None:
                     _entry[_k] = _cd_src[_k]
+        if not _entry.get("edge"):
+            edges = {described_edges[name_raw]} if name_raw in described_edges else set()
+            clock_name = rf"(?<![\w$])[`'\"]?{re.escape(name_raw)}[`'\"]?(?![\w$])"
+            binding = re.compile(
+                rf"(?:{edge_word}(?:\s+edges?)?(?:\s+(?i:and|or)\s+"
+                rf"{edge_word}(?:\s+edges?)?)*\s+edges?)\s+(?i:of)\s+"
+                rf"(?:(?i:the)\s+)?(?:(?i:clock)\s+)?{clock_name}"
+                rf"|{clock_name}(?:['’]s)?\s+{edge_word}\s+edge\b")
+            for text in sources.values():
+                for match in binding.finditer(text):
+                    lo, hi = _prose_sentence_scope(
+                        text, match.start(), match.end(),
+                        extra_breaks=(*LINE_END_BREAKS, "; ", ", ", " and "))
+                    if (not _issue3234_position_is_current(text, match.start())
+                            or _ISSUE3234_NONCURRENT_LEADIN.search(text[lo:hi])
+                            or _prose_is_denied(text[lo:hi]) is not None):
+                        continue
+                    # Only this clock's bound edge words enter the existing
+                    # reader; reset and sibling-clock clauses never become a
+                    # synthetic per-port description.
+                    for word in re.findall(edge_word, match.group()):
+                        edge = _described_clock_edges({"ports": [{
+                            "name": name_raw, "description": word + " edge"}]}).get(name_raw)
+                        if edge:
+                            edges.add(edge)
+            if len(edges) == 1:
+                _entry["edge"] = next(iter(edges))
+            else:
+                _entry["notes"] = (
+                    "No unique source-backed active clock edge is established; "
+                    "the clock edge remains unspecified.")
         clocks.append(_entry)
     if not clocks:
         return
