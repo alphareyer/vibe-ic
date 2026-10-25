@@ -52,7 +52,9 @@ def evidence(project: Path, step_id: str) -> list[Path]:
                           + [project / row["path"] for row in binding["input"]["files"]]
                           + _intent_files(project)))
     if sid == "D1":
+        from _phase1_producer_identity import BEHAVIORAL_REFINEMENT_INPUT
         return _files(project, *DESIGN_INPUT_GLOBS,
+                      BEHAVIORAL_REFINEMENT_INPUT,
                       "plugin_input/qualified-outputs.json",
                       "plugin_input/interface-bindings.json",
                       "plugin_input/interface_context/**/*",
