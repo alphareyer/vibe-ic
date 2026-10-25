@@ -193,7 +193,8 @@ def test_standalone_native_writer_retains_its_existing_format(tmp_path, monkeypa
     assert json.loads(out.read_text()) == expected
 
 
-def _retained_compiled_task(tmp_path, monkeypatch, *, change_during_execution=False):
+def _retained_compiled_task(tmp_path, monkeypatch, *, change_during_execution=False,
+                            supplied=False):
     """Real native compile, retained source and the actual report/receipt writers."""
     import test_benchmark_program_first_ai_review as fixture
     from _hostpaths import require_repo
@@ -221,7 +222,7 @@ command = ['iverilog', '-g2012', '-s', 'dut', '-tnull', str(rtl)]
 compiled = subprocess.run(command, capture_output=True, text=True)
 producer._write_phase2_report(p/'reports/orchestrator/phase2_one_shot.json', {
     'project': str(p), 'verdict': 'PASS' if compiled.returncode == 0 else 'FAIL',
-    'steps': [{'name': 'rtl_gen', 'status': 'PASS', 'detail': 'retained native candidate'},
+    'steps': [{'name': 'rtl_gen', 'status': %r, 'detail': 'retained native candidate; run declared --entry-step 2'},
               {'name': 'rtl_lint_tool', 'status': 'PASS' if compiled.returncode == 0 else 'FAIL',
                'detail': compiled.stderr, 'extras': {'command': command,
                    'native_returncode': compiled.returncode,
@@ -230,10 +231,12 @@ if %r:
     consumer = pathlib.Path(%r)
     consumer.write_text(consumer.read_text() + '\\n# changed during execution\\n')
 raise SystemExit(compiled.returncode)
-''' % (str(source), str(PROGRAMS), change_during_execution, str(consumer)))
+''' % (str(source), str(PROGRAMS), 'NOT_APPLICABLE' if supplied else 'PASS',
+       change_during_execution, str(consumer)))
     argv = [sys.executable, str(runner), str(project), "--entry-step", "2", "--exit-step", "2"]
     process = bd._RunnerBudget(1, 1, 1).run(argv)
-    got = bd._collect_runner_result(process, argv, "rtllm", "p1", project)
+    got = bd._collect_runner_result(process, argv, "rtllm", "p1", project,
+                                    supplied_rtl=supplied)
     if change_during_execution:
         return project, process, argv, got
     assert process.rc == 0 and process.error is None and got["ok"] is True, (process.stderr, got)
@@ -260,9 +263,10 @@ def test_completed_native_proof_survives_live_runner_and_dispatcher_upgrade(tmp_
     assert {p: p.read_bytes() for p in original} == original
 
 
-def test_published_native_candidate_reuses_original_review_after_upgrade(tmp_path, monkeypatch):
+@pytest.mark.parametrize("supplied", [False, True])
+def test_published_native_candidate_reuses_original_review_after_upgrade(tmp_path, monkeypatch, supplied):
     import test_benchmark_program_first_ai_review as fixture
-    project, process, argv, task = _retained_compiled_task(tmp_path, monkeypatch)
+    project, process, argv, task = _retained_compiled_task(tmp_path, monkeypatch, supplied=supplied)
     run = tmp_path / "run"
     (run / "responses").mkdir()
     fixture._solve_report(run, task, exit_step="2")
@@ -272,7 +276,9 @@ def test_published_native_candidate_reuses_original_review_after_upgrade(tmp_pat
     solve["results"][0].update(route_receipt=receipt, entry=receipt["entry_step"])
     (run / "solve_report.json").write_text(json.dumps(solve))
     fixture._write_review(task, fixture._valid_review(task))
-    assert bd.cmd_resume("rtllm", "/unused", str(run)) == 0
+    initial_rc = bd.cmd_resume("rtllm", "/unused", str(run))
+    assert json.loads((run / bd._ACCEPTANCE_REPORT).read_text())["accepted_ids"] == ["p1"]
+    assert initial_rc == 0
     paths = (Path(task["review_path"]), Path(task["response_path"]), Path(process.receipt_path))
     original = {p: p.read_bytes() for p in paths}
     _upgrade_live_programs(argv)
@@ -281,6 +287,36 @@ def test_published_native_candidate_reuses_original_review_after_upgrade(tmp_pat
     assert bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0]["review_path"] == task["review_path"]
     assert {p: p.read_bytes() for p in original} == original
     assert not (run / "runner_regates").exists()
+
+
+@pytest.mark.parametrize("mutation", ["no_receipt", "options", "output"])
+def test_program_owned_supplied_rtl_still_requires_unchanged_native_binding(tmp_path, monkeypatch, mutation):
+    import test_benchmark_program_first_ai_review as fixture
+    project, _, _, task = _retained_compiled_task(tmp_path, monkeypatch, supplied=True)
+    run = tmp_path / "run"
+    (run / "responses").mkdir()
+    fixture._solve_report(run, task, exit_step="2")
+    routes = bd._read_jsonl(run / bd._ROUTE_WORKLIST)
+    receipt = fixture._issue_pending_route_fixture(run, routes[0], requested_evidence="lint_validated")
+    solve = json.loads((run / "solve_report.json").read_text())
+    solve["results"][0].update(route_receipt=receipt, entry=receipt["entry_step"])
+    (run / "solve_report.json").write_text(json.dumps(solve))
+    fixture._write_review(task, fixture._valid_review(task))
+    assert task["candidate_origin"] == "PROGRAM"
+    assert bio.collect("rtllm", "p1", project)["ok"] is False
+    if mutation == "no_receipt":
+        task["program_verification"].pop("runner_invocation")
+        bd._write_jsonl(run / bd._REVIEW_WORKLIST, [task])
+    else:
+        assert bd.cmd_resume("rtllm", "/unused", str(run)) == 0
+        if mutation == "options":
+            task["program_verification"]["runner_argv"].append("--changed-window")
+            bd._write_jsonl(run / bd._REVIEW_WORKLIST, [task])
+        else:
+            Path(task["working_rtl_paths"][0]).write_text("module dut; endmodule\n")
+    assert bd.cmd_resume("rtllm", "/unused", str(run)) == 2
+    assert json.loads((run / bd._ACCEPTANCE_REPORT).read_text())["accepted_ids"] == []
+    assert bd._read_jsonl(run / bd._REVIEW_WORKLIST)[0]["candidate_origin"] == "PROGRAM"
 
 
 @pytest.mark.parametrize("mutation", ["retained_runner", "retained_consumer", "manifest", "missing_manifest",

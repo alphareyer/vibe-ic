@@ -9201,6 +9201,15 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             continue
         supplied_rtl = result.get("candidate_origin") in {
             "AI_BACKUP", "AI_REPAIR"}
+        # Ordinary re-gating preserves PROGRAM authorship but supplies those
+        # existing bytes at step 2. The receipt was authenticated above; use
+        # its executed entry rather than mislabelling that upstream N/A as a scaffold.
+        invocation = (task.get("program_verification") or {}).get("runner_invocation")
+        if isinstance(invocation, dict) and invocation.get("status") == "COMPLETED":
+            argv = invocation["argv"]
+            supplied_rtl = supplied_rtl or any(
+                argv[index:index + 2] == ["--entry-step", "2"]
+                for index in range(len(argv) - 1))
         # Only an authenticated explicit reentry may supply a PROGRAM-owned
         # postimage declaration. Ordinary author repairs retain their exact
         # signed candidate contract, including every immutable hash check.
