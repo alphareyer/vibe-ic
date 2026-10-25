@@ -522,15 +522,19 @@ def read_pdk(stage: Stage, pdk_root: str, family: str,
     # their own minima and parameter names. Failing to list the directory is
     # not fatal: the MOS file above already answered, and a model with no
     # gencell entry is refused BY NAME later rather than silently drawn.
-    rc, out, _ = stage.sh(f"ls {shlex.quote(tech_dir)}/*.tcl", timeout=120)
-    if rc == 0:
-        for path in sorted(set(out.split())):
-            if path == gp:
-                continue
-            rc2, txt, _ = stage.sh(f"cat {shlex.quote(path)}", timeout=120)
-            if rc2 == 0 and txt.strip():
-                for model, rec in _lim.gencell_defaults(txt, path).items():
-                    facts.gencells.setdefault(model, rec)
+    # A selected MOS override is not the whole PDK. Keep its declarations
+    # authoritative, while discovering passive generators beside the actual
+    # Magic technology as well as beside that override.
+    for directory in dict.fromkeys((tech_dir, str(Path(tp).parent))):
+        rc, out, _ = stage.sh(f"ls {shlex.quote(directory)}/*.tcl", timeout=120)
+        if rc == 0:
+            for path in sorted(set(out.split())):
+                if path == gp:
+                    continue
+                rc2, txt, _ = stage.sh(f"cat {shlex.quote(path)}", timeout=120)
+                if rc2 == 0 and txt.strip():
+                    for model, rec in _lim.gencell_defaults(txt, path).items():
+                        facts.gencells.setdefault(model, rec)
 
     # THE TECH LEF: which routing layers exist, their preferred directions and
     # their DC current density — what the macro's pins are placed and sized
@@ -1375,9 +1379,13 @@ class Geo:
         this generator paints plus the widest spacing any routed layer asks
         for. One number, deliberately, so the corridor arithmetic stays
         readable — and it is the MAXIMUM, so it is never short."""
-        widest = max(list(self.wire.values())
-                     + [2 * v for v in self.patch.values()])
-        return widest + max(list(self.space.values())
+        # Device access uses metal1/2/3 and the cross-row trunks metal4.
+        # Unused thick top-metal widths must not set every local corridor's
+        # pitch. Pin stripes retain their separately measured width/spacing.
+        routed = (1, 2, 3, 4)
+        widest = max([self.wire[k] for k in routed]
+                     + [2 * self.patch[k] for k in routed])
+        return widest + max([self.space.get(k, self.default_space) for k in routed]
                             + [self.default_space])
 
 
@@ -1394,7 +1402,7 @@ class Plan:
     what makes it correct, because a producer that cannot say why its wires
     do not touch is a producer nobody can audit:
 
-      * every device sits in ONE row, so each occupies its own x interval;
+      * devices occupy bounded rows, each with its own routing band;
       * the terminals of one net at one height are strapped together on
         metal2 at a height just above or just below that row of contacts —
         two nets sharing a contact row take OPPOSITE sides, which is what
@@ -2220,7 +2228,8 @@ def _via_stack(plan: Plan, net: str, x: int, y: int, level: int, geo: Geo,
 
 def build_plan(devs: Sequence[dict], ports: Sequence[str],
                cells: Dict[tuple, dict], facts: PdkFacts, geo: Geo,
-               tap_clear: int, pin_spec: Optional[dict] = None) -> Plan:
+               tap_clear: int, pin_spec: Optional[dict] = None,
+               max_row_width_um: float = 1000.0) -> Plan:
     plan = Plan()
     body_tap_contact = body_tap_contact_layer(facts.layers)
     body_tap_metal_contact = body_tap_metal_contact_layer(facts.layers)
@@ -2237,7 +2246,6 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
     for net in list(ports) + [n for d in devs for n in d["nets"]]:
         if net not in nets:
             nets.append(net)
-    rail_y = {net: pitch + i * pitch for i, net in enumerate(nets)}
     row_base = pitch * (len(nets) + 24)
 
     # ── per device: which terminals escape at which height, on which side ──
@@ -2419,27 +2427,75 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
               for d in per_dev]
     n_right = [sum(1 for g in d["groups"] if g["side"] == "right")
                for d in per_dev]
+    high_pitch = max(list(geo.wire.values()) + [2 * v for v in geo.patch.values()]) \
+        + max(list(geo.space.values()) + [geo.default_space])
+    for d in per_dev:
+        # High-plane terminals still use the original wide escape corridors.
+        # Only local low-metal routing can use the smaller low-metal pitch.
+        d["access_pitch"] = high_pitch if any(g["level"] > ROUTE_LEVEL
+                                             for g in d["groups"]) else pitch
     gap_w = []
     for i in range(len(per_dev) + 1):
-        need = (n_right[i - 1] if i > 0 else 0) + \
-               (n_left[i] if i < len(per_dev) else 0)
-        gap_w.append(max(min_gap, (need + 2) * pitch))
+        left_pitch = per_dev[i - 1]["access_pitch"] if i > 0 else pitch
+        right_pitch = per_dev[i]["access_pitch"] if i < len(per_dev) else pitch
+        edge_pitch = max(left_pitch, right_pitch)
+        need = (n_right[i - 1] * left_pitch if i > 0 else 0) + \
+               (n_left[i] * right_pitch if i < len(per_dev) else 0)
+        gap_w.append(max(min_gap, 4 * edge_pitch, need + 2 * edge_pitch))
 
+    # Keep each device's existing access corridors intact; wrap only between
+    # devices. Each row gets rails for its OWN nets, not the whole block.
+    width_limit = int(max_row_width_um * geo.lam)
+    if width_limit <= 0:
+        raise Refusal("row width must be positive")
+    placement_rows = [[]]
     x = 0
     for i, d in enumerate(per_dev):
+        width = d["bbox"][2] - d["bbox"][0]
+        if placement_rows[-1] and x + gap_w[i] + width + gap_w[i + 1] > width_limit:
+            placement_rows.append([])
+            x = 0
+        if gap_w[i] + width + gap_w[i + 1] > width_limit:
+            raise Refusal("device and its access corridors exceed the row width")
         x += gap_w[i]
         d["box_x"] = x
         d["gap_hi"] = x
-        x += d["bbox"][2] - d["bbox"][0]
+        x += width
         d["right_lo"] = x
+        placement_rows[-1].append(d)
+
+    row_nets = [[net for net in nets if any(g["net"] == net for d in row for g in d["groups"])]
+                for row in placement_rows]
+    shared = [net for net in nets if sum(net in ns for ns in row_nets) > 1]
+    # Metal4 trunks live left of every row and its access corridors. Metal2
+    # row rails cross trunks without contact except at their own via stack.
+    bus_x = {net: (i + 1) * pitch for i, net in enumerate(shared)}
+    margin = (len(shared) + 3) * pitch if shared else 0
+    y = 0
+    row_rails = []
+    for ri, (row, ns) in enumerate(zip(placement_rows, row_nets)):
+        rails = {net: y + pitch * (i + 1) for i, net in enumerate(ns)}
+        row_rails.append(rails)
+        base = y + pitch * (len(ns) + 24)
+        for d in row:
+            d["row"] = ri
+            d["box_y"] = base
+            for key in ("box_x", "gap_hi", "right_lo"):
+                d[key] += margin
+        height = max([d["cell"]["delta"][1] + max(d["bbox"][3],
+                      max([g["escape_y"] for g in d["groups"]] + [0])) for d in row] + [0])
+        y = base + height + 4 * pitch
+    plan.placement_rows = [{"devices": [d["dev"]["name"] for d in row],
+                            "base_lambda": row[0]["box_y"] if row else 0,
+                            "nets": ns} for row, ns in zip(placement_rows, row_nets)]
 
     # ── the layout pass, in the order Magic will execute it ───────────
     for i, d in enumerate(per_dev):
-        plan.tcl.append(f"box {d['box_x']} {row_base} "
-                        f"{d['box_x']} {row_base}")
+        plan.tcl.append(f"box {d['box_x']} {d['box_y']} "
+                        f"{d['box_x']} {d['box_y']}")
         plan.tcl.append(gencell_call(d["dev"], f"d{i}", facts))
         d["origin"] = (d["box_x"] + d["cell"]["delta"][0],
-                       row_base + d["cell"]["delta"][1])
+                       d["box_y"] + d["cell"]["delta"][1])
 
     comp_cache: Dict[int, Dict[Tuple[str, int], int]] = {}
     for d in per_dev:
@@ -2483,7 +2539,7 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
             gs = sorted([g for g in d["groups"] if g["side"] == side],
                         key=lambda g: g["abs_escape_y"])
             for k, g in enumerate(gs):
-                g["lane_x"] = base + step * (k + 1) * pitch
+                g["lane_x"] = base + step * (k + 1) * d["access_pitch"]
 
     for d in per_dev:
         for g in d["groups"]:
@@ -2607,8 +2663,9 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
             # across to the lane on metal3, then straight down to the rail
             plan.paint(net, "metal3", min(joint, lane) - hw3, ey - hw3,
                        max(joint, lane) + hw3, ey + hw3)
-            plan.paint(net, "metal3", lane - hw3, rail_y[net], lane + hw3, ey)
-            _via_stack(plan, net, lane, rail_y[net], 2, geo, top=3,
+            ry = row_rails[d["row"]][net]
+            plan.paint(net, "metal3", lane - hw3, ry, lane + hw3, ey)
+            _via_stack(plan, net, lane, ry, 2, geo, top=3,
                        sites=sites)
 
     plan.island_patches = commit_metal_patches(plan, patches, sites,
@@ -2616,19 +2673,23 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
 
     # ── one metal2 rail per net, and a label on each declared port ──────
     rail_box: Dict[str, Tuple[int, int, int, int]] = {}
-    for net in nets:
-        xs = [g["lane_x"] for d in per_dev for g in d["groups"]
-              if g["net"] == net]
-        if not xs:
-            continue
-        ty = rail_y[net]
-        plan.paint(net, "metal2", min(xs) - pitch, ty - hw2,
-                   max(xs) + pitch, ty + hw2)
-        rail_box[net] = (min(xs) - pitch, ty - hw2, max(xs) + pitch, ty + hw2)
+    for row, rails in zip(placement_rows, row_rails):
+        for net, ty in rails.items():
+            xs = [g["lane_x"] for d in row for g in d["groups"] if g["net"] == net]
+            lo = bus_x.get(net, min(xs) - pitch)
+            plan.paint(net, "metal2", lo, ty - hw2, max(xs) + pitch, ty + hw2)
+            rail_box.setdefault(net, (lo, ty - hw2, max(xs) + pitch, ty + hw2))
+            if net in bus_x:
+                _via_stack(plan, net, lo, ty, 2, geo, top=4, sites=sites)
+    for net, bx in bus_x.items():
+        ys = [r[net] for r in row_rails if net in r]
+        half = max(geo.wire[4] // 2, 1)
+        plan.paint(net, "metal4", bx - half, min(ys), bx + half, max(ys))
+    for net, box in rail_box.items():
         if net not in ports or not pin_spec:
-            plan.ports.append((net, min(xs), ty))
+            plan.ports.append((net, box[0] + pitch, (box[1] + box[3]) // 2))
 
-    plan.row_base = row_base
+    plan.row_base = placement_rows[0][0]["box_y"] if per_dev else row_base
     plan.port_nets = [n for n in nets if n in ports]
     if pin_spec:
         top_y = max([r["box"][3] for r in plan.shapes]
@@ -3508,6 +3569,7 @@ def emit_block(project: Path, block: str, stage: Stage, magicrc: str,
         snapshot.write_text(facts.cell_lef_text, encoding="utf-8")
         pins_basis["core_pg"]["snapshot"] = str(snapshot.relative_to(project))
     plan = build_plan(devs, ports, cells, facts, geo, tap_clear, pin_spec)
+    report["placement_rows"] = plan.placement_rows
     clearance_deviations(plan, geo, devs)
     # A GEOMETRY THE PDK'S GENCELL CLAMPED. Recorded like every other
     # measurement this emitter makes, and blocking like the short: see
@@ -3558,6 +3620,9 @@ def emit_block(project: Path, block: str, stage: Stage, magicrc: str,
         return RC_REFUSED, report
     if not ok_gds:
         report["gds_note"] = f"{blockname}.gds did not come back: {err_gds}"
+
+    from analog_a5_layout_check import die_fit
+    report["die_fit"] = die_fit(project, block)
 
     report["result"] = "OK"
     report["shapes_painted"] = len(plan.shapes)
@@ -3621,6 +3686,10 @@ def emit_block(project: Path, block: str, stage: Stage, magicrc: str,
             "; ".join(parts) + ". The layout and its GDS are written so the "
             "geometry can be read, and the exit code is non-zero because the "
             "netlist was not drawn.")
+        return RC_FORBIDDEN, report
+    if report["die_fit"]["status"] == "FAIL":
+        report["result"] = "OUTSIDE_DOCUMENTED_DIE"
+        report["reason"] = "actual layout footprint exceeds or cannot establish the documented die bound"
         return RC_FORBIDDEN, report
     return RC_OK, report
 

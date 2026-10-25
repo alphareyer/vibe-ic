@@ -1080,3 +1080,38 @@ def test_a_netlist_this_program_cannot_read_is_named_not_a_traceback(
     rep = doc["blocks"]["blk"]
     assert rep["result"] == "UNREADABLE_NETLIST"
     assert "subckt" in rep["reason"]
+
+
+def test_mos_override_keeps_native_passive_generators_available():
+    class SplitStage(FakeStage):
+        def sh(self, cmd, timeout=900):
+            if cmd.startswith('ls /override/'):
+                return 0, '/override/custom-fet.tcl\n', ''
+            return super().sh(cmd, timeout)
+    facts, why = A5E.read_pdk(SplitStage(), '/pdk', 'x',
+                             '/override/custom-fet.tcl', '/pdk/x-drc.tech')
+    assert why == ''
+    assert len(facts.gencells) == 3
+    assert facts.gencells['rr']['source'] == '/pdk/x-res.tcl'
+    assert facts.gencells['xx_lv_nmos']['source'] == '/override/custom-fet.tcl'
+
+
+def test_device_footprint_wraps_without_changing_device_population(tmp_path, monkeypatch):
+    deck = '.subckt blk d g s b\n' + ''.join(
+        f'xm{i} d g s b xx_lv_nmos w=1u l=0.5u\n' for i in range(240)) + '.ends\n'
+    project = _project(tmp_path, deck)
+    captured = []
+    original = A5E.build_plan
+    def capture(*args, **kwargs):
+        plan = original(*args, **kwargs)
+        captured.append(plan)
+        return plan
+    monkeypatch.setattr(A5E, 'build_plan', capture)
+    rc, doc = _run(monkeypatch, project, FakeStage())
+    plan = captured[0]
+    boxes = [s['box'] for s in plan.device_shapes + plan.shapes]
+    width = (max(b[2] for b in boxes) - min(b[0] for b in boxes)) / 100
+    assert width <= 1010, f'physical footprint is still one long row: {width} um'
+    assert doc['blocks']['blk']['devices'] == 240
+    assert len(plan.placement_rows) > 1
+    assert not A5E.net_shorts(plan)
