@@ -77862,10 +77862,135 @@ def _emit_em_current_authority(project: Path, pdk: PdkConfig,
     return True
 
 
+_CVC_COUNT_RE = re.compile(r"^CVC:\s+([^:]+):\s+(\d+)\s*$", re.M)
+
+
+def _parse_native_cvc_report(text: str) -> Dict[str, Any]:
+    """Grade the completed report; cvc_rv's process status is not a verdict."""
+    text = text or ""
+    population = re.search(
+        r"CVC:\s+(\d+)\(\d+\) instances,\s+(\d+)\(\d+\) nets,\s+"
+        r"(\d+)\(\d+\) devices\.", text)
+    counts = {name.strip(): int(value)
+              for name, value in _CVC_COUNT_RE.findall(text)}
+    parsed = {
+        "completed": "CVC: End:" in text,
+        "instances": int(population.group(1)) if population else None,
+        "nets": int(population.group(2)) if population else None,
+        "devices": int(population.group(3)) if population else None,
+        "counts": counts,
+    }
+    if not parsed["completed"]:
+        return {**parsed, "result": "INCOMPLETE",
+                "note": "cvc_rv did not emit CVC: End; rc is not completion"}
+    if not population or any(parsed[name] <= 0
+                             for name in ("instances", "nets", "devices")):
+        return {**parsed, "result": "INCOMPLETE",
+                "note": "completed CVC report has no non-empty design population"}
+    if counts.get("Total") is None:
+        return {**parsed, "result": "INCOMPLETE",
+                "note": "completed CVC report has no Total count"}
+    total = counts["Total"]
+    return {**parsed, "result": "PASS" if total == 0 else "FAIL",
+            "note": f"native cvc_rv completed with {total} electrical error(s)"}
+
+
+def _native_cvc_category(project: Path, top: str, pdk: PdkConfig,
+                         image: Optional[str]) -> Dict[str, Any]:
+    """Run only a PDK-declared CVC recipe and publish byte-bound evidence."""
+    base = {"category": "Native CVC electrical rules", "status": "AUTOMATED",
+            "tool": "cvc_rv + PDK-declared libs.tech/librelane/cvc"}
+    if not image:
+        return {**base, "result": "INCOMPLETE",
+                "note": "selected native image absent"}
+    pdk_dir = _pdk_dir_of(pdk)
+    library = _pdk_std_cell_library(pdk)
+    power_nets, ground_nets = _design_supply_nets(pdk)
+    extracted_dir = _pl.extracted_dir(project)
+    extracted = next((path for pattern in ("*.spice", "*.cir", "*.sp", "*_pex.v")
+                      for path in sorted(extracted_dir.glob(pattern))
+                      if path.is_file()), None)
+    adopted = _pl.pnr_dir(project) / f"{top}_pnr.v"
+    if (not pdk_dir or not library or extracted is None or not adopted.is_file()
+            or len(power_nets) != 1 or len(ground_nets) != 1):
+        return {**base, "result": "INCOMPLETE",
+                "note": "PDK CVC recipe, final netlists, or unique supply pair absent"}
+    cvc_dir = f"{pdk_dir}/libs.tech/librelane/cvc"
+    cell_cdl = f"{pdk_dir}/libs.ref/{library}/cdl/{library}.cdl"
+    out = _pl.reports_phase3_dir(project) / "cvc_native"
+    out.mkdir(parents=True, exist_ok=True)
+    report = out / "report.rpt"
+    receipt_path = out / "result.json"
+    shell = f"""set -eu
+cvc={shlex.quote(cvc_dir)}
+out={shlex.quote(str(out))}
+test -r "$cvc/cvcrc" -a -r "$cvc/models" -a -r "$cvc/power.awk" -a -r "$cvc/cdl.awk"
+test -r {shlex.quote(cell_cdl)}
+awk -f "$cvc/cdl.awk" {shlex.quote(str(extracted))} > "$out/extracted-clean.cdl"
+awk '1' "$out/extracted-clean.cdl" {shlex.quote(cell_cdl)} > "$out/design.cdl"
+awk -v vdd={shlex.quote(next(iter(power_nets)))} -v gnd={shlex.quote(next(iter(ground_nets)))} \\
+  -f "$cvc/power.awk" {shlex.quote(str(adopted))} > "$out/top.power"
+sed -e "s|\\$CVC_SCRIPTS_DIR/models|$cvc/models|" \\
+    -e "s|\\$DESIGN_NAME|{shlex.quote(top)}|g" \\
+    -e "s|\\$signoff_tmpfiles/{shlex.quote(top)}.cdl|$out/design.cdl|" \\
+    -e "s|\\$signoff_tmpfiles/\\$CVC_TOP.power|$out/top.power|" \\
+    -e "s|\\$signoff_reports/\\$CVC_TOP.rpt|$out/report.rpt|" \\
+    "$cvc/cvcrc" > "$out/cvcrc"
+sha256sum "$cvc/cvcrc" "$cvc/models" "$cvc/power.awk" "$cvc/cdl.awk" \\
+  {shlex.quote(cell_cdl)} > "$out/pdk-sources.sha256"
+cd "$out"
+cvc_rv cvcrc > cvc.stdout 2> cvc.stderr
+"""
+    import _docker_memory as _dmem
+    import librelane_contract as _ll
+    network, command = _ll.native_tool_command(image, ["bash", "-lc", shell])
+    argv = ["docker", "run", *_dmem.docker_memory_flags(
+            {"VIBEIC_DOCKER_MEMORY": "16g"}), "--rm", "--network", network,
+            "--cpus", "4", "--pids-limit", "512",
+            "-v", f"{Path(project).resolve()}:{Path(project).resolve()}",
+            image, "--skip", *command]
+    # A fixed output name is part of the Step-28 contract, so invalidate both
+    # prior authority files before this invocation.  cvc_rv can return without
+    # touching its report; existence after launch must therefore mean THIS
+    # launch wrote it, never that an older PASS survived.
+    report.unlink(missing_ok=True)
+    receipt_path.unlink(missing_ok=True)
+    try:
+        proc = _ll.run_container(argv, supervised=True, log=out / "docker.log")
+    except Exception as exc:
+        return {**base, "result": "INCOMPLETE",
+                "note": f"native CVC launch failed: {exc}"}
+    if proc.returncode != 0:
+        return {**base, "result": "INCOMPLETE", "native_rc": proc.returncode,
+                "note": "native CVC invocation failed; report is not evidence"}
+    if not report.is_file():
+        return {**base, "result": "INCOMPLETE", "native_rc": proc.returncode,
+                "note": "cvc_rv wrote no report"}
+    parsed = _parse_native_cvc_report(report.read_text(errors="replace"))
+    sha = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    ref = lambda path: {"path": str(Path(path).relative_to(project)),
+                        "sha256": sha(path)}
+    pdk_sources = out / "pdk-sources.sha256"
+    receipt = {
+        "schema": "vibeic/native-cvc-result/1",
+        "producer": "phase3_one_shot_runner._native_cvc_category",
+        "tool": "cvc_rv", "image": image, "top": top,
+        "native_rc": proc.returncode,
+        "inputs": {"extracted_netlist": ref(extracted),
+                   "adopted_netlist": ref(adopted)},
+        "pdk_sources": ref(pdk_sources), "report": ref(report),
+        "parsed": parsed,
+    }
+    _aa.write_text(receipt_path, json.dumps(receipt, indent=2) + "\n")
+    return {**base, **parsed, "native_rc": proc.returncode,
+            "evidence": ref(report), "producer_receipt": ref(receipt_path)}
+
+
 def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
                           container: str, notes: List[str], *,
                           routed_def: Optional[Path] = None,
-                          lef_context: Optional[dict] = None) -> bool:
+                          lef_context: Optional[dict] = None,
+                          image: Optional[str] = None) -> bool:
     """Aggregate the 7 Calibre-PERC categories into ONE honest open-source
     PERC-equivalent coverage report (v2.3 Step 28).
 
@@ -78001,6 +78126,8 @@ def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
     categories.append(_auto(
         "Floating nets", erc_v, "OpenROAD report_floating_nets (ERC screen)",
         "reports/phase3/erc.json"))
+    if image:
+        categories.append(_native_cvc_category(project, top, pdk, image))
 
     # --- GUARDBAND-only category: EM via/current-density rules -------------
     categories.append({
