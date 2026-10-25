@@ -1984,17 +1984,51 @@
           "id": "default",
           "select_when": "otherwise",
           "provider": "other",
-          "tools": "KLayout Python + Python interface/SiPi boundary planner",
-          "native_steps": [],
-          "execution_status": "UNIMPLEMENTED"
+          "tools": "pad_assignment_gen + native IO map and source-bound bare-die interface checks",
+          "native_steps": [
+            "pad_assignment_gen",
+            "io_pad_chip_top_gen"
+          ],
+          "execution_status": "SOURCE_NATIVE_IMPLEMENTED_BARE_DIE",
+          "dispatch": {
+            "kind": "native_adapter",
+            "adapter": "flow109_package_plan",
+            "native_step_id": "flow109.D06",
+            "producer": "pad_assignment_gen.py:main",
+            "consumer": "io_pad_chip_top_gen report + owner fact checks",
+            "engine_families": [
+              "python3"
+            ],
+            "engine_executables": {
+              "python3": "python3"
+            },
+            "engine_steps": {
+              "python3": [
+                "pad_assignment_gen",
+                "io_pad_chip_top_gen"
+              ]
+            },
+            "native_required_outputs": [
+              "phase3/stage3/pnr/pad_assignment.json",
+              "reports/phase3/io_pad_chip_top.json",
+              "source-bound L1 package absence and L7/L8/L10/L20 functional-access plan",
+              "current STA netlist/SDC and owner DIE declaration"
+            ],
+            "admission_policy": "source_owned_existing_native",
+            "acceptance_scope": "existing_native_component_only",
+            "component_scope": "bare-die pad, external-load and functional-test-access feasibility",
+            "unsupported_scope": "physical package RLC/escape/bumps and post-DFT access",
+            "flow109_metrics_status": "IMPLEMENTED_BARE_DIE_NATIVE"
+          }
         }
       ],
       "complementary_tools": [],
       "capability_status": "SELECTED_NOT_ROUTE_QUALIFIED",
       "availability_status": "NOT_INVENTORIED_THIS_UPDATE",
       "source_components": [
-        "packaging_intake_check",
-        "provider_bond_pad_edge"
+        "pad_assignment_gen",
+        "io_pad_chip_top_gen",
+        "sim_activity_dump"
       ],
       "obligations": [
         {
@@ -2002,9 +2036,9 @@
           "metric": "pad_bump_interface_constraints",
           "when": "package_interface",
           "expectation": {
-            "operator": "covers_all",
-            "required_set_ref": "requirements/package_plan/pad_bump_interface_constraints.json#/required_items",
-            "empty_set_policy": "requires validated absence/applicability evidence"
+            "operator": "native_pad_constraints_resolved",
+            "source": "pad_assignment_gen + io_pad_chip_top_gen",
+            "scope": "bare-die interface only; physical package scope remains unresolved"
           },
           "binding_keys": [
             "design.requirements",
@@ -2014,17 +2048,16 @@
             "checker.package_plan.pad_bump_interface_constraints",
             "producer.package_plan.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "IMPLEMENTED_BARE_DIE_NATIVE_BINDING"
         },
         {
           "id": "package_plan.package_escape_feasibility",
           "metric": "package_escape_feasibility",
           "when": "package_interface",
           "expectation": {
-            "operator": "within_declared_bounds",
-            "bounds_ref": "requirements/package_plan/package_escape_feasibility.json#/limits",
-            "unit_ref": "requirements/package_plan/package_escape_feasibility.json#/units",
-            "missing_bounds": "BLOCKED"
+            "operator": "native_bare_die_interface_covered",
+            "source": "current STA netlist/SDC + io_pad_chip_top_gen",
+            "scope": "bare-die interface only; physical package scope remains unresolved"
           },
           "binding_keys": [
             "design.requirements",
@@ -2034,16 +2067,16 @@
             "checker.package_plan.package_escape_feasibility",
             "producer.package_plan.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "IMPLEMENTED_BARE_DIE_NATIVE_BINDING"
         },
         {
           "id": "package_plan.test_access_plan",
           "metric": "test_access_plan",
           "when": "package_interface",
           "expectation": {
-            "operator": "covers_all",
-            "required_set_ref": "requirements/package_plan/test_access_plan.json#/required_items",
-            "empty_set_policy": "requires validated absence/applicability evidence"
+            "operator": "native_functional_access_covered",
+            "source": "matched L7/L10 + L8 + current IO map",
+            "scope": "bare-die interface only; physical package scope remains unresolved"
           },
           "binding_keys": [
             "design.requirements",
@@ -2053,10 +2086,10 @@
             "checker.package_plan.test_access_plan",
             "producer.package_plan.execution"
           ],
-          "status": "UNIMPLEMENTED_METRIC_BINDING"
+          "status": "IMPLEMENTED_BARE_DIE_NATIVE_BINDING"
         }
       ],
-      "metric_acceptance_status": "UNIMPLEMENTED",
+      "metric_acceptance_status": "IMPLEMENTED_BARE_DIE_NATIVE",
       "gate_layer_ids": [
         "G1",
         "G2",

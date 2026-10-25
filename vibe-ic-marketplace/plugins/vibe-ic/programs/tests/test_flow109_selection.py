@@ -123,7 +123,9 @@ def test_context_rejects_changed_tool_identity_and_changed_selection():
 def test_canonical_cli_plan_does_not_credit_or_rewrite_old_pass(tmp_path):
     runner = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "vibe_ic_one_shot_runner.py")
     manifest = tmp_path / "manifest.json"
-    manifest.write_text(json.dumps({"features": profile()}))
+    features = profile()
+    features["requires_functional_safety"] = True
+    manifest.write_text(json.dumps({"features": features}))
     old = tmp_path / "reports" / "phase3_one_shot.json"
     old.parent.mkdir()
     old.write_text('{"verdict":"PASS","native_identity":"preserve"}\n')
@@ -136,8 +138,8 @@ def test_canonical_cli_plan_does_not_credit_or_rewrite_old_pass(tmp_path):
     assert plan["flow109_acceptance"] == "NOT_MEASURED"
     assert old.read_bytes() == before
     assert not (tmp_path / "reports" / "flow109" / "admission.json").exists()
-    # Use a currently unmapped selected row, not a permanently unimplemented
-    # D69: the final RCX producer is now wired.
+    # Select an optional unmapped safety row explicitly: the ordinary digital
+    # profile's D06 now has a native owner, so it is no longer a refusal case.
     unmapped = next(row['id'] for row in plan['rows'] if not row['profile'].get('dispatch'))
     result = subprocess.run([x for x in command if x != "--flow109-plan-only"]
                             + ["--entry-step", unmapped, "--exit-step", unmapped],

@@ -1,0 +1,332 @@
+"""Focused D06 producer/adapter controls."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import flow109_package_plan as d06
+from programs.tests._hostpaths import require_repo
+
+
+def _write(path: Path, value) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value) if isinstance(value, dict) else value)
+    return path
+
+
+def _context():
+    return {"requested_step": "D06", "native_step_id": "flow109.D06",
+            "resolved_row": {"id": "D06"}, "context_sha256": "b" * 64,
+            "resolved_features": {"requires_dft": False, "requires_scan": False,
+                                  "package_interface": True,
+                                  "package_model_required": True}}
+
+
+def _producer(monkeypatch, verdict: str, rc: int):
+    def run(argv):
+        report = Path(argv[argv.index("--json") + 1])
+        out = Path(argv[argv.index("--out") + 1])
+        _write(report, {"program": "pad_assignment_gen", "verdict": verdict,
+                        "reason": "controlled owner result"})
+        if rc == 0:
+            _write(out, {"PAD_SOUTH": ["u_pad_a"]})
+        return rc
+    monkeypatch.setattr(d06.pad_assignment_gen, "main", run)
+    monkeypatch.setattr(d06, "_current_pdk", lambda project: "neutral_pdk")
+
+
+def _early_docs(project: Path, *, dft=False):
+    case = {"name": "functional", "kind": "functional_vector",
+            "stimulus": "drive input", "expected": "observe output",
+            "evidence": "input/docs/L7.md (table)"}
+    _write(project / d06.L7_REPORT, {"schema_version": 2, "doc_class": "test_debug",
+           "test_scenarios": [case], "source_documents": ["input/docs/L7.md"]})
+    _write(project / d06.L10_REPORT, {"schema_version": 2, "test_cases": [case],
+           "source_documents": ["input/docs/L7.md"]})
+    _write(project / d06.L8_REPORT, {"clock_and_reset_waveform": {
+        "clocks": [{"name": "clk"}], "resets": [{"name": "rst"}]}})
+    chain = ({"name": "chain0", "scan_in": "sin", "scan_out": "sout",
+              "scan_enable": "scan_en"} if dft else None)
+    _write(project / d06.L20_REPORT, {"doc_id": "L20", "fields": {
+        "dft_present": dft, "scan_chains": [chain] if chain else [],
+        "bist_mbist": [], "jtag_tap": None, "test_compression": None}})
+
+
+def _io(project: Path):
+    return _write(project / d06.IO_REPORT, {
+        "program": "io_pad_chip_top_gen", "verdict": "WROTE",
+        "pad_instances": {
+            "u_clk": {"port": "clk", "direction": "input"},
+            "u_rst": {"port": "rst", "direction": "input"},
+            "u_stim": {"port": "stim", "direction": "input"},
+            "u_obs": {"port": "obs", "direction": "output"}},
+        "scan_interface": {"selected_scan_netlist": False,
+                           "selection": "current pre-DFT netlist"}})
+
+
+def _bare_die_load(project: Path):
+    import hashlib
+    _write(project / d06.TAPEOUT_DECLARATION, {
+        "schema": "vibe-ic/tapeout_declaration/1",
+        "answers": {"deliverable": "DIE"},
+        "answer_provenance": {"deliverable": {
+            "answered_by": "owner", "citation": "operator --route ic"}}})
+    _write(project / "phase1/generated_docs/L1_DATASHEET.json", {
+        "no_package_in_input": True, "package_info": None})
+    sdc = _write(project / "phase3/stage3/pnr/constraint.sdc",
+                 "set_output_delay 2 -clock clk [all_outputs]\n"
+                 "set_load 0.07 [all_outputs]\n")
+    netlist = _write(project / "phase3/librelane/current/chip_top.nl.v",
+                     "module chip_top (clk, rst, stim, obs);\n"
+                     " input clk, rst, stim; output obs;\nendmodule\n")
+    state = _write(project / "phase3/librelane/current/state_out.json", {
+        "sdc": "/project/" + str(sdc.relative_to(project)),
+        "nl": "/project/" + str(netlist.relative_to(project))})
+    _write(state.parent / "config.json", {"DESIGN_NAME": "chip_top", "PDK": "neutral_pdk"})
+    digest = hashlib.sha256(state.read_bytes()).hexdigest()
+    _write(project / d06.CURRENT_REPAIR, {"verdict": "PASS", "final": {
+        "sta_state": "/project/" + str(state.relative_to(project)),
+        "sta_state_sha256": digest}})
+    return state
+
+
+def test_checked_in_registry_routes_d06_to_real_pad_producer():
+    registry = json.loads(require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "flow", "flow109.json").read_text())
+    row = next(item for item in registry["rows"] if item["id"] == "D06")
+    dispatch = row["profiles"][0]["dispatch"]
+    assert dispatch["adapter"] == "flow109_package_plan"
+    assert dispatch["producer"] == "pad_assignment_gen.py:main"
+    assert row["metric_acceptance_status"] == "IMPLEMENTED_BARE_DIE_NATIVE"
+
+
+def test_functional_unscanned_route_uses_l7_l10_and_native_pad_map(tmp_path, monkeypatch):
+    _producer(monkeypatch, "WROTE", 0)
+    project = tmp_path / "project"
+    _early_docs(project)
+    _io(project)
+    _bare_die_load(project)
+    result = d06.execute(project, _context())
+    assert result["native_started"] is True
+    assert result["checks"][0]["status"] == "PASS"
+    assert result["checks"][1]["pad_instances"] == 4
+    assert result["checks"][2]["detail"]["mode"] == "functional_unscanned"
+    assert {row["path"] for row in result["inputs"]} >= {
+        str(d06.L7_REPORT), str(d06.L8_REPORT), str(d06.L10_REPORT), str(d06.L20_REPORT)}
+    assert result["checks"][3]["check"] == "bare_die_external_load_interface"
+    assert result["checks"][3]["detail"]["output_ports"] == ["obs"]
+    assert result["checks"][3]["detail"]["capacitance_library_units"] == 0.07
+    assert result["checks"][3]["profile_package_model_required"] is True
+    assert result["checks"][3]["profile_flag_is_owner_scope_authority"] is False
+    assert result["component_status"] == "PASS"
+    assert result["reason"] == "D06_BARE_DIE_NATIVE_METRICS_PASS"
+    assert result["flow109_acceptance"] == "PASS"
+    assert result["completed"] is True
+    assert set(result["metrics"]) == {"pad_bump_interface_constraints",
+        "package_escape_feasibility", "test_access_plan"}
+    assert result["metrics"]["package_escape_feasibility"]["physical_package_model_consumed"] is False
+    assert result["delivery_accepted"] is False
+
+
+def test_profile_package_flag_cannot_replace_owner_delivery_scope(tmp_path, monkeypatch):
+    _producer(monkeypatch, "WROTE", 0)
+    project = tmp_path / "project"
+    _early_docs(project)
+    _io(project)
+    result = d06.execute(project, _context())
+    assert result["component_status"] == "NOT_MEASURED"
+    assert result["reason"] == "D06_DELIVERY_SCOPE_OWNER_FACT_MISSING"
+
+
+def test_stale_current_sta_state_refuses_load_interface(tmp_path, monkeypatch):
+    _producer(monkeypatch, "WROTE", 0)
+    project = tmp_path / "project"
+    _early_docs(project)
+    _io(project)
+    state = _bare_die_load(project)
+    _write(state, {"changed": True})
+    result = d06.execute(project, _context())
+    assert result["component_status"] == "NOT_MEASURED"
+    assert result["reason"] == "D06_CURRENT_STA_AUTHORITY_STALE"
+
+
+def test_current_output_without_io_pad_refuses_load_coverage(tmp_path, monkeypatch):
+    _producer(monkeypatch, "WROTE", 0)
+    project = tmp_path / "project"
+    _early_docs(project)
+    _io(project)
+    state = _bare_die_load(project)
+    netlist = project / json.loads(state.read_text())["nl"].removeprefix("/project/")
+    _write(netlist, "module chip_top (clk, rst, stim, obs, missing);\n"
+                    " input clk, rst, stim; output obs, missing;\nendmodule\n")
+    result = d06.execute(project, _context())
+    assert result["component_status"] == "NOT_MEASURED"
+    assert result["reason"] == "D06_OUTPUT_LOAD_PAD_COVERAGE_MISMATCH"
+
+
+def test_missing_formal_load_refuses_bare_die_interface(tmp_path, monkeypatch):
+    _producer(monkeypatch, "WROTE", 0)
+    project = tmp_path / "project"
+    _early_docs(project)
+    _io(project)
+    state = _bare_die_load(project)
+    sdc = project / json.loads(state.read_text())["sdc"].removeprefix("/project/")
+    _write(sdc, "set_output_delay 2 -clock clk [all_outputs]\n")
+    result = d06.execute(project, _context())
+    assert result["component_status"] == "NOT_MEASURED"
+    assert result["reason"] == "D06_BARE_DIE_LOAD_INTERFACE_UNRESOLVED"
+
+
+def test_unknown_dft_intent_refuses_before_functional_access(tmp_path, monkeypatch):
+    _producer(monkeypatch, "WROTE", 0)
+    project = tmp_path / "project"
+    _early_docs(project)
+    _io(project)
+    context = _context()
+    del context["resolved_features"]
+    result = d06.execute(project, context)
+    assert result["reason"] == "D06_DFT_INTENT_UNKNOWN"
+    assert len(result["checks"]) == 2
+
+
+def test_wrong_l7_source_refuses(tmp_path, monkeypatch):
+    _producer(monkeypatch, "WROTE", 0)
+    project = tmp_path / "project"
+    _early_docs(project)
+    _io(project)
+    l7 = json.loads((project / d06.L7_REPORT).read_text())
+    l7["test_scenarios"][0]["evidence"] = "input/docs/other.md (table)"
+    _write(project / d06.L7_REPORT, l7)
+    result = d06.execute(project, _context())
+    assert result["reason"] == "D06_EVIDENCE_WRONG_SOURCE"
+
+
+def test_hash_record_is_for_exact_consumed_l10_bytes(tmp_path):
+    project = tmp_path / "project"
+    _early_docs(project)
+    _, binding = d06._bound_json(project, d06.L10_REPORT)
+    import hashlib
+    assert binding["sha256"] == hashlib.sha256(
+        (project / d06.L10_REPORT).read_bytes()).hexdigest()
+    _write(project / d06.L10_REPORT, {"schema_version": 2, "test_cases": []})
+    _, changed = d06._bound_json(project, d06.L10_REPORT)
+    assert changed["sha256"] != binding["sha256"]
+
+
+def test_l20_contradiction_refuses(tmp_path, monkeypatch):
+    _producer(monkeypatch, "WROTE", 0)
+    project = tmp_path / "project"
+    _early_docs(project, dft=True)
+    _io(project)
+    result = d06.execute(project, _context())
+    assert result["reason"] == "D06_DFT_INTENT_CONTRADICTION"
+
+
+def test_selected_dft_requires_complete_l20_architecture(tmp_path, monkeypatch):
+    _producer(monkeypatch, "WROTE", 0)
+    project = tmp_path / "project"
+    _early_docs(project, dft=True)
+    _io(project)
+    l20 = json.loads((project / d06.L20_REPORT).read_text())
+    del l20["fields"]["scan_chains"][0]["scan_enable"]
+    _write(project / d06.L20_REPORT, l20)
+    context = _context()
+    context["resolved_features"] = {"requires_dft": True, "requires_scan": True}
+    result = d06.execute(project, context)
+    assert result["reason"] == "D06_SELECTED_DFT_ARCHITECTURE_MISSING"
+
+
+def test_current_pdk_uses_hash_bound_adopted_sta_state(tmp_path):
+    state = _write(tmp_path / "phase3/librelane/candidate/sta/state_out.json", {})
+    _write(state.parent / "config.json", {"PDK": "neutral_pdk"})
+    import hashlib
+    digest = hashlib.sha256(state.read_bytes()).hexdigest()
+    report = {"verdict": "PASS", "final": {
+        "sta_state": "/project/phase3/librelane/candidate/sta/state_out.json",
+        "sta_state_sha256": digest}}
+    _write(tmp_path / "reports/phase3/librelane_postroute_repair.json", report)
+    assert d06._current_pdk(tmp_path) == "neutral_pdk"
+    _write(state, {"changed": True})
+    try:
+        d06._current_pdk(tmp_path)
+    except d06.D06Refusal as exc:
+        assert exc.code == "D06_CURRENT_PDK_AUTHORITY_UNRESOLVED"
+    else:
+        raise AssertionError("stale current PDK state was accepted")
+
+
+def test_pad_assignment_refusal_remains_fail(tmp_path, monkeypatch):
+    _producer(monkeypatch, "REFUSE", 1)
+    project = tmp_path / "project"
+    project.mkdir()
+    result = d06.execute(project, _context())
+    assert result["component_status"] == "FAIL"
+    assert result["reason"] == "D06_PAD_ASSIGNMENT_PRODUCER_REFUSED"
+
+
+def test_pad_assignment_not_asked_remains_not_measured(tmp_path, monkeypatch):
+    _producer(monkeypatch, "NOT_ASKED", 2)
+    project = tmp_path / "project"
+    project.mkdir()
+    result = d06.execute(project, _context())
+    assert result["component_status"] == "NOT_MEASURED"
+    assert result["reason"] == "D06_PAD_ASSIGNMENT_OWNER_FACT_MISSING"
+
+
+
+def test_selected_dft_cannot_inherit_functional_metric_completion(tmp_path, monkeypatch):
+    _producer(monkeypatch, "WROTE", 0)
+    project = tmp_path / "project"
+    _early_docs(project, dft=True)
+    _io(project)
+    _bare_die_load(project)
+    context = _context()
+    context["resolved_features"].update(requires_dft=True, requires_scan=True)
+    result = d06.execute(project, context)
+    assert result["component_status"] == "NOT_MEASURED"
+    assert result["reason"] == "D06_TEST_ACCESS_METRIC_SCOPE_UNRESOLVED"
+    assert not result.get("completed")
+
+
+def test_changed_readset_cannot_complete_metrics(tmp_path, monkeypatch):
+    _producer(monkeypatch, "WROTE", 0)
+    project = tmp_path / "project"
+    _early_docs(project)
+    _io(project)
+    _bare_die_load(project)
+    original = d06._current_bare_die_load
+    def changed(*args):
+        answer = original(*args)
+        (project / d06.L10_REPORT).write_text("{}")
+        return answer
+    monkeypatch.setattr(d06, "_current_bare_die_load", changed)
+    result = d06.execute(project, _context())
+    assert result["reason"] == "D06_EVIDENCE_CHANGED_DURING_CONSUMPTION"
+    assert not result.get("completed")
+
+
+def test_unbound_io_test_access_cannot_complete_metrics(tmp_path, monkeypatch):
+    _producer(monkeypatch, "WROTE", 0)
+    project = tmp_path / "project"
+    _early_docs(project)
+    path = _io(project)
+    io = json.loads(path.read_text())
+    io["test_access"] = {"mode": "functional_unscanned", "functional_cases": 1}
+    _write(path, io)
+    _bare_die_load(project)
+    result = d06.execute(project, _context())
+    assert result["reason"] == "D06_TEST_ACCESS_METRIC_SCOPE_UNRESOLVED"
+    assert not result.get("completed")
+
+
+def test_declared_physical_package_cannot_inherit_bare_die_metrics(tmp_path, monkeypatch):
+    _producer(monkeypatch, "WROTE", 0)
+    project = tmp_path / "project"
+    _early_docs(project)
+    _io(project)
+    _bare_die_load(project)
+    _write(project / "phase1/generated_docs/L1_DATASHEET.json", {
+        "no_package_in_input": False, "package_info": {"kind": "declared package"}})
+    result = d06.execute(project, _context())
+    assert result["reason"] == "D06_PHYSICAL_PACKAGE_SCOPE_UNRESOLVED"
+    assert not result.get("completed")
