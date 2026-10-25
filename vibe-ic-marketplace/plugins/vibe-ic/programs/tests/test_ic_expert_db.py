@@ -4,6 +4,8 @@ ic-expert) via _lesson_digest, ADVISORY-only (never overrides a gate/program),
 and is blindness-clean. Owner directive 2026-07-02.
 """
 import json
+
+import pytest
 import sys
 from pathlib import Path
 
@@ -231,3 +233,56 @@ def test_related_graph_is_symmetric_after_the_nvm_fuse_array_entry(  # noqa: E50
         if other in rel and "nvm-fuse-array" in rel:
             assert other in rel["nvm-fuse-array"], other
             assert "nvm-fuse-array" in rel[other], other
+
+
+def test_plain_fifo_consumer_keeps_safety_and_capacity_together():
+    hits = Q.query(
+        "Design a dual-clock asynchronous FIFO with Gray pointers, full empty "
+        "flags, and accepted write/read transfers.",
+        k=5, ic_class=None, expand_related=False)
+    row = next(e for e in json.loads(DB.read_text())["entries"]
+               if e["ic_class"] == "async-fifo-cdc")
+    assert len(hits) == 5
+    assert hits[0]["ic_class"] == row["ic_class"]
+    assert hits[0]["lesson"] == "\n\n".join(row["lessons"][:2])
+    assert "TOP TWO bits inverted" in hits[0]["lesson"]
+    assert "same accepted position" in hits[0]["lesson"]
+    assert "extra Gray-pointer lag" in hits[0]["lesson"]
+
+
+def test_grouped_lessons_use_one_slot_and_keep_original_ranking(tmp_path):
+    db = {"entries": [
+        {"ic_class": "divider", "lesson_count": 3,
+         "lessons": ["divider quotient", "unsigned operands", "divider remainder"],
+         "lesson_groups": [[0, 1]]},
+        {"ic_class": "adder", "lesson_count": 1, "lessons": ["adder sum"]}]}
+    path = tmp_path / "db.json"
+    path.write_text(json.dumps(db))
+    hits = Q.query("divider adder quotient", k=3, db_path=path)
+    assert [h["ic_class"] for h in hits] == ["divider", "adder", "divider"]
+    assert hits[0]["lesson"] == "divider quotient\n\nunsigned operands"
+    assert hits[2]["lesson"] == "divider remainder"
+    assert hits[0]["score"] == Q.rank_lessons("divider adder quotient", db["entries"])[0][0]
+    assert C.check(path)["pass"]
+
+
+def test_grouping_is_symmetric_when_companion_ranks_first(tmp_path):
+    path = tmp_path / "db.json"
+    path.write_text(json.dumps({"entries": [{"ic_class": "arithmetic",
+        "lesson_count": 2, "lessons": ["unsigned operands", "divider quotient"],
+        "lesson_groups": [[0, 1]]}]}))
+    hits = Q.query("divider quotient", k=5, db_path=path)
+    assert len(hits) == 1
+    assert hits[0]["lesson"] == "unsigned operands\n\ndivider quotient"
+
+
+@pytest.mark.parametrize("groups", [None, [[0]], [[0, 9]], [[0, 0]],
+                                    [[0, True]], [[0, 1], [1, 2]]])
+def test_invalid_lesson_groups_are_refused(tmp_path, groups):
+    path = _tmp_db(tmp_path, ["divider quotient", "unsigned operands", "remainder"])
+    db = json.loads(path.read_text())
+    db["entries"][0]["lesson_groups"] = groups
+    path.write_text(json.dumps(db))
+    assert not C.check(path)["pass"]
+    with pytest.raises(ValueError, match="lesson_groups"):
+        Q.query("divider", db_path=path)
