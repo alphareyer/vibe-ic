@@ -108,3 +108,40 @@ def test_pg_pins_are_carried_from_use_not_direction():
 def test_no_cell_group_refuses_rather_than_dropping_the_rails():
     pins = [G.Pin(name="VDD", direction="INPUT", is_pg=True, use="POWER")]
     assert G.liberty_with_pg_pins("library (d) { }\n", "d", pins) is None
+
+
+def test_declared_macro_model_is_read_and_bound_before_link(tmp_path, monkeypatch):
+    _inputs(tmp_path)
+    macro = tmp_path / "native/child.lib"
+    macro.parent.mkdir()
+    macro.write_text('library(child) { cell(child) { area : 1; } }\n')
+    def native(argv, *a, **k):
+        recipe = Path(argv[-1]).read_text()
+        assert recipe.index(f"read_liberty {{{macro}}}") < recipe.index("link_design d")
+        return _fake_sta(ETM)(argv, *a, **k)
+    monkeypatch.setattr(G, "_sh", native)
+    monkeypatch.setattr(G.shutil, "which", lambda n: "/usr/bin/sta")
+    text, rec = G.characterise_liberty(tmp_path, "d", "", tmp_path / "hm", [macro])
+    assert text and rec["characterised"]
+    assert rec["current_inputs"]["pdk_macro_liberty_0"] == PC.entry(tmp_path, macro)
+    macro.write_text('changed\n')
+    assert rec["current_inputs"]["pdk_macro_liberty_0"] != PC.entry(tmp_path, macro)
+    calls = []
+    monkeypatch.setattr(G, "_sh", lambda *a, **k: calls.append(a))
+    macro.unlink()
+    text, rec = G.characterise_liberty(tmp_path, "d", "", tmp_path / "hm", [macro])
+    assert text is None and rec["reason_class"] == "BLOCKED_BY_UPSTREAM"
+    assert calls == []
+
+
+def test_spef_name_mismatch_cannot_be_a_characterised_model(tmp_path, monkeypatch):
+    _inputs(tmp_path)
+    def native(argv, *a, **k):
+        rc, out, err = _fake_sta(ETM)(argv, *a, **k)
+        return rc, 'Warning 1650: native.spef line 10, net lost not found.\n', err
+    monkeypatch.setattr(G, "_sh", native)
+    monkeypatch.setattr(G.shutil, "which", lambda n: "/usr/bin/sta")
+    text, rec = G.characterise_liberty(tmp_path, "d", "", tmp_path / "hm")
+    assert rec["characterised"] is False
+    assert text is None
+    assert rec["reason_class"] == "EXECUTION_ERROR"
