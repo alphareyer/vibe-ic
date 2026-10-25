@@ -321,6 +321,59 @@ def _safe_eval_int(expr: str, env: Dict[str, int]) -> Optional[int]:
     return _eval_ast_int(tree.body, env)
 
 
+def declared_parametric_range(symbolic, parameters, module_owner):
+    """A legal packed range over this module's own integer declarations.
+
+    This validates syntax and ownership; it NEVER assigns parameter values or
+    claims a concrete width. Deliberately excludes arbitrary calls/scopes and
+    Python-only operators even though the numeric evaluator accepts some.
+    """
+    if not isinstance(symbolic, str) or not isinstance(parameters, list) or not parameters:
+        return None
+    names = set()
+    for row in parameters:
+        if (not isinstance(row, dict) or row.get('module_owner') != module_owner
+                or not isinstance(row.get('name'), str)
+                or not re.fullmatch(r'[A-Za-z_]\w*', row['name'])
+                or row['name'] in names):
+            return None
+        default = row.get('default')
+        if default is not None and (isinstance(default, bool) or not
+                re.fullmatch(r'[+-]?[0-9]+', str(default))):
+            return None
+        names.add(row['name'])
+    text = symbolic.strip()
+    if text.startswith('[') and text.endswith(']'):
+        text = text[1:-1]
+    if text.count(':') != 1:
+        return None
+    used = set()
+    def legal(node, source):
+        if isinstance(node, ast.Constant):
+            # Python's AST erases spelling: 0x10/0b10000/0o20 all become
+            # integer 16, but raw insertion is not legal Verilog. Admit only
+            # decimal spellings here; numeric evaluation elsewhere is distinct.
+            return (isinstance(node.value, int) and not isinstance(node.value, bool)
+                    and re.fullmatch(r'[0-9][0-9_]*',
+                                     ast.get_source_segment(source, node) or '') is not None)
+        if isinstance(node, ast.Name):
+            used.add(node.id)
+            return node.id in names
+        if isinstance(node, ast.BinOp):
+            return (type(node.op) in _SAFE_BINOPS and not isinstance(node.op, ast.FloorDiv)
+                    and legal(node.left, source) and legal(node.right, source))
+        if isinstance(node, ast.UnaryOp):
+            return type(node.op) in _SAFE_UNARYOPS and legal(node.operand, source)
+        return False
+    try:
+        if not all(legal(ast.parse(term.strip(), mode='eval').body, term.strip())
+                   for term in text.split(':')):
+            return None
+    except (SyntaxError, ValueError):
+        return None
+    return '[' + text + ']' if used else None
+
+
 def _parse_module_params(text: str) -> Dict[str, int]:
     """Resolve `parameter`/`localparam NAME = <expr>` to concrete ints, to a
     fixpoint so a later param can reference an earlier one. Sized-literal /
