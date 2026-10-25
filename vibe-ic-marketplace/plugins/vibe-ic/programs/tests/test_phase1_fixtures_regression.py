@@ -745,3 +745,43 @@ def test_plain_design_source_provenance_preserves_existing_source_records(tmp_pa
     assert actual20['fields'] == l20['fields']
     assert actual22['fields']['notes'] == l22['fields']['notes']
     assert actual22['fields']['verification_plan_present'] == 'present'
+
+
+def _arithmetic_reset_rules(tmp_path, text):
+    from programs import phase1_doc_one_shot_runner as producer
+    producer.gen_l6_control_logic(tmp_path, {'L4_command_protocol.txt': text})
+    return json.loads((tmp_path / 'phase1/generated_docs/L6_CONTROL_LOGIC.json').read_text())['reject_rules']
+
+
+@pytest.mark.parametrize('text', [
+    None,
+    'A clocked reset aborts the ongoing division and clears arithmetic state.',
+    'A reset aborting active computation clears arithmetic state.',
+    'An overflow aborts the current calculation; no framing protocol is declared.',
+])
+def test_arithmetic_reset_cancel_does_not_invent_protocol_rejection(tmp_path, text):
+    if text is None:
+        text = _load_fixture('arithmetic_reset_cancel')['L4_command_protocol.txt']
+    rules = _arithmetic_reset_rules(tmp_path, text)
+    assert rules == [], rules
+
+
+@pytest.mark.parametrize('text', [
+    'Abort the incoming frame on timeout.',
+    'Abort RX after the CRC check fails.',
+    'After multiplication completes, abort an incoming frame on timeout.',
+    'Reset aborts the current multiplication. Reject an invalid command.',
+])
+def test_arithmetic_reset_cancel_preserves_explicit_protocol_rejection(tmp_path, text):
+    rules = _arithmetic_reset_rules(tmp_path, text)
+    assert len(rules) == 1, rules
+    assert rules[0]['condition'] == text
+    assert rules[0]['action'] == 'DROP_FRAME_AND_RETURN_TO_IDLE'
+
+
+def test_arithmetic_reset_cancel_keeps_real_rule_in_mixed_source(tmp_path):
+    text = _load_fixture('arithmetic_reset_cancel')['L4_command_protocol.txt']
+    protocol = 'Abort the incoming frame on timeout.'
+    rules = _arithmetic_reset_rules(tmp_path, text + '\n' + protocol)
+    assert len(rules) == 1, rules
+    assert rules[0]['condition'] == protocol
