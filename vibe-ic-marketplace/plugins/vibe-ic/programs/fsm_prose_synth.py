@@ -125,7 +125,7 @@ def _parse_decode_table(prompt, n_outputs):
     return states, trans, souts
 
 
-def _parse_onehot_map(prompt, states):
+def _parse_onehot_map(prompt, states, *, codes=False):
     """Return {state_name: bit_index} from the EXPLICIT one-hot encoding, else None.
 
     The encoding is the load-bearing fact the TB pins, so we never guess it. Two
@@ -141,24 +141,32 @@ def _parse_onehot_map(prompt, states):
     states (distinct indices, every state covered, indices in 0..N-1). Anything short
     of that -> None (SKIP).
     """
-    n = len(states)
-    idx = {}
-
-    # (a) per-state binary-literal map: `A=4'b0001` or `A = 0001`.
-    lit_re = re.compile(r"\b(\w+)\s*=\s*(?:\d+'b)?([01]{2,})\b")
-    for m in lit_re.finditer(prompt):
-        s, bits = m.groups()
+    # codes=True returns (integer codes, declared width), (None, None) when
+    # unconstrained, or None on unsupported/ambiguous constraints. Default keeps
+    # the combinational decoder's original bit-index/positional API.
+    n, idx, width = len(states), {}, None
+    for s, literal in re.findall(r"\b(\w+)\s*=\s*([^\s,;.]+)", prompt):
+        m = re.fullmatch(r"(?:(\d+)'[bB])?([01]{2,})", literal)
         if s not in states:
+            if m:
+                return None                 # extraneous state code
             continue
-        if bits.count("1") != 1:             # not one-hot -> reject this map
-            continue
-        # bit string is MSB-first; index = position of the lone 1 from the LSB.
-        k = len(bits) - 1 - bits.index("1")
-        if s in idx and idx[s] != k:
+        if not m or s in idx:
             return None
-        idx[s] = k
-    if len(idx) == n and len(set(idx.values())) == n and set(idx.values()) == set(range(n)):
-        return idx
+        declared, bits = m.groups()
+        w = int(declared) if declared else len(bits)
+        if w != len(bits) or bits.count("1") != 1 or width not in (None, w):
+            return None
+        width = w
+        idx[s] = len(bits) - 1 - bits.index("1")
+    if idx:
+        if len(idx) != n or len(set(idx.values())) != n:
+            return None
+        if codes:
+            return {s: 1 << k for s, k in idx.items()}, width
+        return idx if width == n and set(idx.values()) == set(range(n)) else None
+    if codes:
+        return None if re.search(r"encod|one[-\s]?hot", prompt, re.I) else (None, None)
 
     # (b) positional: "state[0] through state[N-1] correspond to the states S0
     #     through S(N-1), respectively" — bit k is the k-th state in listed order.
