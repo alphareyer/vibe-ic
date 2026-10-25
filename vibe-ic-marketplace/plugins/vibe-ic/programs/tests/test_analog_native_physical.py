@@ -236,15 +236,19 @@ def test_a14_op_study_conditions_flow_into_all_post_styles_and_a15(project, monk
     assert len(calls) == 5
     assert result["metrics"]["pre"]["measurements"] == {"vout": 1.19532, "iq": 30.1455}
     assert [c["style"] for c in result["metrics"]["corners"]] == styles
+    assert all(not Path(c["post_testbench"]).is_absolute() and
+               not Path(c["post_netlist"]).is_absolute()
+               for c in result["metrics"]["corners"])
     assert all(c["missing"] == ["dropout", "psrr"] for c in result["metrics"]["corners"])
     assert legacy.read_bytes() == before
-    assert all(c["native_measurement_study"]["native_inputs"]["bindings"] ==
-               original["native_inputs"]["bindings"] for c in result["metrics"]["corners"])
-    assert all(physical._current_native_views({role: view}) for role, view in result["native_inputs"].items())
+    assert all(c["native_measurement_study"]["native_inputs"]["bindings"]["sha256"] ==
+               original["native_inputs"]["bindings"]["sha256"] for c in result["metrics"]["corners"])
+    assert all(not Path(c["native_measurement_study"]["native_inputs"]["bindings"]["path"]).is_absolute()
+               for c in result["metrics"]["corners"])
     dependency_paths = {view["path"] for view in result["native_inputs"].values()}
-    assert original["native_inputs"]["testbench"]["path"] in dependency_paths
-    assert original["native_inputs"]["bindings"]["path"] in dependency_paths
-    assert original["executions"][0]["log"] in dependency_paths
+    assert str(Path(original["native_inputs"]["testbench"]["path"]).relative_to(project)) in dependency_paths
+    assert str(Path(original["native_inputs"]["bindings"]["path"]).relative_to(project)) in dependency_paths
+    assert str(Path(original["executions"][0]["log"]).relative_to(project)) in dependency_paths
     put(work / "A14.json", result)
     statistical_decks = []
     def statistical(study, name, container, pdk, samples):
@@ -534,6 +538,32 @@ def _post_statistics_inputs(project):
          "post_testbench_sha256": physical._sha(post)}]}})
 
 
+def _transferred_post_statistics_inputs(project, damage=None):
+    """Stage exact A14 bytes under a new root, retaining its old path strings."""
+    _, work = physical._paths(project, "unit")
+    study = work / "measurement_studies/ngspice/receipt-id/study-0"
+    post_net = put(study / "unit_post_ngspice.sp",
+                   ".subckt unit a b vss\nR0 a b 12.5\n.ends unit\n")
+    deck = put(study / "measurements.sp",
+               ".include unit_post_ngspice.sp\n.control\nop\n.endc\n")
+    old_root = project.parent / "transferred-away-project"
+    relative_deck = deck.relative_to(project)
+    relative_net = post_net.relative_to(project)
+    recorded_deck = old_root / relative_deck
+    recorded_net = old_root / relative_net
+    if damage == "missing":
+        deck.unlink()
+    elif damage == "changed":
+        deck.write_text(deck.read_text() + "* changed after A14\n")
+    elif damage == "foreign":
+        recorded_deck = project.parent / "foreign-receipt/measurements.sp"
+    put(work / "A14.json", {"status": "PASS", "metrics": {"corners": [{
+        "style": "ngspice()", "post_testbench": str(recorded_deck),
+        "post_netlist": str(recorded_net), "post_netlist_sha256": physical._sha(post_net),
+        "post_testbench_sha256": hashlib.sha256(
+            ".include unit_post_ngspice.sp\n.control\nop\n.endc\n".encode()).hexdigest()}]}})
+
+
 @pytest.mark.parametrize("scored,expected", [(5, "PASS"), (4, "NOT_MEASURED")])
 def test_a15_mc_reads_post_layout_not_schematic_and_counts_full_population(project,
                                                                          monkeypatch, scored, expected):
@@ -552,6 +582,22 @@ def test_a15_mc_reads_post_layout_not_schematic_and_counts_full_population(proje
     assert result["status"] == expected
     assert len(calls) == 1
     assert not (project / "phase3/analog/unit/corner_results.json").exists()
+
+
+@pytest.mark.parametrize("damage,expected", [
+    (None, "PASS"), ("missing", "NOT_MEASURED"),
+    ("changed", "NOT_MEASURED"), ("foreign", "NOT_MEASURED")])
+def test_a15_rebinds_only_exact_hash_bound_transferred_a14_paths(
+        project, monkeypatch, damage, expected):
+    import analog_mc_yield_run as mc
+    _transferred_post_statistics_inputs(project, damage)
+    calls = []
+    monkeypatch.setattr(mc, "run_block", lambda *a: calls.append(a) or {
+        "verdict": "PASS", "mc_runs": 2,
+        "spec_yield": {"vout": {"runs_scored": 2, "yield_pct": 100.0}}})
+    result = physical._statistics(project, "unit", "container", "image", "process", {"samples": 2})
+    assert result["status"] == expected
+    assert len(calls) == (1 if expected == "PASS" else 0)
 
 
 @pytest.mark.parametrize("yield_pct,extra,verdict,expected", [
