@@ -15,7 +15,8 @@ exit-code contract and the four hard enumeration rules:
 ENUMERATION RULES (pinned here so a future query change cannot leak):
   - drafts are excluded (the author's own "not ready" signal)
   - a PR against a DIFFERENT base is excluded (belt-and-braces re-check)
-  - actionable PRs are returned NEWEST-FIRST (highest number first)
+  - actionable PRs are returned READY-FIRST; number is only a stable
+    tie-breaker inside one advisory readiness class
   - a CONFLICTING / DIRTY PR is STILL actionable — `mergeable` is surfaced
     as ADVISORY context, NEVER as a poll filter (silently dropping it
     would wedge the PR with no eject path; §4.05 no-leak: the poll must
@@ -176,12 +177,21 @@ def test_wrong_base_excluded(monkeypatch):
     assert nums == [20]
 
 
-def test_newest_first(monkeypatch):
+def test_ready_first_does_not_wait_behind_earlier_unrelated_blocked_pr(monkeypatch):
+    monkeypatch.setattr(P, "_list_open_prs_gh", lambda repo, base: [
+        _gh_pr(5, mergeable="MERGEABLE"),
+        _gh_pr(42, mergeable="CONFLICTING"),
+        _gh_pr(17)])
+    rep = P.poll(repo="o/r", base="main")
+    nums = [e["number"] for e in rep["actionable"]]
+    assert nums == [17, 5, 42]
+
+
+def test_pr_number_is_only_a_tie_breaker_within_readiness_class(monkeypatch):
     monkeypatch.setattr(P, "_list_open_prs_gh", lambda repo, base: [
         _gh_pr(5), _gh_pr(42), _gh_pr(17)])
     rep = P.poll(repo="o/r", base="main")
-    nums = [e["number"] for e in rep["actionable"]]
-    assert nums == [42, 17, 5]
+    assert [e["number"] for e in rep["actionable"]] == [42, 17, 5]
 
 
 def test_conflicting_pr_is_still_actionable(monkeypatch):

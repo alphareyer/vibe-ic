@@ -18,8 +18,10 @@ Step-2.7 adversarial gate, never here):
 There is NO label gating and NO comment classifier. A draft PR is the
 author still declaring "not ready" — it is excluded (the author has not
 asked for the gate). Everything else open against the base is actionable
-and is handed to the gatekeeper newest-first (highest PR number first),
-so a freshly-pushed PR is serviced before stale ones.
+and is handed to the gatekeeper ready-first. GitHub's CLEAN/MERGEABLE signal
+is only a service-order hint: it puts an independently processable candidate
+ahead of an unrelated DIRTY/CONFLICTING candidate, but never hides either one.
+PR number and arrival order are tie-breakers, not landing dependencies.
 
 The poll DOES NOT decide mergeability — that is the job of the machine
 gates (``gatekeeper_review.py``) and the Step-2.7 adversarial review in
@@ -31,7 +33,7 @@ back to the author — silently dropping it from the poll would wedge it).
 
 Usage
 -----
-    # default — print a human report of actionable PRs, newest-first.
+    # default — print a human report of actionable PRs, ready-first.
     python3 .../gatekeeper-loop/programs/poll_prs.py
 
     # json output for machine consumption.
@@ -258,6 +260,26 @@ def _is_actionable(pr: Dict[str, Any], base: str) -> bool:
     return True
 
 
+def _service_priority(entry: Dict[str, Any]) -> Tuple[int, int]:
+    """Advisory ready-first ordering, never an acceptance decision.
+
+    A known CLEAN/MERGEABLE candidate is cheaper to put through the real gates
+    now. Unknown states remain ahead of known conflicts because the poll must
+    not invent a hold. Known DIRTY/CONFLICTING candidates are still returned so
+    the gatekeeper can issue their concrete refusal. PR number is only a stable
+    tie-breaker inside one readiness class.
+    """
+    mergeable = str(entry.get("mergeable") or "").upper()
+    state = str(entry.get("mergeStateStatus") or "").upper()
+    if mergeable == "MERGEABLE" or state == "CLEAN":
+        readiness = 0
+    elif mergeable == "CONFLICTING" or state in {"DIRTY", "BLOCKED"}:
+        readiness = 2
+    else:
+        readiness = 1
+    return readiness, -(entry.get("number") or 0)
+
+
 def poll(repo: str = _DEFAULT_REPO,
          base: str = _DEFAULT_BASE,
          token: Optional[str] = None,
@@ -281,8 +303,10 @@ def poll(repo: str = _DEFAULT_REPO,
 
     drafts = [pr for pr in raw if pr.get("isDraft")]
     actionable = [_to_entry(pr) for pr in raw if _is_actionable(pr, base)]
-    # Newest-first: highest PR number first.
-    actionable.sort(key=lambda x: (x.get("number") or 0), reverse=True)
+    # Ready-first: unrelated blocked work must not form an accidental FIFO
+    # barrier. This is service order only; acceptance and dependency checks
+    # remain owned by the later machine/adversarial gates and merge lock.
+    actionable.sort(key=_service_priority)
 
     return {
         "repo":             repo,
@@ -448,7 +472,7 @@ def _print_text(report: Dict[str, Any]) -> None:
         print("(no actionable PRs)")
         return
     print()
-    print("ACTIONABLE_PRS (open, non-draft, newest-first):")
+    print("ACTIONABLE_PRS (open, non-draft, ready-first; status advisory):")
     for it in report["actionable"]:
         labels_s = ",".join(it["labels"]) or "-"
         merge_s = it.get("mergeable") or "?"
