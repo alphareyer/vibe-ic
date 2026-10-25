@@ -31,6 +31,10 @@ When `design_one_shot_runner.step_rtl_gen` WAIVES with the message:
      `<project>/input/phase1_prompt.md` or `<project>/input/docs/*.md`. The
      prompt typically has clearer port-name and behavioral details than the
      auto-extracted L docs.
+   - When the handoff supplies verified `public_original_input_paths`, ALSO
+     read those original RTL and context files. Preserve their exact interface
+     and supplied behavior while applying the prompt's requested completion
+     or change; use the same authoring method below with these source inputs.
 
    **— and CONSULT THE CAPTURED-LESSON DIGEST (MANDATORY) —**
    The runner's WAIVE step deterministically writes
@@ -105,9 +109,10 @@ When `design_one_shot_runner.step_rtl_gen` WAIVES with the message:
      `recovered_from_prose` in the provenance sidecar. Do not use it as the
      normal path — a free choice recorded only in an RTL comment is a free
      choice a downstream tool has to guess.
-2. **Respect the blind rule**: read ONLY the L docs + original prompt. NEVER
-   read `testbench.v`, `verified_*.v`, hidden cocotb harness, or any reference
-   RTL the upstream benchmark ships. This is enforced by the open-benchmark-
+2. **Respect the blind rule**: read ONLY the L docs, original prompt, and the
+   handoff's verified `public_original_input_paths` when supplied. NEVER read
+   hidden or unlisted benchmark testbenches, harnesses, or reference RTL (for
+   example `testbench.v` or `verified_*.v`). This is enforced by the open-benchmark-
    methodology skill's absolute-blindness rule and applies inside this skill.
 3. **Determine the module name**:
    - If `L9_INTEGRATION_SPEC.json` declares `top_module` (e.g. `"chip_top"`)

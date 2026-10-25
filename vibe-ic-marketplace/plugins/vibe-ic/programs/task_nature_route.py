@@ -171,6 +171,23 @@ EVIDENCE_EXIT: Dict[str, Dict[str, Any]] = {
                          "artefact": "phase3/stage4/gds/*.gds"},
 }
 
+
+def is_rtl_only_evidence(requested_evidence: Optional[str] = None, *,
+                         exit_step: Optional[str] = None) -> bool:
+    """Whether the existing requested proof ends at standalone RTL evidence.
+
+    This scopes orchestration, not acceptance: source integrity and the owning
+    RTL Program/AI gates still apply. Step IDs come only from EVIDENCE_EXIT.
+    """
+    if requested_evidence is None:
+        matches = [name for name, row in EVIDENCE_EXIT.items()
+                   if exit_step is not None and row['exit_step'] == str(exit_step)]
+        return len(matches) == 1 and is_rtl_only_evidence(matches[0])
+    return (requested_evidence in ('existence', 'lint_validated', 'behaviour', 'proof')
+            and requested_evidence in EVIDENCE_EXIT
+            and (exit_step is None or
+                 EVIDENCE_EXIT[requested_evidence]['exit_step'] == str(exit_step)))
+
 # THE BLINDNESS CAP (§ 4.05). An exit may only demand evidence the run can
 # produce WITHOUT the oracle. CVDP's record["harness"] and VerilogEval's
 # `_test.sv` are the graders' own testbenches: a run exits at `behaviour` on ITS

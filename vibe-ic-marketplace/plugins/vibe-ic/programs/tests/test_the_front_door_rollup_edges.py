@@ -278,6 +278,171 @@ def _sign_d1_checkpoint(project):
         'evidence_sha256': ai.evidence_sha256(project, 'D1')}))
 
 
+@pytest.mark.parametrize('review', ['missing', 'FAIL', 'PASS'])
+@pytest.mark.parametrize('source_drift', [False, True])
+def test_bounded_rtl_request_uses_intact_provenance_without_forging_d1(
+        tmp_path, monkeypatch, review, source_drift):
+    import ai_signed_judgement as ai
+    import emit_attestation
+    import step_output_collector as versions
+    import task_nature_route as routes
+    project, plugin, _, _, before = _recorded_d1_checkpoint(tmp_path, monkeypatch)
+    if review in ('FAIL', 'PASS'):
+        _sign_d1_checkpoint(project)
+        signature = project / 'reports/audit/ai_judgements/D1.json'
+        payload = json.loads(signature.read_text())
+        payload['verdict'] = review
+        signature.write_text(json.dumps(payload))
+    if source_drift:
+        source = plugin / 'programs/fake_l_producer.py'
+        source.write_text(source.read_text() + '\n# A later valid producer revision.\n')
+    monkeypatch.setattr(V, '_revalidate_phase1_checkpoint', lambda *a, **k:
+                        pytest.fail('bounded RTL must not run full D1 qualification'))
+    original = emit_attestation.phase1_provenance(project)
+    called = []
+    _, doc = _drive_main(
+        project, monkeypatch, phase1=('NOT_MEASURED', 1, None), phase2=('PASS', 0),
+        reuse_phase1=None, extra_argv=('--skip-phase3', '--skip-analog',
+                                    '--exit-step', routes.EVIDENCE_EXIT['lint_validated']['exit_step']),
+        after_phase=called.append)
+    assert called == ['phase2'], doc
+    assert doc['halted_at'] != 'phase1', doc
+    assert doc['phase1_checkpoint_review']['verdict'] == (
+        review if review in ('FAIL', 'PASS') else 'NOT_MEASURED'), doc
+    assert versions.latest_pass(project, 'D1') is None
+    assert ai.check(project, 'D1')[0] == (review == 'PASS')
+    assert emit_attestation.phase1_provenance(project) == original
+    assert {p: p.read_bytes() for p in before} == before
+    assert any('BOUNDED_RTL_PHASE1_PROVENANCE' in item for item in doc['advisories'])
+
+
+@pytest.mark.parametrize('corruption', ['input', 'output', 'identity'])
+def test_bounded_rtl_request_refuses_corrupt_source_provenance(tmp_path, monkeypatch, corruption):
+    project, _, _, _, _ = _recorded_d1_checkpoint(tmp_path, monkeypatch)
+    path = {'input': project / 'input/docs/spec.md',
+            'output': project / 'phase1/generated_docs/L1_DOC.json',
+            'identity': project / 'phase1/step_identity.json'}[corruption]
+    path.write_text(path.read_text() + '\ncorrupted\n')
+    called = []
+    _, doc = _drive_main(
+        project, monkeypatch, phase1=('NOT_MEASURED', 1, None), phase2=('PASS', 0),
+        reuse_phase1=None, extra_argv=('--skip-phase3', '--skip-analog',
+                                    '--entry-step', '2', '--exit-step', '2'),
+        after_phase=called.append)
+    assert called == [] and doc['halted_at'] == 'phase1', doc
+
+
+def test_rtl_only_evidence_resolves_the_existing_registry():
+    import task_nature_route as routes
+    for name, row in routes.EVIDENCE_EXIT.items():
+        expected = name in ('existence', 'lint_validated', 'behaviour', 'proof')
+        assert routes.is_rtl_only_evidence(name) == expected
+        assert routes.is_rtl_only_evidence(exit_step=row['exit_step']) == expected
+        assert routes.is_rtl_only_evidence(name, exit_step=row['exit_step']) == expected
+        assert routes.is_rtl_only_evidence(name, exit_step='unrecognised') is False
+    assert routes.is_rtl_only_evidence() is False
+    assert routes.is_rtl_only_evidence('unrecognised') is False
+
+
+@pytest.mark.parametrize('extra,skip_physical', [
+    (('--exit-step', 'D1'), True),
+    (('--entry-step', 'D1', '--exit-step', '2'), True),
+    (('--exit-step', '9'), True),
+    ((), True),
+    (('--exit-step', '2'), False),
+])
+def test_non_rtl_evidence_retains_full_d1_handoff(tmp_path, monkeypatch, extra, skip_physical):
+    project, _, _, _, _ = _recorded_d1_checkpoint(tmp_path, monkeypatch)
+    called = []
+    _, doc = _drive_main(
+        project, monkeypatch, phase1=('NOT_MEASURED', 1, None), phase2=('PASS', 0),
+        reuse_phase1=None, extra_argv=('--skip-analog',
+                                    *(('--skip-phase3',) if skip_physical else ()), *extra),
+        after_phase=called.append)
+    assert called == [] and doc['halted_at'] == 'phase1', doc
+
+
+def test_bounded_rtl_request_does_not_accept_a_failed_rtl_program(tmp_path, monkeypatch):
+    project, _, _, _, _ = _recorded_d1_checkpoint(tmp_path, monkeypatch)
+    called = []
+    _, doc = _drive_main(
+        project, monkeypatch, phase1=('NOT_MEASURED', 1, None), phase2=('FAIL', 1),
+        reuse_phase1=None, extra_argv=('--skip-phase3', '--skip-analog', '--exit-step', '2'),
+        after_phase=called.append)
+    assert called == ['phase2'], doc
+    assert doc['halted_at'] == 'phase2' and doc['verdict'] != 'PASS', doc
+
+
+@pytest.mark.timeout(300)
+def test_bounded_rtl_request_reaches_the_real_lint_consumer(tmp_path):
+    """Real retained producer, normal unified entry and real RTL lint in both directions."""
+    import hashlib
+    import subprocess
+    import emit_attestation
+    import benchmark_io_adapter as bio
+    from programs.tests._hostpaths import require_repo
+    fixture = require_repo() / 'vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/librelane_lint_frontend/plain.v'
+    source = fixture.read_text()
+    project = tmp_path / 'native'
+    docs = project / 'input/docs'
+    docs.mkdir(parents=True)
+    prompt = 'Implement this bitwise inverter with the supplied public interface.\n\n```verilog\n' + source + '```\n'
+    (docs / 'spec.md').write_text(prompt)
+    (project / 'input/phase1_prompt.md').write_text(prompt)
+    stage_owner_route(project, 'ic')
+    child_env = {key: value for key, value in os.environ.items()
+                 if not key.startswith('VIBEIC_EXECUTION')}
+    producer = subprocess.run([
+        sys.executable, str(PROGRAMS / 'phase1_one_shot_runner.py'), str(project),
+        '--mode', 'docs', '--skip-analog', '--ic-name', 'plain'],
+        capture_output=True, text=True, env=child_env, timeout=80)
+    (tmp_path / 'native-phase1.log').write_text(producer.stdout + producer.stderr)
+    provenance = emit_attestation.phase1_provenance(project)
+    assert provenance.get('ran') is True, producer.stdout + producer.stderr
+    original = {p: hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in (docs / 'spec.md', project / 'input/phase1_prompt.md')}
+    rtl = project / 'phase2/stage1/rtl/plain.v'
+    rtl.parent.mkdir(parents=True, exist_ok=True)
+    command = [sys.executable, str(PROGRAMS / 'vibe_ic_one_shot_runner.py'),
+               str(project), '--route', 'ic', '--ic-name', 'plain',
+               '--skip-phase3', '--skip-analog', '--skip-hardware', '--no-dashboard',
+               '--entry-step', '2', '--exit-step', '2', '--max-rtl-repair-retries', '0']
+    for valid in (True, False):
+        rtl.write_text(source if valid else 'module plain( input [7:0] value_i, output [7:0] value_o); assign value_o = ; endmodule\n')
+        result = subprocess.run(command, capture_output=True, text=True,
+                                env=child_env, timeout=80)
+        (tmp_path / ('native-valid.log' if valid else 'native-invalid.log')).write_text(
+            result.stdout + result.stderr)
+        report = json.loads(_pl.report_path(project, 'vibe_ic_one_shot.json').read_text())
+        phase2 = next(row for row in report['phases'] if row['name'] == 'phase2')
+        assert phase2['verdict'] != 'SKIPPED', report
+        lint_path = project / 'reports/phase2/lint/rtl_hygiene.json'
+        assert lint_path.is_file(), result.stdout + result.stderr
+        lint = json.loads(lint_path.read_text())
+        assert isinstance(lint, list), lint
+        child = json.loads(_pl.report_path(project, 'phase2_one_shot.json').read_text())
+        measured = next(row for row in child['steps'] if row['name'] == 'rtl_lint_tool')
+        assert measured['status'] == ('PASS' if valid else 'FAIL'), child
+        context = measured['extras']['native_context']
+        assert isinstance(context['native_returncode'], int), context
+        assert (context['native_returncode'] == 0) is valid, context
+        assert context['input_sha256'], context
+        if valid:
+            assert context['status'] == 'MEASURED', context
+        else:
+            assert lint, 'the compiler rejection must retain its actual findings'
+        if valid:
+            collected = bio.collect('verilogeval', project.name, project,
+                                    supplied_rtl=True, required_top='plain')
+            assert collected['ok'] is True, collected
+            assert bio.collect('verilogeval', project.name, project,
+                               required_top='plain')['ok'] is False
+        else:
+            assert phase2['verdict'] == 'FAIL' and result.returncode != 0, report
+        assert emit_attestation.phase1_provenance(project) == provenance
+        assert {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in original} == original
+
+
 def test_signed_reused_d1_runs_complete_consumer_and_retains_current_pass(
         tmp_path, monkeypatch):
     import step_output_collector as versions
