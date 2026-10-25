@@ -84,14 +84,34 @@ def test_another_signals_range_does_not_bind_the_next_scalar(tmp_path, owner):
     assert report['bus_confirmed'] == 0
 
 
-def test_a_real_range_before_a_declared_pin_still_requires_bus_width(tmp_path):
+@pytest.mark.parametrize('declaration', [
+    'input [5:0] ready_flag',
+    'input logic[5:0] ready_flag',
+    'input payload_t[5:0] ready_flag',
+    'input example_pkg::payload_t[5:0] ready_flag',
+])
+def test_a_real_range_before_a_declared_pin_still_requires_bus_width(tmp_path, declaration):
     _write_input(tmp_path, 'rtl/ports.sv',
-                 'module neutral(input [5:0] ready_flag); endmodule\n')
+                 f'module neutral({declaration}); endmodule\n')
     _write_l1(tmp_path, [{'name': 'ready_flag', 'mode': 'input', 'width': 1,
                           'msb': 0, 'lsb': 0}])
     rc, report = _run(tmp_path)
     assert rc == 1, report
     assert report['bus_confirmed'] == 1
+
+
+@pytest.mark.parametrize('source', [
+    'Present state_word[5:0] | Next state_word[5:0] ready_flag=0\n',
+    '// input logic[5:0] ready_flag\n',
+    'initial $display("input logic[5:0] ready_flag");\n',
+])
+def test_compact_type_context_does_not_rebind_table_or_noncode(tmp_path, source):
+    _write_input(tmp_path, 'docs/interface.md', source)
+    _write_l1(tmp_path, [{'name': 'ready_flag', 'mode': 'input', 'width': 1,
+                          'msb': 0, 'lsb': 0}])
+    rc, report = _run(tmp_path)
+    assert rc == 0, report
+    assert report['bus_confirmed'] == 0
 
 
 def test_checked_in_rtl_declarations_keep_their_own_bus_evidence(tmp_path):

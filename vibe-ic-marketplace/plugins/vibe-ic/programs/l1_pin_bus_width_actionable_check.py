@@ -150,6 +150,19 @@ _LEFT_BOUNDARY = r"(?<![A-Za-z0-9_/.\\-])"
 _RANGE_THEN_NAME = re.compile(
     _LEFT_BOUNDARY + _RANGE_BODY + r"[ \t]*([A-Za-z_]\w*)")
 
+# A compact packed type (`input logic[5:0] flag`) legitimately attaches
+# the bracket to a TYPE rather than a preceding signal. Keep the general
+# owner boundary above; this additional arm requires declaration syntax at
+# a statement/port separator. Bare user-defined types require a direction.
+_COMPACT_DECL_RANGE_THEN_NAME = re.compile(
+    r"(?:^|[;(,])[ \t]*(?:"
+    r"(?:input|output|inout)\b[ \t]*"
+    r"(?:(?:wire|reg|logic|bit|var|signed|unsigned)\b[ \t]*)*"
+    r"(?:(?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)?"
+    r"|(?:wire|reg|logic|bit)\b[ \t]*)"
+    + _RANGE_BODY + r"[ \t]*([A-Za-z_]\w*)"
+    r"(?=[ \t]*(?:[,;)=]|\r?$))", re.MULTILINE)
+
 # HDL keywords can never be soundly matched by this derivation: the text
 # `output [Width-1:0]` is the DECLARATION SYNTAX of some other port, not a
 # reference to a signal named `output`. When an upstream extractor emits a
@@ -417,6 +430,13 @@ def derive_bus_evidence(
                 _record(name, m.group(1), m.group(2))
         # `[a:b] name` — HDL port/net declarations.
         for m in _RANGE_THEN_NAME.finditer(text):
+            name = m.group(3)
+            if name in wanted:
+                _record(name, m.group(1), m.group(2))
+        # This arm reads HDL declaration context, so reuse the lexical mask
+        # rather than treating comment/string examples as real declarations.
+        from _hdl_code_text import strip_hdl_comments_and_strings
+        for m in _COMPACT_DECL_RANGE_THEN_NAME.finditer(strip_hdl_comments_and_strings(text)):
             name = m.group(3)
             if name in wanted:
                 _record(name, m.group(1), m.group(2))
