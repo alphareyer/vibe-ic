@@ -360,7 +360,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `die_level_deck_rule_attribution` | any | — | vibe-ic#2112. |
 | `diff_verify_harness` | any | — | independent DIFFERENTIAL self-verification (N-version) for blind RTL authoring (ORGANIC #700). |
 | `digital_hardmacro_check` | any | — | the gate of record for flow step 37.5ip. |
-| `digital_hardmacro_gen` | any | — | the PRODUCER for flow step 37.5ip. |
+| `digital_hardmacro_gen` | any | — | Produce the step 37.5ip kit from the adopted DEF, signoff GDS and named PDK. Magic owns LEF generation; reserve its actual GDS extent and... |
 | `digital_rtl_subject_census` | any | — | is there a digital datapath to AUTHOR? |
 | `dispatch_fetch_loop_population_check` | any | — | Stub multi-frame fetch loop detector. |
 | `dispatch_handler_completeness` | aid_class_half_duplex, digital_cmd_driven, mixed_signal_otp | Wave 58 | Wave 58 / BACKLOG-v12 P0.2 plugin gate. |
@@ -1902,7 +1902,7 @@ _(no programs in this group)_
 - `die_level_deck_rule_attribution` — vibe-ic#2112.
 - `diff_verify_harness` — independent DIFFERENTIAL self-verification (N-version) for blind RTL authoring (ORGANIC #700).
 - `digital_hardmacro_check` — the gate of record for flow step 37.5ip.
-- `digital_hardmacro_gen` — the PRODUCER for flow step 37.5ip.
+- `digital_hardmacro_gen` — Produce the step 37.5ip kit from the adopted DEF, signoff GDS and named PDK. Magic owns LEF generation; reserve its actual GDS extent and...
 - `digital_rtl_subject_census` — is there a digital datapath to AUTHOR?
 - `dispatch_fetch_loop_population_check` — Stub multi-frame fetch loop detector.
 - `dispatch_register_default_reset_check` — Response register reset at frame boundaries.
