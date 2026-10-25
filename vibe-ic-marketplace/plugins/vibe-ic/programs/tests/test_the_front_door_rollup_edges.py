@@ -444,12 +444,14 @@ def test_bounded_rtl_request_reaches_the_real_lint_consumer(tmp_path):
             assert context['status'] == 'MEASURED', context
         else:
             assert lint, 'the compiler rejection must retain its actual findings'
-        collected = bio.collect('verilogeval', project.name, project,
-                                supplied_rtl=True, required_top='plain')
-        assert collected['ok'] is valid, collected
         if valid:
+            collected = bio.collect('verilogeval', project.name, project,
+                                    supplied_rtl=True, required_top='plain')
+            assert collected['ok'] is True, collected
             assert bio.collect('verilogeval', project.name, project,
                                required_top='plain')['ok'] is False
+        else:
+            assert phase2['verdict'] == 'FAIL' and result.returncode != 0, report
         assert emit_attestation.phase1_provenance(project) == provenance
         assert {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in original} == original
 
