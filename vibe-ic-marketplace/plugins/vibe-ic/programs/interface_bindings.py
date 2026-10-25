@@ -4,6 +4,10 @@ The normal L9 writer consumes this optional INPUT. Package-only elaboration
 measures types; original source declarations/local roles constrain directions.
 Neither an author-provided width nor an author-provided tool PASS is evidence.
 No gate policy, implementation RTL, signature or independent verdict is made.
+
+V2 also admits explicit source-bound primitive range interpretations. Their
+semantic authority is an AI engineering choice pending independent D1 review,
+not a package measurement or a program's reading of natural-language intent.
 """
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ INPUT = "plugin_input/interface-bindings.json"
 CONTEXT = "plugin_input/interface_context"
 REPORT = "reports/phase1/interface_binding"
 SCHEMA = "vibeic.phase1-interface-bindings.v1"
+REFINEMENT_SCHEMA = "vibeic.phase1-interface-bindings.v2"
 PORT_KEYS = ("ports", "top_ports", "top_module_pins")
 _ID = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*\Z")
 _TYPE = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_$]*::)*[A-Za-z_][A-Za-z0-9_$]*\Z")
@@ -81,9 +86,11 @@ def _basis_names(basis, name):
     return qb._names_port(" ".join(b["quote"] for b in basis), name)
 
 
-def input_contract(project: Path, content: dict) -> dict:
+def input_contract(project: Path, content: dict, *, schema: str = SCHEMA) -> dict:
     """Describe the exact unbound source roster and current quotable inputs."""
     import _qualified_by as qb
+    if schema not in (SCHEMA, REFINEMENT_SCHEMA):
+        _fail("unsupported schema")
     rosters = []
     for key in PORT_KEYS:
         rows = content.get(key)
@@ -99,6 +106,18 @@ def input_contract(project: Path, content: dict) -> dict:
             entry = {"name": row["name"],
                      "direction": row.get("direction") or row.get("mode"),
                      "width": row.get("width"), "type_ref": row.get("type_ref")}
+            if schema == REFINEMENT_SCHEMA:
+                entry.update(msb=row.get("msb"), lsb=row.get("lsb"))
+                for spelling in ("direction", "mode", "dir"):
+                    if not row.get(spelling):
+                        continue
+                    raw_dir = str(row[spelling]).lower()
+                    direction = ("interface" if raw_dir == "interface" else
+                                 "inout" if raw_dir in ("inout", "bidir") else
+                                 "input" if raw_dir in ("input", "in") else
+                                 "output" if raw_dir in ("output", "out") else None)
+                    if direction != entry["direction"]:
+                        _fail("primitive port direction aliases disagree")
             for key in ("interface_type", "interface_role", "package_struct", "instance_count"):
                 if key in row:
                     entry[key] = copy.deepcopy(row[key])
@@ -110,10 +129,13 @@ def input_contract(project: Path, content: dict) -> dict:
     # roster, never a second binding of the already-expanded physical ports.
     ledger = content.get("interface_binding_authoring")
     source = ledger.get("source_interface") if isinstance(ledger, dict) else None
-    return {"schema": SCHEMA,
+    base = {"schema": schema,
             "input_files": {rel: _sha(path) for rel, path in sorted(
                 qb._design_input_files(Path(project)).items())},
-            "interface": copy.deepcopy(source if source is not None else rosters[0]),
+            "interface": copy.deepcopy(source if source is not None else rosters[0])}
+    if schema == REFINEMENT_SCHEMA:
+        return dict(base, top_module=content.get("top_module"), primitive_refinements=[])
+    return {**base,
             "context": {"image": "", "revision": "", "files": {},
                         "compile_order": [], "include_dirs": [],
                         "defines": [], "parameters": {}},
@@ -295,6 +317,134 @@ def admit(project: Path, content: dict) -> dict:
     return _admit(project, content, _probe)
 
 
+def _primitive_admission(project, content, data, raw):
+    """Apply an explicitly authored interpretation; never infer its semantics.
+
+    V2 is primitive-only. Package/type measurements keep their original v1
+    protocol. Quotes bind the choice to source, not to an authored tool PASS;
+    the independent D1 reviewer must still judge whether the choice is right.
+    """
+    contract = input_contract(project, content, schema=REFINEMENT_SCHEMA)
+    if set(data) != set(contract):
+        _fail("unsupported primitive schema or unexpected top-level fields")
+    for key in ("input_files", "interface", "top_module"):
+        if _canonical(data[key]) != _canonical(contract[key]):
+            _fail(f"{key} does not describe the current input/interface")
+    if not isinstance(data["top_module"], str) or not _ID.fullmatch(data["top_module"]):
+        _fail("primitive refinement requires a selected top_module")
+    if content.get("selected_interface_binding"):
+        _fail("cannot replace an already selected reused-IP interface")
+    refs = data["primitive_refinements"]
+    if not isinstance(refs, list) or not refs:
+        _fail("primitive_refinements must be a non-empty list")
+    original = {p["name"]: p for p in contract["interface"]}
+    selected, seen = {}, set()
+    for ref in refs:
+        if not isinstance(ref, dict) or set(ref) != {"port", "before", "after", "authority", "reason", "basis"}:
+            _fail("malformed primitive refinement")
+        name = ref["port"]
+        if not isinstance(name, str) or name not in original:
+            _fail("refinement must address an existing primitive port")
+        if name in seen:
+            _fail("duplicate primitive refinement")
+        seen.add(name)
+        source = original[name]
+        if (source.get("direction") not in ("input", "output", "inout")
+                or source.get("interface_type") or source.get("package_struct")
+                or source.get("type_ref") not in (None, "logic", "bit", "wire", "reg")):
+            _fail("refinement must address an existing primitive port")
+        before = ref["before"]
+        expected = {k: source.get(k) for k in ("direction", "width", "msb", "lsb")}
+        if not isinstance(before, dict) or set(before) != set(expected) or _canonical(before) != _canonical(expected):
+            _fail(f"primitive before claim differs from source: {name}")
+        after = ref["after"]
+        if (not isinstance(after, dict) or set(after) != {"width", "msb", "lsb"}
+                or any(type(after.get(k)) is not int for k in ("width", "msb", "lsb"))
+                or not 1 <= after["width"] <= 1048576
+                or after["width"] != abs(after["msb"] - after["lsb"]) + 1):
+            _fail("primitive width/range must be consistent positive integers")
+        if {k: before[k] for k in after} == after:
+            _fail("primitive refinement does not change its source claim")
+        if ref["authority"] != "AGENT_ENGINEERING_CHOICE":
+            _fail("primitive authority must be AGENT_ENGINEERING_CHOICE")
+        if not isinstance(ref["reason"], str) or not ref["reason"].strip():
+            _fail("primitive refinement requires a reason")
+        _basis(project, ref["basis"])
+        if not _basis_names(ref["basis"], name):
+            _fail("primitive basis must name its source port")
+        selected[name] = {"name": name, "direction": source["direction"],
+                          "type_ref": source.get("type_ref"), **after}
+    if (_path(project, INPUT).read_bytes() != raw
+            or input_contract(project, content, schema=REFINEMENT_SCHEMA)["input_files"] != data["input_files"]):
+        _fail("source/author input changed during primitive admission")
+    out = copy.deepcopy(content)
+    for key in PORT_KEYS:
+        for row in out[key]:
+            if row["name"] in selected:
+                row.update({k: selected[row["name"]][k] for k in ("width", "msb", "lsb")})
+                row.pop("width_symbolic", None)
+    out["interface_binding_authoring"] = {
+        "schema": REFINEMENT_SCHEMA, "input": INPUT,
+        "input_sha256": hashlib.sha256(raw).hexdigest(),
+        "input_files": copy.deepcopy(data["input_files"]), "top_module": data["top_module"],
+        "source_interface": copy.deepcopy(data["interface"]),
+        "primitive_refinements": copy.deepcopy(refs),
+        "physical_ports": list(selected.values()), "review": "PENDING_INDEPENDENT_D1"}
+    return out
+
+
+def _current_primitive_ports(project, content, ledger):
+    """Reconstruct a publication from current authority and untouched raw L1."""
+    raw = _path(project, INPUT).read_bytes()
+    data = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique)
+    if not isinstance(data, dict) or data.get("schema") != REFINEMENT_SCHEMA:
+        _fail("current primitive author input has a different schema")
+    # Check the published aliases before reconstruction can restore fields.
+    input_contract(project, content, schema=REFINEMENT_SCHEMA)
+    # Rebuild the before-view using the source roster, not an edited numeric
+    # field in L9. The untouched L1 independently checks every addressed claim.
+    from _path_layout import generated_docs_dir
+    from l_doc_consumer_contract import l_doc_fields, l9_port_direction
+    l1_rel = (generated_docs_dir(Path(project)) / "L1_DATASHEET.json").relative_to(Path(project)).as_posix()
+    l1 = l_doc_fields(json.loads(_path(project, l1_rel).read_text()))
+    pins = {p.get("rtl_name") or p.get("name"): p for p in l1.get("pin_table", []) if isinstance(p, dict)}
+    source = {p["name"]: p for p in data.get("interface", []) if isinstance(p, dict) and "name" in p}
+    for ref in data.get("primitive_refinements", []):
+        if not isinstance(ref, dict):
+            _fail("malformed primitive refinement")
+        name = ref.get("port")
+        pin, original = pins.get(name), source.get(name)
+        if not isinstance(pin, dict) or not isinstance(original, dict):
+            _fail("primitive source port is absent from raw L1")
+        direction = {"in": "input", "out": "output", "inout": "inout"}[l9_port_direction(pin)]
+        if (direction != original.get("direction") or pin.get("width") != original.get("width")
+                or any(pin.get(k) != original.get(k) for k in ("msb", "lsb"))):
+            _fail(f"primitive before claim differs from raw L1: {name}")
+    base = copy.deepcopy(content)
+    for key in PORT_KEYS:
+        rows = base.get(key)
+        if not isinstance(rows, list):
+            _fail(f"{key} is not a port list")
+        for row in rows:
+            if not isinstance(row, dict) or row.get("name") not in source:
+                _fail("published primitive roster differs from source")
+            for k in ("direction", "width", "msb", "lsb"):
+                row[k] = source[row["name"]].get(k)
+    rebuilt = _primitive_admission(Path(project), base, data, raw)
+    if rebuilt["interface_binding_authoring"] != ledger:
+        _fail("published primitive ledger differs from current admission")
+    for key in PORT_KEYS:
+        # Compare actionable fields independently: a forged single alias must
+        # not be normalized away by reconstructing its before-view above.
+        expected = [{k: p.get(k) for k in ("name", "direction", "width", "msb", "lsb")} for p in rebuilt[key]]
+        actual = [{k: p.get(k) for k in ("name", "direction", "width", "msb", "lsb")} for p in content[key]]
+        if expected != actual:
+            _fail("published primitive ports differ from current admission")
+    refs = {r["port"]: r for r in data["primitive_refinements"]}
+    return {p["name"]: dict(copy.deepcopy(p), primitive_refinement=copy.deepcopy(refs[p["name"]]))
+            for p in rebuilt["interface_binding_authoring"]["physical_ports"]}
+
+
 def _admit(project: Path, content: dict, measure) -> dict:
     """Shared source/role/type admission; measurement owns its evidence mode."""
     project = Path(project)
@@ -307,6 +457,8 @@ def _admit(project: Path, content: dict, measure) -> dict:
         _fail("author input is not a file")
     raw = path.read_bytes()
     data = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique)
+    if isinstance(data, dict) and data.get("schema") == REFINEMENT_SCHEMA:
+        return _primitive_admission(project, content, data, raw)
     contract = input_contract(project, content)
     if not isinstance(data, dict) or set(data) != set(contract) or data.get("schema") != SCHEMA:
         _fail("unsupported schema or unexpected top-level fields")
@@ -467,6 +619,8 @@ def current_published_ports(project: Path, content: dict) -> dict:
     ledger = content.get("interface_binding_authoring")
     if not isinstance(ledger, dict) or content.get("phase1_step_error"):
         _fail("current native publication is absent or failed")
+    if ledger.get("schema") == REFINEMENT_SCHEMA:
+        return _current_primitive_ports(project, content, ledger)
     proof_rel = f"{REPORT}/proof.json"
     execution_rel = f"{REPORT}/execution.json"
 

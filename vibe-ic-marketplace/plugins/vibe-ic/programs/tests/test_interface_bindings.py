@@ -32,6 +32,9 @@ def _hash(path):
 
 
 def _project(tmp_path):
+    from programs.tests._hostpaths import require_repo
+    fixture = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+                           "tests", "fixtures", "interface_binding")
     # The normal native transport owns and mounts its private package scratch.
     root = Path(os.environ.get("VIBEIC_INTERFACE_TEST_ROOT", tmp_path))
     root.mkdir(parents=True, exist_ok=True)
@@ -39,10 +42,10 @@ def _project(tmp_path):
     p = Path(tempfile.mkdtemp(prefix="interface-test-", dir=root))
     source = p / "input/docs/interfaces.md"
     source.parent.mkdir(parents=True)
-    shutil.copyfile(FIXTURE / "interfaces.md", source)
+    shutil.copyfile(fixture / "interfaces.md", source)
     context = p / binding.CONTEXT
     context.mkdir(parents=True)
-    shutil.copyfile(FIXTURE / "types.sv", context / "types.sv")
+    shutil.copyfile(fixture / "types.sv", context / "types.sv")
     (context / "provider.json").write_text('{"revision":"neutral-v1","parameters":"selected source bytes"}\n')
     extracted = {source.name: source.read_text()}
     docs.gen_l1_datasheet(p, extracted)
@@ -305,3 +308,178 @@ def test_nested_context_changes_invalidate_even_pre_manifest_baseline(tmp_path):
     before = identity.inputs_digest(p, record)
     nested.write_text('{"provider":"changed"}')
     assert identity.inputs_digest(p, record) != before
+
+
+def _primitive_project(tmp_path, *, range_only=False):
+    """Neutral conflicting source claims; no authored implementation/probe."""
+    p = tmp_path / "primitive"
+    source = p / "input/docs/interface.md"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "Create the corrected interface described here.\n"
+        "The result_o datapath must return thirteen bits, not its old scalar declaration.\n"
+        "The six-bit slot_i vector uses the indices slot_i[10:5].\n"
+        "module SelectedUnit (input [5:0] slot_i, output result_o);\n"
+    )
+    extracted = {source.name: source.read_text()}
+    l1 = Path(docs.gen_l1_datasheet(p, extracted).path)
+    l9 = Path(docs.gen_l9_integration_spec(p, extracted, {}).path)
+    original = json.loads(l9.read_text())
+    # The v1 descriptor still describes the raw source. V2 deliberately also
+    # binds index endpoints, which a numeric width cannot express alone.
+    legacy = binding.input_contract(p, original)
+    interface = copy.deepcopy(legacy["interface"])
+    by_name = {row["name"]: row for row in original["ports"]}
+    for row in interface:
+        row.update(msb=by_name[row["name"]].get("msb"), lsb=by_name[row["name"]].get("lsb"))
+    refs = []
+    for name, width, msb, lsb, line in [("slot_i", 6, 10, 5, 3), ("result_o", 13, 12, 0, 2)]:
+        if range_only and name == "result_o":
+            continue
+        old = next(row for row in interface if row["name"] == name)
+        refs.append({"port": name,
+                     "before": {key: old.get(key) for key in ("direction", "width", "msb", "lsb")},
+                     "after": {"width": width, "msb": msb, "lsb": lsb},
+                     "authority": "AGENT_ENGINEERING_CHOICE",
+                     "reason": "Select the desired interface claim while retaining the original declaration.",
+                     "basis": [{"file": "input/docs/interface.md", "line": line,
+                                "quote": source.read_text().splitlines()[line-1]},
+                               {"file": "input/docs/interface.md", "line": 4,
+                                "quote": source.read_text().splitlines()[3]}]})
+    contract = {"schema": "vibeic.phase1-interface-bindings.v2",
+                "input_files": legacy["input_files"], "top_module": original["top_module"],
+                "interface": interface, "primitive_refinements": refs}
+    author = p / binding.INPUT
+    author.parent.mkdir(parents=True, exist_ok=True)
+    author.write_text(json.dumps(contract))
+    return p, source, extracted, l1, l9, author, contract
+
+
+def test_native_primitive_refinement_actual_writer_and_current_consumers(tmp_path):
+    import ai_signed_judgement as judgement
+    import l1_pin_bus_width_actionable_check as widths
+    from _specrtl_common import extract_spec_contract
+    p, source, extracted, l1, l9, author, data = _primitive_project(tmp_path)
+    original_l1 = l1.read_bytes()
+    assert widths.evaluate(p)["rc"] == 1
+    refused = None
+    try:
+        docs.gen_l9_integration_spec(p, extracted, {})
+    except ValueError as exc:
+        refused = str(exc)
+    emitted = json.loads(l9.read_text())
+    # Value-bearing pre-fix control: the actual native publication remains
+    # scalar, rather than merely noticing a new API/marker is absent.
+    assert next(row for row in emitted["ports"] if row["name"] == "result_o")["width"] == 13, refused
+    assert refused is None
+    for key in binding.PORT_KEYS:
+        ports = {row["name"]: row for row in emitted[key]}
+        assert (ports["slot_i"]["width"], ports["slot_i"]["msb"], ports["slot_i"]["lsb"]) == (6, 10, 5)
+        assert (ports["result_o"]["width"], ports["result_o"]["msb"], ports["result_o"]["lsb"]) == (13, 12, 0)
+    current = binding.current_published_ports(p, emitted)
+    assert current["result_o"]["width"] == 13
+    assert current["slot_i"]["lsb"] == 5
+    assert widths.evaluate(p)["rc"] == 0
+    consumed = extract_spec_contract(l9.read_text(), is_json=True, project=p)
+    assert {row.name: row.width for row in consumed.ports} == {"slot_i": 6, "result_o": 13}
+    ledger = emitted["interface_binding_authoring"]
+    assert ledger["review"] == "PENDING_INDEPENDENT_D1"
+    assert ledger["source_interface"] == data["interface"]
+    assert "measurement" not in ledger
+    assert not (p / binding.REPORT / "type_probe.sv").exists()
+    assert l1.read_bytes() == original_l1
+    assert author in judgement.evidence(p, "D1")
+    assert not judgement.check(p, "D1")[0]
+    before = {str(f.relative_to(p)): _hash(f) for f in p.rglob("*") if f.is_file()}
+    binding.current_published_ports(p, emitted)
+    widths.evaluate(p)
+    assert before == {str(f.relative_to(p)): _hash(f) for f in p.rglob("*") if f.is_file()}
+
+
+@pytest.mark.parametrize("mutation,reason", [
+    ("stale_input", "input_files"), ("false_quote", "not on"),
+    ("unnamed_quote", "name"), ("wrong_before", "before"),
+    ("wrong_range", "range"), ("zero_width", "range"),
+    ("unknown_port", "existing primitive"), ("direction", "before"),
+    ("duplicate", "duplicate"), ("wrong_top", "top_module"),
+    ("roster", "interface"), ("type", "interface"),
+    ("authority", "authority"), ("rationale", "reason"),
+])
+def test_primitive_input_refusal_preserves_native_publication(tmp_path, mutation, reason):
+    p, source, extracted, _l1, l9, author, data = _primitive_project(tmp_path)
+    original = l9.read_bytes()
+    row = data["primitive_refinements"][0]
+    if mutation == "stale_input": source.write_text(source.read_text() + "changed\n")
+    elif mutation == "false_quote": row["basis"][0]["quote"] = "not actually a source line"
+    elif mutation == "unnamed_quote": row["basis"] = [{"file": "input/docs/interface.md", "line": 1, "quote": source.read_text().splitlines()[0]}]
+    elif mutation == "wrong_before": row["before"]["width"] = 2
+    elif mutation == "wrong_range": row["after"]["msb"] = 11
+    elif mutation == "zero_width": row["after"]["width"] = 0
+    elif mutation == "unknown_port": row["port"] = "absent_o"
+    elif mutation == "direction": row["before"]["direction"] = "output"
+    elif mutation == "duplicate": data["primitive_refinements"].append(copy.deepcopy(row))
+    elif mutation == "wrong_top": data["top_module"] = "OtherUnit"
+    elif mutation == "roster": data["interface"][0]["lsb"] = 2
+    elif mutation == "type":
+        # This is a metadata-forgery attempt, not a new source type.
+        data["interface"][0]["type_ref"] = "external_pkg::payload_t"
+    elif mutation == "authority": row["authority"] = "PROGRAM_PASS"
+    elif mutation == "rationale": row["reason"] = ""
+    author.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match=reason):
+        docs.gen_l9_integration_spec(p, extracted, {})
+    assert l9.read_bytes() == original
+
+
+@pytest.mark.parametrize("mutation", ["source", "manifest", "manifest_missing", "ledger", "alias", "direction_alias", "before", "raw_l1", "raw_l1_symlink"])
+def test_current_primitive_publication_refuses_tampering(tmp_path, mutation):
+    import l1_pin_bus_width_actionable_check as widths
+    p, source, extracted, l1, l9, author, data = _primitive_project(tmp_path)
+    docs.gen_l9_integration_spec(p, extracted, {})
+    value = json.loads(l9.read_text())
+    if mutation == "source": source.write_text(source.read_text() + "changed source\n")
+    elif mutation == "manifest": author.write_text(author.read_text() + " ")
+    elif mutation == "manifest_missing": author.unlink()
+    elif mutation == "ledger": value["interface_binding_authoring"]["review"] = "PASS"
+    elif mutation == "alias": value["ports"][0]["lsb"] = 0
+    elif mutation == "direction_alias": value["ports"][0]["mode"] = "output"
+    elif mutation == "before": value["interface_binding_authoring"]["source_interface"][0]["width"] = 100
+    elif mutation == "raw_l1":
+        raw = json.loads(l1.read_text()); raw["pin_table"][0]["width"] = 99; l1.write_text(json.dumps(raw))
+    elif mutation == "raw_l1_symlink":
+        retained = p / "retained_l1.json"
+        l1.rename(retained)
+        l1.symlink_to(retained)
+    l9.write_text(json.dumps(value))
+    assert widths.evaluate(p)["rc"] == 1
+
+
+def test_primitive_range_does_not_excuse_uncovered_port(tmp_path):
+    import l1_pin_bus_width_actionable_check as widths
+    p, source, extracted, _l1, l9, author, data = _primitive_project(tmp_path, range_only=True)
+    source.write_text(source.read_text() + "The current result_o signal also references result_o[12:0].\n")
+    extracted = {source.name: source.read_text()}
+    data["input_files"]["input/docs/interface.md"] = _hash(source)
+    author.write_text(json.dumps(data))
+    docs.gen_l9_integration_spec(p, extracted, {})
+    result = widths.evaluate(p)
+    assert result["rc"] == 1
+    assert {row["pin"] for row in result["violations"]} == {"result_o"}
+
+
+def test_primitive_branch_preserves_checked_in_package_type_boundary(tmp_path):
+    p, _extracted, l9, author, _legacy = _project(tmp_path)
+    original = l9.read_bytes()
+    data = binding.input_contract(p, json.loads(original), schema=binding.REFINEMENT_SCHEMA)
+    source = next(p for p in data["interface"] if p["name"] == "token_i")
+    lines = (p / "input/docs/interfaces.md").read_text().splitlines()
+    line = next(i for i, text in enumerate(lines, 1) if "| token_i |" in text)
+    data["primitive_refinements"] = [{
+        "port": "token_i", "before": {key: source.get(key) for key in ("direction", "width", "msb", "lsb")},
+        "after": {"width": 5, "msb": 4, "lsb": 0},
+        "authority": "AGENT_ENGINEERING_CHOICE", "reason": "A numeric interpretation cannot measure a package type.",
+        "basis": [{"file": "input/docs/interfaces.md", "line": line, "quote": lines[line-1]}]}]
+    author.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="existing primitive port"):
+        binding.admit(p, json.loads(original))
+    assert l9.read_bytes() == original

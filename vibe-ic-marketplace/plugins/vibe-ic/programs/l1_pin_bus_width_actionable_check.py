@@ -528,9 +528,25 @@ def evaluate(project: Path) -> Dict[str, Any]:
             continue
         name = name.strip()
         got = _resolved_width(pin, params)
+        range_pin = pin
         bound = physical.get(name)
         if bound is not None:
-            if got is not None and got != bound["width"]:
+            refinement = bound.get("primitive_refinement")
+            if isinstance(refinement, dict):
+                # current_published_ports independently reconstructed this
+                # exact source/author claim and checked the untouched raw L1.
+                # The selected physical range belongs to L9; do not overwrite
+                # L1 or let an unvalidated numeric field excuse another pin.
+                got = bound["width"]
+                range_pin = {**pin, **refinement["after"]}
+                resolved_from_binding.append({"pin": name, "bits": got,
+                                              "source_claim": refinement["before"],
+                                              "selected_range": refinement["after"],
+                                              "basis": refinement["basis"],
+                                              "authority": refinement["authority"],
+                                              "review": "PENDING_INDEPENDENT_D1",
+                                              "consuming_field": "L9.top_ports/ports"})
+            elif got is not None and got != bound["width"]:
                 violations.append({"pin": name, "kind": "raw_physical_width_conflict",
                                    "l1_width": got, "physical_width": bound["width"],
                                    "detail": "raw L1 width differs from current measured physical width"})
@@ -568,7 +584,7 @@ def evaluate(project: Path) -> Dict[str, Any]:
                         f"msb={pin.get('msb')!r} / lsb={pin.get('lsb')!r} — "
                         f"no independently current physical binding supplies its width."),
                 })
-            elif got < lower and not _declared_range_covers(pin, lower - 1):
+            elif got < lower and not _declared_range_covers(range_pin, lower - 1):
                 violations.append({
                     "pin": name, "kind": "bus_width_below_input_bound",
                     "derived_from": "numeric bit range in design inputs",
