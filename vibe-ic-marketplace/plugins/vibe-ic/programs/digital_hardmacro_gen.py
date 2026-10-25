@@ -1864,7 +1864,7 @@ def liberty_with_pg_pins(text: str, design: str, pins: List[Pin]) -> Optional[st
     return out if n == 1 else None
 
 def characterise_liberty(project: Path, design: str, container: str,
-                         out_dir: Path) -> Tuple[Optional[str], Dict[str, Any]]:
+                         out_dir: Path, extra_liberties=()) -> Tuple[Optional[str], Dict[str, Any]]:
     """OpenSTA `write_timing_model` over THIS run's post-route netlist, SDC and
     max-corner SPEF, against the SETUP-corner Liberty its own multi-corner STA
     report names. Returns (liberty_text, record); text is None when any input
@@ -1949,11 +1949,18 @@ def characterise_liberty(project: Path, design: str, container: str,
         return None, rec
     lib = setups[0]
     rec["liberty"] = lib
+    extra_liberties = [Path(path).resolve() for path in extra_liberties]
+    if any(not path.is_file() for path in extra_liberties):
+        rec.update(characterised=False, reason_class="BLOCKED_BY_UPSTREAM",
+                   why="declared macro timing library is absent")
+        return None, rec
     out_dir.mkdir(parents=True, exist_ok=True)
     tcl = out_dir / f".{design}_etm.tcl"
     lib_out = out_dir / f".{design}_etm.lib"
     tcl.write_text("\n".join((
-        f"read_liberty {lib}", f"read_verilog {netlist}",
+        f"read_liberty {lib}",
+        *[f"read_liberty {{{path}}}" for path in extra_liberties],
+        f"read_verilog {netlist}",
         f"link_design {design}", f"read_sdc {sdc}", f"read_spef {spef}",
         f"write_timing_model -library_name {design} -cell_name {design} "
         f"{lib_out}", 'puts "TIMING_MODEL_DONE"', "")))
@@ -1963,6 +1970,8 @@ def characterise_liberty(project: Path, design: str, container: str,
                   for role, path in (("netlist", netlist), ("sdc", sdc),
                                      ("spef", spef), ("sta_report", rpt),
                                      ("pdk_liberty", lib), ("recipe", tcl))}
+        inputs.update({f"pdk_macro_liberty_{i}": _pc.entry(project, path, external=True)
+                       for i, path in enumerate(extra_liberties)})
     except (OSError, ValueError) as exc:
         rec.update(characterised=False, reason_class="BLOCKED_BY_UPSTREAM", why=str(exc))
         return None, rec
@@ -1994,7 +2003,10 @@ def characterise_liberty(project: Path, design: str, container: str,
         except OSError:
             pass
     rec.update(rc=rc, arcs=arcs)
-    if rc != 0 or arcs == 0 or re.search(r"(?m)^Error(?:\s|:)|\[ERROR\]", (out or "") + (err or "")):
+    native_log = (out or "") + (err or "")
+    missing_spef_subject = re.search(
+        r"(?mi)^Warning\s+\d+:.*\.spef\b.*\b(?:instance|net)\b.*\bnot found\b", native_log)
+    if rc != 0 or arcs == 0 or missing_spef_subject or re.search(r"(?m)^Error(?:\s|:)|\[ERROR\]", native_log):
         rec.update(characterised=False, reason_class="EXECUTION_ERROR",
                    why=(f"write_timing_model rc={rc}, {arcs} timing arc(s); "
                         + (err or out)[-400:]))
@@ -2010,7 +2022,8 @@ def characterise_liberty(project: Path, design: str, container: str,
 
 def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
         container: str = "", cell_lef: str = "",
-        metal_prefix: str = "met", pdk_name: Optional[str] = None
+        metal_prefix: str = "met", pdk_name: Optional[str] = None,
+        extra_liberties=()
         ) -> Tuple[int, Record]:
     rec = Record()
     rec.lef_policy = {"writer": "magic:lef write",
@@ -2333,7 +2346,8 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
         # neither re-characterised nor given a sidecar (the landed contract in
         # test_hardmacro_gen_grades_only_what_it_wrote).
         def _write_lib(q: Path) -> None:
-            char, char_rec = characterise_liberty(project, design, container, hm)
+            char, char_rec = (characterise_liberty(project, design, container, hm, extra_liberties)
+                              if extra_liberties else characterise_liberty(project, design, container, hm))
             if char:
                 char = liberty_with_pg_pins(char, design, pins)
                 if char is None:
@@ -2415,7 +2429,7 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
             timing = json.loads((hm / LIBERTY_TIMING_RECORD).read_text())
             if not timing.get("characterised"):
                 raise ValueError("IP_KIT_TIMING_NOT_MEASURED")
-            inputs.update({("pdk_timing_liberty" if role == "pdk_liberty" else f"timing_{role}"): row
+            inputs.update({("pdk_timing_" + role[4:] if role.startswith("pdk_") else f"timing_{role}"): row
                            for role, row in timing["current_inputs"].items()})
             inputs["lef_recipe"] = _pc.entry(project, hm / "digital_lef.tcl")
             for role, row in inputs.items():
@@ -2453,6 +2467,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="PDK_ROOT; the PDK's own magicrc is located under it")
     ap.add_argument("--pdk-name", default=None,
                     help="canonical current PDK name supplied by the caller")
+    ap.add_argument("--extra-liberty", action="append", default=[], type=Path,
+                    help="same-run macro timing model required by the routed netlist; repeatable")
     ap.add_argument("--cell-lef", default="",
                     help="the selected PDK std-cell LEF whose routing-metal "
                          "USE POWER/GROUND pins name the hardmacro rails")
@@ -2479,7 +2495,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         rc, rec = run(args.project_dir, args.pdk_root, args.full_lef,
                       args.pinonly, args.container, args.cell_lef,
-                      args.metal_prefix, args.pdk_name)
+                      args.metal_prefix, args.pdk_name, args.extra_liberty)
     except RuntimeError as exc:
         rc, rec = RC_NO_CAPABILITY, Record(status="ERROR", reason=str(exc))
 
