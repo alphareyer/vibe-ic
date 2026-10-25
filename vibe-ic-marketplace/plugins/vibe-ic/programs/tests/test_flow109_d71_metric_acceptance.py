@@ -193,9 +193,13 @@ def test_current_tree_real_consumer_AST_growth_uses_its_own_named_baseline():
     programs = Path(gls.__file__).resolve().parent
     native_sources = provenance["native_producer_sources"]
     assert set(native_sources) <= set(current)
-    assert {name: current[name] for name in native_sources} == native_sources
-    assert all(hashlib.sha256((programs.parent / name).read_bytes()).hexdigest() == digest
-               for name, digest in native_sources.items())
+    # D72 changes the shared replay producer.  The immutable b74 receipt is
+    # still valid historical evidence, but cannot qualify these current bytes.
+    assert {name: current[name] for name in native_sources} != native_sources
+    frozen, _ = _frozen_D71_sources()
+    assert metrics._d71_source_boundary(frozen, current, gls) is False
+    assert all(hashlib.sha256((programs.parent / name).read_bytes()).hexdigest() == current[name]
+               for name in native_sources)
 
     added = {"programs/flow109_final_electrical.py", "programs/flow109_final_extract.py"}
     assert added < set(current)

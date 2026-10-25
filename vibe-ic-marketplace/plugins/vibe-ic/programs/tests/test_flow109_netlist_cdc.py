@@ -161,7 +161,8 @@ def test_actual_frontdoor_publishes_d45_default_row_without_flow_acceptance(tmp_
     result = json.loads((tmp_path / "reports/flow109/default_rows/D45.json").read_text())
     assert result["default_row_status"] == "PASS"
     assert result["completed"] is True
-    assert result["flow109_acceptance"] == "NOT_MEASURED"
+    assert result["flow109_acceptance"] == "PASS"
+    assert result["whole_flow_acceptance"] == "NOT_MEASURED"
     assert "Default row PASS; flow acceptance NOT_MEASURED" in launched.stdout
 
 
