@@ -1915,14 +1915,13 @@ class Sites:
                     merged.add(r["lcomp"])
             for r in rows:
                 if "lcomp" not in r:
-                    # this emitter's own paint. One conductor is one net
-                    # here, so a same-net rectangle is skipped and every
-                    # other one is an obstacle like any device's.
-                    if net is not None and r["net"] == net:
-                        continue
                     b = r["box"]
                     dx = max(b[0] - box[2], box[0] - b[2], 0)
                     dy = max(b[1] - box[3], box[1] - b[3], 0)
+                    # A remote same-net connection does not excuse a local
+                    # notch. Only overlap/touch is exempt from spacing.
+                    if net is not None and r["net"] == net and not (dx or dy):
+                        continue
                     if dx < s and dy < s:
                         return False
                     continue
