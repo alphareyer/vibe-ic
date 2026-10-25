@@ -471,5 +471,16 @@
     "version_observed": "1.31.59 landed main e5c73058576d84797745636d6683975d500e4cc7 plus version-less PR3585 head5045b259dc2da2daf38d627eb41c6cd29f03394d. The generic overlay statements predate this candidate; no last-known-good release is asserted.",
     "version_lkg": "Not measured.\n\n## Acceptance\n```bash\nbash tools/ci/run_suite_in_eda_image.sh --image ghcr.io/vibeic/vibeic-eda@sha256:a6713464903bd9f6c3de15cea8653cb0cf1388a24915632190ad64ce3fc2c3d5 --scratch /tmp/plain-source-provenance -- programs/tests/test_phase1_fixtures_regression.py -k plain_design_source_provenance -q --tb=short\n```\n\nFreeze baseline failures before source edits. Exercise the actual shared overlay for empty generated records, and reverse controls retaining real prepopulated test cases and source-backed notes. No baseline weakening, artifact fabrication, gate waiver, main push or version assignment. The final ordinary producer and current D1 review must consume the repaired output separately.",
     "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/plain_design_source_provenance/plain_combinational_input.txt"
+  },
+  {
+    "issue": 3490,
+    "project": "arithmetic_reset_cancel",
+    "layer": "L6_CONTROL_LOGIC",
+    "field": "reject_rules[].condition and action; no invented protocol rejection from arithmetic reset cancellation",
+    "expected": "No L6 protocol reject rule is inferred from the explicit arithmetic reset cancellation. Preserve the complete source requirement in the ordinary source-prose channel. Actual source-declared protocol reject/abort rules, including mixed real-reject and arithmetic-reset input, retain their own unchanged actionable/coverage obligations. Do not invent a command protocol, state machine, dropped frame or verification PASS.",
+    "actual": "Unmodified main1.31.64 gen_l6_control_logic emits R1, action DROP_FRAME_AND_RETURN_TO_IDLE, evidence input/docs/L4_command_protocol.txt:7, from the reset/multiplication sentence. Its condition is truncated at120characters after the next rising clock edge. This is an observed produced-field error, not a source-presence check. The original report above retains the downstream l6_fsm_scaffold_actionable and l12 sequence refusals.",
+    "version_observed": "Current reproduced version1.31.64, exact mainc23e11382af0ebb7680eee0febb73a8f750560f4, released EDA0.4.46 source-only producer call. Original historical report did not record its shipping version; no last-known-good is asserted.",
+    "version_lkg": "Not measured.",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/arithmetic_reset_cancel/L4_command_protocol.txt"
   }
 ]

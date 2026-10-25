@@ -1,0 +1,7 @@
+# L4 Transaction protocol
+No bus, register protocol, ready, valid, enable or done ports are present.
+Hold x stable while sending one bit of y per rising clock edge.
+A transaction starts after a clocked reset and consumes size operand bits.
+Between transactions, apply clocked reset to clear computational state.
+Observe the serial p output with the declared bit order and latency.
+Reset during operation aborts the current multiplication and clears computational state on the next rising clock edge. After reset release a new transaction may start.
