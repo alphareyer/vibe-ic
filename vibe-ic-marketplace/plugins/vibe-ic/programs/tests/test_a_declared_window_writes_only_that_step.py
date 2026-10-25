@@ -263,10 +263,11 @@ def test_resume_does_not_repeat_upstream_synthesis(entry, exit_site, expected):
 
 
 @pytest.mark.parametrize("window,queried,verdict", [
-    (None, ("1", "4", "5"), "NOT_MEASURED"),
+    (None, ("1", "3", "4", "5"), "NOT_MEASURED"),
     ({"11", "12", "13"}, (), "PASS"),
     ({"4"}, ("4",), "NOT_MEASURED"),
-    ({"1", "2", "3"}, ("1",), "NOT_MEASURED"),
+    ({"1", "2", "3"}, ("1", "3"), "NOT_MEASURED"),
+    ({"3"}, ("3",), "NOT_MEASURED"),
 ])
 def test_ai_review_is_required_for_the_dispatched_window(window, queried, verdict):
     """Earlier pending reviews cannot demote a different bounded operation.
@@ -419,12 +420,61 @@ def _assert_front_door_window(src):
         assert isinstance(runner_kw.value, ast.Constant) and \
             runner_kw.value.value == "design_one_shot_runner", (
             "the front door must scope the question to the phase it can bound")
-    # Phase 3 now receives the physical-design cut, but a flag alone cannot
-    # make the front door bounded.  The child must have published a fresh
-    # bounded report from this invocation before the top-level tail is pruned.
+    # Execute the live argument-building statements.  The physical head is a
+    # semantic property of the current canonical order, not a source literal.
+    from types import SimpleNamespace
+    import _flow_yaml
+    physical = _flow_yaml.ordered_step_ids(
+        execution_stages=range(4, 9), execution_tracks=('default',))
+    assert physical, "the Default physical order has no dispatch head"
+    wanted = {'_physical_order', '_exit_label', '_p3_forward_window'}
+    selected = {}
+    p3_args_node = None
+    forward_node = None
+    for node in live_nodes(main):
+        if isinstance(node, ast.Assign):
+            names = {target.id for target in node.targets
+                     if isinstance(target, ast.Name)}
+            for name in wanted & names:
+                selected[name] = node
+            if 'p3_args' in names and '_p3_forward_window' in selected:
+                p3_args_node = node
+        elif (isinstance(node, ast.If)
+              and isinstance(node.test, ast.Name)
+              and node.test.id == '_p3_forward_window'
+              and any(isinstance(child, ast.AugAssign)
+                      and isinstance(child.target, ast.Name)
+                      and child.target.id == 'p3_args'
+                      for child in ast.walk(node))):
+            forward_node = node
+    assert set(selected) == wanted and p3_args_node is not None and forward_node is not None
+    args = SimpleNamespace(
+        exit_step=physical[-1], skip_phase3=False, area_receipt=None,
+        top_name='unit_top', ic_name='unit_ic', container='LOCAL',
+        die_um='1000x1000', util=50, pdk='unit_pdk')
+    env = {
+        '_flow_yaml': _flow_yaml,
+        '_execution': SimpleNamespace(request=lambda: {'mode': 'default'}),
+        'execution_policy_value': {'mode': 'default'},
+        'args': args, 'project': Path('/supplied/checkpoint'),
+        'phase3_top': 'unit_top',
+    }
+    nodes = [selected[name] for name in (
+        '_physical_order', '_exit_label', '_p3_forward_window')]
+    nodes.extend((p3_args_node, forward_node))
+    tree = ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[]))
+    exec(compile(tree, str(PROGRAMS / 'vibe_ic_one_shot_runner.py'), 'exec'), env)
+    argv = env['p3_args']
+    entry_at = argv.index('--entry-step')
+    exit_at = argv.index('--exit-step')
+    assert argv[entry_at + 1] == env['_physical_order'][0] == physical[0]
+    assert argv[exit_at + 1] == str(args.exit_step)
+
+    # A flag alone cannot make the front door bounded.  The child must have
+    # published a fresh bounded report from this invocation before the
+    # top-level tail is pruned.
     statements = {ast.unparse(n) for n in live_nodes(main)
                   if isinstance(n, (ast.Assign, ast.AugAssign))}
-    assert "p3_args += ['--entry-step', '9', '--exit-step', str(args.exit_step)]" in statements
     assert any(s.startswith('_p3_window_ran = bool(_p3_forward_window and rep.get(\'bounded\')')
                and "rep.get('window_run_id') == window_run_id" in s
                for s in statements)
@@ -657,7 +707,8 @@ def test_front_door_checks_reject_scope_argv_and_guard_regressions(mutation):
         old, new = 'runner="design_one_shot_runner"', 'runner="phase3_one_shot_runner"'
         check = _assert_front_door_window
     elif mutation == "argv":
-        old, new = 'p3_args += ["--entry-step", "9", "--exit-step", str(args.exit_step)]', 'p3_args += []'
+        old = 'p3_args += ["--entry-step", entry, "--exit-step", str(args.exit_step)]'
+        new = 'p3_args += ["--entry-step", "9", "--exit-step", str(args.exit_step)]'
         check = _assert_front_door_window
     else:
         old, new = 'if _fd_bounded:\n        _fd_disclose("emit_final_summary"', 'if not _fd_bounded:\n        _fd_disclose("emit_final_summary"'
@@ -1133,6 +1184,7 @@ def test_main_dispatch_respects_selected_frontend_ownership(
         '_rtl_gen_handoff': lambda *_: {}, 'declaration_before_step4': lambda *_: {},
         '_disclose_whole_flow_skip': lambda *args: 'outside declared ownership',
         '_disclose_runs_anyway': lambda *_: None,
+        '_lint_contract': SimpleNamespace(selected_mode=lambda *_: 'verilator'),
         '_V': dsr._V,
         '_refuse_a_disagreeing_declaration': dsr._refuse_a_disagreeing_declaration,
     }
@@ -1147,8 +1199,17 @@ def test_main_dispatch_respects_selected_frontend_ownership(
             plan.append(env['_entry_sentinel'](site))
         elif env['_after_exit'](site):
             plan.append(env['_exit_sentinel'](site))
-    exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])),
+    dispatch = [node for node in nodes if not isinstance(node, ast.FunctionDef)]
+    extracted = ast.FunctionDef(
+        name='_execute_extracted_main',
+        args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+        body=dispatch,
+        decorator_list=[],
+        returns=None,
+        type_comment=None)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[extracted], type_ignores=[])),
                  str(RUNNER), 'exec'), env)
+    env['_execute_extracted_main']()
     assert called == expected
     assert dsr._aggregate_verdict(plan) == ('FAIL' if expected else 'NOT_MEASURED')
     if entry in ('7', '9'):
