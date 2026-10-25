@@ -1,0 +1,7 @@
+Input ports:
+    a[15:0]: 16-bit input operand A.
+    b[15:0]: 16-bit input operand B.
+    Cin: Carry-in input.
+Output ports:
+    y[15:0]: 16-bit output representing the sum of A and B.
+    Co: Carry-out output.

@@ -51594,6 +51594,8 @@ def _czl9_prose_port_fallback(content: Dict[str, Any],
         # AND indexes bit 32, and the width gate downstream reads the second fact
         if "msb" in row:
             entry["msb"], entry["lsb"] = row["msb"], row["lsb"]
+        if "width_symbolic" in row:
+            entry["width_symbolic"] = row["width_symbolic"]
         target.append(entry)
     content["top_module_pins_source"] = "prose_port_definition_list"
 

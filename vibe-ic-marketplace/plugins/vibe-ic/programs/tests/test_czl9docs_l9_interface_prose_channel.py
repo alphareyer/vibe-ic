@@ -14,11 +14,8 @@ the flow's own step-2 clause and one RTL body violating all three elements:
 A verdict over ZERO characters — the same shape as a verdict over zero ports,
 one field along.
 
-Pinned in BOTH directions, and on BOTH branches, because a rule with an
-unexercised branch is a rule nobody has measured:
-  * WHOLE   — input inside the budget: carried whole.
-  * ANCHORED— input over the budget: only blocks naming a declared port.
-  * neither — nothing carried: the honest-null, never an empty string.
+Pinned on short, long and empty permitted input. Source size cannot change the
+prose contract or silently remove later requirements.
 """
 from __future__ import annotations
 
@@ -76,51 +73,79 @@ def test_the_prose_is_the_inputs_own_characters_never_invented():
         assert clause in c["notes"]
 
 
-def test_over_budget_the_anchored_branch_keeps_only_port_bearing_blocks():
+def _long_public_source():
+    from _hostpaths import repo_path
+    return repo_path("vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+                     "tests", "fixtures", "phase1_local", "neutral_port_fields",
+                     "interface_and_implementation.txt").read_text()
+
+
+def test_long_permitted_source_is_carried_without_midword_or_tail_loss():
+    text = _long_public_source()
+    assert len(text) > 4000
+    content = _emit(text, ports=[{"name": "wdata"}, {"name": "rdata"}])
+    assert len(content["notes"]) == len(text.strip())
+    assert content["notes"] == text.strip()
+    assert content["interface_prose_provenance"]["truncated"] is False
+
+
+def test_ordinary_generation_preserves_the_original_permitted_source_tail(tmp_path):
+    import json
+    import subprocess
+
+    text = _long_public_source()
+    source = tmp_path / "input/docs/interface.txt"
+    source.parent.mkdir(parents=True)
+    source.write_text(text)
+    result = subprocess.run([sys.executable, R.__file__, str(tmp_path)],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    l9 = json.loads((tmp_path / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").read_text())
+    assert len(l9["notes"]) == len(text.strip())
+    assert l9["notes"] == text.strip()
+    assert l9["notes"].endswith(text.strip().splitlines()[-1])
+
+
+def test_a_long_input_keeps_non_port_paragraphs_as_well_as_interface_clauses():
     filler = "\n\n".join(
         f"Section {i}. Packaging, ordering and storage handling. This states "
         f"nothing whatever about the interface of the part."
         for i in range(200))
     c = _emit(_SPEC + "\n\n" + filler)
     pv = c["interface_prose_provenance"]
-    assert pv["selection"] == "anchored"
+    assert pv["selection"] == "whole"
     # the interface clauses survive …
     assert "must be valid in the same clock cycle" in c["notes"]
     # … the colon lead-in drags its table in with it …
     assert "3'b001 -> 4'h9" in c["notes"]
-    # … and not one filler paragraph is carried.
-    assert "Packaging, ordering and storage" not in c["notes"]
+    # The source's other paragraphs are preserved too; selection by port names
+    # cannot decide that a later requirement is irrelevant.
+    assert c["notes"] == (_SPEC + "\n\n" + filler).strip()
 
 
-def test_the_bullet_port_table_is_not_repeated_into_the_prose_channel():
-    # L9 already carries the port list structurally; repeating it as prose adds
-    # no constraint and only inflates the channel.
+def test_the_original_bullet_port_list_is_preserved_in_the_source_channel():
     filler = "\n\n".join(f"Section {i}. Nothing about the interface."
                          for i in range(300))
     c = _emit(_SPEC + "\n\n" + filler)
-    assert c["interface_prose_provenance"]["selection"] == "anchored"
-    assert "- output cmd_out (4 bits)" not in c["notes"]
+    assert c["interface_prose_provenance"]["selection"] == "whole"
+    assert "- output cmd_out (4 bits)" in c["notes"]
 
 
 def test_nothing_carried_is_an_honest_null_not_an_empty_string():
-    filler = "\n\n".join(f"Section {i}. Nothing about the interface."
-                         for i in range(300))
-    c = _emit(filler)
+    c = _emit("")
     assert c.get("notes") in (None,)
     assert c["no_interface_prose_in_input"] is True
 
 
-def test_over_budget_with_no_declared_port_is_NOT_MEASURED():
-    # Too big to carry whole and no anchor to select with. That is not "the
-    # input said nothing" — it must say which it is.
+def test_a_long_portless_input_is_preserved_without_an_absence_claim():
     filler = "\n\n".join(f"Section {i}. Nothing about the interface."
                          for i in range(300))
     c = _emit(filler, ports=[])
     pv = c["interface_prose_provenance"]
-    assert pv["selection"] == "none"
-    assert "not_measured" in pv
-    assert c["no_interface_prose_in_input"] is True
-    assert c.get("notes") is None
+    assert pv["selection"] == "whole"
+    assert pv["truncated"] is False
+    assert c["notes"] == filler
+    assert "no_interface_prose_in_input" not in c
 
 
 def test_a_portless_design_still_gets_its_prose_when_it_fits():
