@@ -603,33 +603,27 @@ def _onehot_fsm_nextstate(text: str, ins: List[Port], outs: List[Port],
 def _dual_impl(text: str, ins: List[Port], outs: List[Port],
                top: str) -> Optional[str]:
     low = text.lower()
-    # must explicitly ask for BOTH an assign implementation AND a procedural one
-    # (an always block / a procedural if statement). The procedural cue covers both
-    # the "combinational always block" wording and the "procedural if statement"
-    # wording the benchmark uses interchangeably.
-    if not (re.search(r"assign\s+statement", low) and
-            (re.search(r"always\s+block", low)
-             or re.search(r"procedural\s+if\s+statement", low))):
+    procedural = re.findall(r"\bprocedural\s+([a-z]+)\s+statement", low)
+    if any(kind != "if" for kind in procedural):
         return None
-    # the outputs are split: one drives via assign, the rest via always @(*).
-    # We support the AND/OR/XOR-gate dual form and the 2-to-1-mux dual form, with the
-    # SAME boolean function on every output (the benchmark's dual-impl prompts always
-    # compute one identical function twice).
+    procedural_if = "if" in procedural
+    if not (re.search(r"assign\s+statement", low) and
+            (re.search(r"always\s+block", low) or procedural_if)):
+        return None
     expr: Optional[str] = None
+    mux_if: Optional[Tuple[str, str, str]] = None
     innames = _names(ins)
 
-    # 2-to-1 mux: "choose b if both sel_b1 and sel_b2 are true, otherwise a".
     mm = re.search(r"choose\s+(\w+)\s+if\s+both\s+(\w+)\s+and\s+(\w+)\s+are\s+true.*?"
                    r"otherwise[, ]+choose\s+(\w+)", low, re.S)
     if mm:
         bsel, s1, s2, asel = mm.groups()
-        # map back to actual declared names (case-insensitive).
         nmap = {n.lower(): n for n in innames}
         if all(x in nmap for x in (bsel, s1, s2, asel)):
-            expr = f"({nmap[s1]} & {nmap[s2]}) ? {nmap[bsel]} : {nmap[asel]}"
+            mux_if = (f"{nmap[s1]} & {nmap[s2]}", nmap[bsel], nmap[asel])
+            expr = f"({mux_if[0]}) ? {mux_if[1]} : {mux_if[2]}"
 
     if expr is None:
-        # named 2-input gate dual: "implement an XOR/AND/OR gate ... assign ... always"
         gm = re.search(r"\b(and|or|xor|nand|nor|xnor)\s+gate\b", low)
         scal = [n for n, w in ins if w == 1 and n.lower() not in _SEQ_PORTS]
         if gm and len(scal) == 2:
@@ -641,8 +635,9 @@ def _dual_impl(text: str, ins: List[Port], outs: List[Port],
 
     if expr is None:
         return None
+    if procedural_if and mux_if is None:
+        return None
 
-    # classify outputs: assign-target(s) vs always-target(s) vs clocked.
     assign_outs, comb_outs, ff_outs = [], [], []
     for on, ow in outs:
         if ow != 1:
@@ -661,12 +656,15 @@ def _dual_impl(text: str, ins: List[Port], outs: List[Port],
         return None
     if not assign_outs or not comb_outs:
         return None
-    body = []
-    for on in assign_outs:
-        body.append(f"    assign {on} = {expr};")
+    body = [f"    assign {on} = {expr};" for on in assign_outs]
     for on in comb_outs:
-        body.append(f"    always @(*) {on} = {expr};")
-    # outputs driven via always @(*) must be `reg`; emit a mixed header.
+        if procedural_if:
+            condition, true_value, false_value = mux_if
+            body.append(f"    always @(*) begin\n        if ({condition})\n"
+                        f"            {on} = {true_value};\n        else\n"
+                        f"            {on} = {false_value};\n    end")
+        else:
+            body.append(f"    always @(*) {on} = {expr};")
     plines = [_decl(n, w, "input") for n, w in ins]
     for on, ow in outs:
         d = "output reg" if on in comb_outs else "output"

@@ -63,52 +63,39 @@ _FIRING = [
 # ===========================================================================
 # POSITIVE — self-contained prompts (dataset-independent structural assertions)
 # ===========================================================================
-def test_half_adder_fires():
-    p = """Implement a module named TopModule.
+@pytest.mark.parametrize("p", [
+    """Implement a module named TopModule.
  - input  a
  - input  b
  - output sum
  - output cout
 The module should implement a half adder. A half adder adds two bits (with no
-carry-in) and produces a sum and carry-out."""
-    # v1.1.76 dedup: half/full/N-bit/2's-comp adders are owned by arithmetic_synth.
-    assert C.synth(p, "TopModule") is None
-
-
-def test_full_adder_fires():
-    p = """Implement a module named TopModule.
+carry-in) and produces a sum and carry-out.""",
+    """Implement a module named TopModule.
  - input  a
  - input  b
  - input  cin
  - output cout
  - output sum
 The module should impement a full adder. A full adder adds three bits (including
-carry-in) and produces a sum and carry-out."""
-    # v1.1.76 dedup: adders owned by arithmetic_synth.
-    assert C.synth(p, "TopModule") is None
-
-
-def test_nbit_adder_overflow_msb():
-    p = """Implement a module named TopModule.
+carry-in) and produces a sum and carry-out.""",
+    """Implement a module named TopModule.
  - input  x   (4 bits)
  - input  y   (4 bits)
  - output sum (5 bits)
 Implement a 4-bit adder with full adders. The output sum should include the
-overflow bit."""
-    # v1.1.76 dedup: adders owned by arithmetic_synth.
-    assert C.synth(p, "TopModule") is None
-
-
-def test_twos_complement_overflow():
-    p = """Implement a module named TopModule.
+overflow bit.""",
+    """Implement a module named TopModule.
  - input  a (8 bits)
  - input  b (8 bits)
  - output s (8 bits)
  - output overflow
 Assume that you have two 8-bit 2's complement numbers, a[7:0] and b[7:0]. The
 module should add these numbers to produce s[7:0]. Also compute whether a (signed)
-overflow has occurred."""
-    # v1.1.76 dedup: 2's-complement adder + overflow owned by arithmetic_synth.
+overflow has occurred.""",
+], ids=["half", "full", "nbit", "twos_complement"])
+def test_adders_defer_to_arithmetic_synth(p):
+    # v1.1.76 dedup: these adders are owned by arithmetic_synth.
     assert C.synth(p, "TopModule") is None
 
 
@@ -138,8 +125,7 @@ The module should impement a D latch using an always block."""
     assert "output reg q" in rtl
 
 
-def test_dual_impl_mux():
-    p = """Implement a module named TopModule.
+_DUAL_MUX = """Implement a module named TopModule.
  - input  a
  - input  b
  - input  sel_b1
@@ -149,10 +135,68 @@ def test_dual_impl_mux():
 The module should implement a 2-to-1 mux that chooses between a and b. Choose b if
 both sel_b1 and sel_b2 are true. Otherwise, choose a. Do the same twice, once using
 assign statements and once using a procedural if statement."""
-    rtl = C.synth(p, "TopModule")
+_DUAL_GATE = """Implement a module named TopModule.
+ - input  a
+ - input  b
+ - output out_assign
+ - output out_always
+Implement an XOR gate twice, once using an assign statement and once using a
+combinational always block."""
+
+
+def test_dual_impl_mux():
+    rtl = C.synth(_DUAL_MUX, "TopModule")
     assert rtl is not None
     assert "assign out_assign = (sel_b1 & sel_b2) ? b : a" in rtl
-    assert "always @(*) out_always = (sel_b1 & sel_b2) ? b : a" in rtl
+    assert "always @(*) begin" in rtl and "if (sel_b1 & sel_b2)" in rtl
+    assert "out_always = b;" in rtl and "else\n            out_always = a;" in rtl
+
+
+def test_dual_impl_mux_binary_and_four_state_semantics(tmp_path):
+    rtl = C.synth(_DUAL_MUX, "TopModule")
+    dut = tmp_path / "dut.sv"
+    dut.write_text(rtl)
+    tb = tmp_path / "test.sv"
+    tb.write_text("""
+module tb;
+  reg a,b,sel_b1,sel_b2,expected; wire out_assign,out_always; integer i,mismatches;
+  TopModule dut(a, b, sel_b1, sel_b2, out_assign, out_always);
+  initial begin
+    mismatches = 0;
+    for (i = 0; i < 16; i = i + 1) begin
+      {a, b, sel_b1, sel_b2} = i; #1;
+      expected = (sel_b1 & sel_b2) ? b : a;
+      if (out_assign !== expected || out_always !== expected) mismatches++;
+    end
+    a = 0; b = 1; sel_b1 = 1; sel_b2 = 1'bx; #1;
+    if (out_assign !== 1'bx || out_always !== 1'b0) mismatches++;
+    sel_b2 = 1'bz; #1;
+    if (out_assign !== 1'bx || out_always !== 1'b0) mismatches++;
+    $display("BINARY_ROWS=16 FOUR_STATE_ROWS=2 MISMATCHES=%0d", mismatches);
+    $finish; end
+endmodule
+""")
+    vvp = tmp_path / "dual.vvp"
+    comp = subprocess.run(["iverilog", "-g2012", "-o", str(vvp), str(dut), str(tb)],
+        capture_output=True, text=True)
+    assert comp.returncode == 0, comp.stderr
+    run = subprocess.run(["vvp", str(vvp)], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    assert "BINARY_ROWS=16 FOUR_STATE_ROWS=2 MISMATCHES=0" in run.stdout
+
+
+def test_dual_impl_generic_always_block_is_unchanged():
+    rtl = C.synth(_DUAL_GATE, "TopModule")
+    assert rtl is not None
+    assert "assign out_assign = a ^ b;" in rtl
+    assert "always @(*) out_always = a ^ b;" in rtl
+
+
+def test_dual_impl_unsupported_explicit_procedural_construct_skips():
+    for construct in ("a procedural case statement",
+                      "both a procedural if statement and a procedural case statement"):
+        p = _DUAL_GATE.replace("combinational always block", f"always block containing {construct}")
+        assert C.synth(p, "TopModule") is None
 
 
 def test_or_of_and_gates():
@@ -230,23 +274,16 @@ The module should behave like wires that makes these connections:
 # ===========================================================================
 # §4.05 NEGATIVE NO-LEAK — each sits JUST OUTSIDE a shape and MUST skip
 # ===========================================================================
-def test_neg_descriptive_waveform_skips():
-    # "read the simulation waveforms" is the descriptive waveform path, NOT ours.
-    p = """Implement a module named TopModule.
+@pytest.mark.parametrize("p", [
+    """Implement a module named TopModule.
  - input  a (3 bits)
  - output q (16 bits)
 The module should implement a combinational circuit. Read the simulation waveforms
 to determine what the circuit does, then implement it.
   time  a  q
   15ns  0  1232
-  20ns  1  aee0"""
-    assert C.synth(p, "TopModule") is None
-
-
-def test_neg_clocked_sequential_skips():
-    # a clocked flip-flop is the sequential path; the dual-impl shape must NOT fire
-    # on the FF output.
-    p = """Implement a module named TopModule.
+  20ns  1  aee0""",
+    """Implement a module named TopModule.
  - input  clk
  - input  a
  - input  b
@@ -255,14 +292,8 @@ def test_neg_clocked_sequential_skips():
  - output out_always_ff
 The module should implement an XOR gate three ways, using an assign statement, a
 combinational always block, and a clocked always block. Assume all sequential logic
-is triggered on the positive edge of the clock."""
-    assert C.synth(p, "TopModule") is None
-
-
-def test_neg_kmap_mux_decomposition_skips():
-    # the mux-input K-map decomposition is a documented FLOOR (non-unique reference);
-    # a K-map cue MUST keep every shape silent.
-    p = """Implement a module named TopModule.
+is triggered on the positive edge of the clock.""",
+    """Implement a module named TopModule.
  - input  c
  - input  d
  - output mux_in (4 bits)
@@ -273,14 +304,8 @@ multiplexer.
   00 | 0 | 0 | 0 | 1 |
   01 | 1 | 0 | 0 | 0 |
   11 | 1 | 0 | 1 | 1 |
-  10 | 1 | 0 | 0 | 1 |"""
-    assert C.synth(p, "TopModule") is None
-
-
-def test_neg_chip_name_without_structure_skips():
-    # "same functionality as the 7420 chip" with NO explicit gate description: the
-    # function is only known from chip knowledge -> SKIP (no keyword-overfit).
-    p = """Implement a module named TopModule.
+  10 | 1 | 0 | 0 | 1 |""",
+    """Implement a module named TopModule.
  - input  p1a
  - input  p1b
  - input  p1c
@@ -292,47 +317,25 @@ def test_neg_chip_name_without_structure_skips():
  - output p1y
  - output p2y
 The 7420 is a chip with two 4-input NAND gates. The module should implement the
-same functionality as the 7420 chip."""
-    assert C.synth(p, "TopModule") is None
-
-
-def test_neg_min_width_mismatch_skips():
-    # "minimum of N" but the output width does not match the operands -> ambiguous.
-    p = """Implement a module named TopModule.
+same functionality as the 7420 chip.""",
+    """Implement a module named TopModule.
  - input  a   (8 bits)
  - input  b   (8 bits)
  - output min (4 bits)
-The module should find the minimum of the two input values."""
-    assert C.synth(p, "TopModule") is None
-
-
-def test_neg_d_latch_extra_input_skips():
-    # a "D latch" with an EXTRA input that isn't a clean (data, enable) pair -> SKIP
-    # (could be a gated/async-reset variant the shape can't pin).
-    p = """Implement a module named TopModule.
+The module should find the minimum of the two input values.""",
+    """Implement a module named TopModule.
  - input  d
  - input  ena
  - input  r
  - output q
-The module should impement a D latch using an always block with reset r."""
-    assert C.synth(p, "TopModule") is None
-
-
-def test_neg_or_of_ands_foreign_operand_skips():
-    # an AND clause that references a token which is NOT a declared input -> SKIP.
-    p = """Implement a module named TopModule.
+The module should impement a D latch using an always block with reset r.""",
+    """Implement a module named TopModule.
  - input  p1a
  - input  p1b
  - output p1y
 The output p1y should be the OR of two AND gates: one that ANDs p1a and p1b, and
-the second that ANDs p1a and zz_undeclared."""
-    assert C.synth(p, "TopModule") is None
-
-
-def test_neg_pairwise_wrong_ordering_skips():
-    # the explicit example must MATCH the canonical outer/inner ordering; a
-    # transcribed-wrong example must keep the shape silent rather than emit a guess.
-    p = """Implement a module named TopModule.
+the second that ANDs p1a and zz_undeclared.""",
+    """Implement a module named TopModule.
  - input  a
  - input  b
  - input  c
@@ -341,13 +344,12 @@ def test_neg_pairwise_wrong_ordering_skips():
  - output out (25 bits)
 Compute all 25 pairwise one-bit comparisons. The output should be 1 if the two bits
 being compared are equal. Example: out[24] = ~b ^ a; out[23] = ~a ^ b; out[0] = ~e
-^ e."""
+^ e.""",
+    "", "just some prose with no interface at all",
+], ids=["waveform", "sequential", "kmap", "chip_name", "width", "latch",
+        "foreign_operand", "pairwise_order", "empty", "no_ports"])
+def test_negative_no_leak_skips(p):
     assert C.synth(p, "TopModule") is None
-
-
-def test_neg_empty_and_no_ports():
-    assert C.synth("", "TopModule") is None
-    assert C.synth("just some prose with no interface at all", "TopModule") is None
 
 
 # ===========================================================================
