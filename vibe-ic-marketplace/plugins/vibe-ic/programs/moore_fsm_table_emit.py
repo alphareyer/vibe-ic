@@ -199,16 +199,25 @@ def synth(prompt_text, fsm_table_text, top="TopModule"):
     L += [f"    reg [{w-1}:0] state, nstate;",
           "    always @(*) begin",
           "        case (state)"]
-    sel = "{" + ", ".join(inp) + "}" if inp else None
     for s in states:
-        if inp:
+        row = tbl["trans"][s]
+        # Validation proved every binary row exists. Drop a dimension only if
+        # its two cofactors agree for every remaining assignment. Moore outputs
+        # depend on state alone; retaining next-state identity also preserves
+        # future behavior. Unused X/Z inputs must not select the reset default.
+        support = [i for i in range(len(inp)) if any(
+            row[c] != row[c[:i] + "1" + c[i + 1:]]
+            for c in combos if c[i] == "0")]
+        if support:
+            sel = "{" + ", ".join(inp[i] for i in support) + "}"
+            reduced = {"".join(c[i] for i in support): row[c] for c in combos}
             L.append(f"            S_{s}: case ({sel})")
-            for c in combos:
-                L.append(f"                {len(inp)}'b{c}: nstate = S_{tbl['trans'][s][c]};")
+            for c, nxt in reduced.items():
+                L.append(f"                {len(support)}'b{c}: nstate = S_{nxt};")
             L.append(f"                default: nstate = S_{reset_state};")
             L.append("            endcase")
         else:
-            L.append(f"            S_{s}: nstate = S_{tbl['trans'][s]['']};")
+            L.append(f"            S_{s}: nstate = S_{row[combos[0]]};")
     L += [f"            default: nstate = S_{reset_state};",
           "        endcase",
           "    end",
