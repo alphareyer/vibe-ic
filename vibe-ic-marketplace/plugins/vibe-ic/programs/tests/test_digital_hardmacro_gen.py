@@ -302,6 +302,28 @@ def test_frame_binding_refuses_foreign_macro_or_degenerate_gds_box():
         mod.align_lef_frame_to_gds(lef, "macro_a", (0.0, 0.0, 0.0, 1.0))
 
 
+
+@pytest.mark.parametrize("header, reason", [
+    ("MACRO macro_a\nMACRO macro_a\n  SIZE 1 BY 1 ;\nEND macro_a\n", "MACRO_IDENTITY_INVALID"),
+    ("MACRO macro_a\n  SIZE 1 BY 1 ;\n", "MACRO_UNTERMINATED"),
+    ("MACRO macro_a\n  SIZE 1 BY 1 ;\n  SIZE 2 BY 2 ;\nEND macro_a\n", "FRAME_AMBIGUOUS"),
+    ("MACRO macro_a\n  ORIGIN 0 0 ;\n  ORIGIN 1 1 ;\n  SIZE 1 BY 1 ;\nEND macro_a\n", "FRAME_AMBIGUOUS"),
+    ("MACRO macro_a\n  ORIGIN 0 0 ;\nEND macro_a\n", "FRAME_AMBIGUOUS"),
+])
+def test_frame_binding_refuses_ambiguous_or_incomplete_lef_header(header, reason):
+    with pytest.raises(ValueError, match=reason):
+        mod.align_lef_frame_to_gds(header, "macro_a", (0.0, 0.0, 1.0, 1.0))
+
+
+def test_frame_binding_changes_only_selected_macro_header():
+    untouched = "MACRO other\n  ORIGIN 0 0 ;\n  SIZE 2 BY 2 ;\nEND other\n"
+    lef = untouched + "MACRO macro_a\n\tSIZE 1 BY 1 ;\nEND macro_a\n"
+    out, _ = mod.align_lef_frame_to_gds(lef, "macro_a", (-1.0, -2.0, 3.0, 4.0))
+    assert out.startswith(untouched)
+    assert "\tORIGIN 1.000000 2.000000 ;\n" in out
+    assert "\tSIZE 4.000000 BY 6.000000 ;\n" in out
+
+
 def test_a_pinless_abstract_is_never_staged(tmp_path, monkeypatch):
     """MEASURED: the GDS-only route produced an outline plus obstructions and
     zero PINs. That looks like a delivered view and is not one, so it is not

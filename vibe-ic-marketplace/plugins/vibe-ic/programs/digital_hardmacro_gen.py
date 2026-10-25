@@ -1120,27 +1120,27 @@ def align_lef_frame_to_gds(lef_text: str, design: str,
     if width <= 0 or height <= 0:
         raise ValueError("IP_KIT_GDS_BBOX_INVALID")
 
+    # LEF is a keyword grammar: identify complete header statements, not prose.
     lines = lef_text.splitlines(keepends=True)
-    starts = [i for i, line in enumerate(lines)
-              if (_MACRO_OPEN_RE.match(line.rstrip("\n"))
-                  and _MACRO_OPEN_RE.match(line.rstrip("\n")).group(1) == design)]
+    tokens = [line.split() for line in lines]
+    starts = [i for i, row in enumerate(tokens) if row == ["MACRO", design]]
     if len(starts) != 1:
         raise ValueError(f"IP_KIT_LEF_MACRO_IDENTITY_INVALID: {design}")
     start = starts[0]
     end = next((i for i in range(start + 1, len(lines))
-                if re.match(r"^[ \t]*END[ \t]+" + re.escape(design)
-                            + r"[ \t]*$", lines[i].rstrip("\n"))), None)
+                if tokens[i] == ["END", design]), None)
     if end is None:
         raise ValueError(f"IP_KIT_LEF_MACRO_UNTERMINATED: {design}")
     header_end = next((i for i in range(start + 1, end)
-                       if re.match(r"^[ \t]*(?:PIN|OBS)\b", lines[i])), end)
+                       if tokens[i] and tokens[i][0] in ("PIN", "OBS")), end)
     size_rows = [i for i in range(start + 1, header_end)
-                 if re.match(r"^[ \t]*SIZE\b", lines[i], re.I)]
+                 if tokens[i] and tokens[i][0].upper() == "SIZE"]
     origin_rows = [i for i in range(start + 1, header_end)
-                   if re.match(r"^[ \t]*ORIGIN\b", lines[i], re.I)]
+                   if tokens[i] and tokens[i][0].upper() == "ORIGIN"]
     if len(size_rows) != 1 or len(origin_rows) > 1:
         raise ValueError(f"IP_KIT_LEF_FRAME_AMBIGUOUS: {design}")
-    indent = re.match(r"^([ \t]*)", lines[size_rows[0]]).group(1)
+    size_line = lines[size_rows[0]]
+    indent = size_line[:len(size_line) - len(size_line.lstrip(" \t"))]
     old_size = lines[size_rows[0]].strip()
     lines[size_rows[0]] = f"{indent}SIZE {width:.6f} BY {height:.6f} ;\n"
     origin_line = f"{indent}ORIGIN {-llx:.6f} {-lly:.6f} ;\n"
