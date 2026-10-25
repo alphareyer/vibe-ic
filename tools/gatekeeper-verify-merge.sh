@@ -127,19 +127,22 @@
 #     gh pr merge 1021 --squash
 #     tools/gatekeeper-verify-merge.sh --reassert /tmp/v.json     # if time passed
 #
-# The verdict is about a BASE. If `origin/main` moves before the merge, the
-# verdict is stale — `--reassert` says so rather than letting a stale pass land.
+# A verdict binds the exact candidate and named acceptance inputs. If
+# `origin/main` moves, `--reassert` reuses the completed receipt when the new
+# bytes are unrelated, and requests only impacted checks when they overlap.
 #
 # Usage:
 #   gatekeeper-verify-merge.sh <pr-number> [options]
 #   gatekeeper-verify-merge.sh --ref <ref> [options]
-#   gatekeeper-verify-merge.sh --reassert <verdict.json>
+#   gatekeeper-verify-merge.sh --reassert <verdict.json> --reassert-head <ref>
 #
 # Options:
 #   --base <ref>        base the PR would land on          (default origin/main)
 #   --repo <path>       repository to operate on   (default: this script's repo)
 #   --json <path>       write the verdict JSON
 #   --no-fetch          do not touch the network (local refs must already exist)
+#   --reassert-head <ref>
+#                       current candidate ref; must still equal receipt head
 #   --require-version-bump
 #                       demand the version bump in the PR itself. OFF by
 #                       default because authoring PRs are VERSION-LESS by
@@ -156,7 +159,7 @@
 #                       critical-path waits. Every bundle is terminal-validated.
 set -uo pipefail
 
-PR=""; REF=""; BASE="origin/main"; JSON_OUT=""; REASSERT=""
+PR=""; REF=""; BASE="origin/main"; JSON_OUT=""; REASSERT=""; REASSERT_HEAD=""
 NO_FETCH=0; KEEP=0; REQUIRE_VERSION_BUMP=0; BASE_GATE_CACHE=""
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO=""
@@ -183,6 +186,7 @@ while [ $# -gt 0 ]; do
     --repo)     REPO="${2:?}"; shift 2 ;;
     --json)     JSON_OUT="${2:?}"; shift 2 ;;
     --reassert) REASSERT="${2:?}"; shift 2 ;;
+    --reassert-head) REASSERT_HEAD="${2:?}"; shift 2 ;;
     --no-fetch) NO_FETCH=1; shift ;;
     --keep)     KEEP=1; shift ;;
     --base-gate-cache) BASE_GATE_CACHE="${2:?}"; shift 2 ;;
@@ -238,51 +242,134 @@ derive_push_range() {
 }
 
 # ---------------------------------------------------------------- --reassert
-# A verdict is about a BASE and a HEAD. Between the verify and the merge, other
-# agents land PRs; if either moved, the pass describes a tree nobody is about to
-# create. This is the time dimension of "verified the wrong tree", and it is the
-# cheap half — no worktree, no tests, just two `rev-parse`s.
+# A verdict is about an exact HEAD plus the candidate and evidence paths which
+# the acceptance consumed. A later unrelated landing does not invalidate those
+# facts. Reuse the receipt directly unless concrete bytes that it names changed;
+# then request bounded revalidation and identify the affected paths. No
+# worktree or tests are started by reassertion itself.
 if [ -n "$REASSERT" ]; then
   [ -f "$REASSERT" ] || die "--reassert: no such file: $REASSERT"
-  read -r WAS_BASE WAS_HEAD WAS_VERDICT < <(python3 - "$REASSERT" <<'PY'
-import json, sys
+  [ -n "$REASSERT_HEAD" ] \
+    || die "--reassert requires --reassert-head <current-candidate-ref>"
+  [ "$NO_FETCH" = "1" ] || "${G[@]}" fetch -q origin main 2>/dev/null
+  python3 - "$REASSERT" "$REPO" "$BASE" "$REASSERT_HEAD" \
+    "$SELF/gatekeeper-verify-merge.sh" <<'PY'
+import hashlib, hmac, json, pathlib, re, subprocess, sys
+
+receipt_path, repo, base_ref, head_ref, verifier_path = sys.argv[1:]
+
+def refuse(message, rc=2):
+    print(f"REASSERT: REFUSE — {message}", file=sys.stderr)
+    raise SystemExit(rc)
+
 def pairs(rows):
     out = {}
     for key, value in rows:
         if key in out:
-            raise ValueError(f"duplicate JSON key {key!r}")
+            refuse(f"duplicate JSON key {key!r}")
         out[key] = value
     return out
+
 def constant(value):
-    raise ValueError(f"non-finite JSON number {value!r}")
-with open(sys.argv[1], encoding="utf-8") as fh:
-    d = json.load(fh, object_pairs_hook=pairs, parse_constant=constant)
-if not isinstance(d, dict):
-    raise SystemExit(2)
-print(d.get("base_sha", ""), d.get("head_sha", ""), d.get("verdict", ""))
+    refuse(f"non-finite JSON number {value!r}")
+
+try:
+    with open(receipt_path, encoding="utf-8") as fh:
+        doc = json.load(fh, object_pairs_hook=pairs, parse_constant=constant)
+except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    refuse(f"receipt is not strict JSON: {exc}")
+if not isinstance(doc, dict):
+    refuse("receipt root is not an object")
+if doc.get("receipt_schema") != "vibeic.landing-acceptance.v1":
+    refuse("missing or unsupported receipt_schema")
+claimed = doc.get("receipt_sha256")
+if not isinstance(claimed, str) or not re.fullmatch(r"[0-9a-f]{64}", claimed):
+    refuse("missing or malformed receipt_sha256")
+unsigned = dict(doc)
+del unsigned["receipt_sha256"]
+actual = hashlib.sha256(json.dumps(
+    unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+if not hmac.compare_digest(claimed, actual):
+    refuse("receipt digest mismatch (tampered or truncated)")
+if doc.get("verdict") != "LAND_OK":
+    refuse(f"the recorded verdict is {doc.get('verdict')}, not LAND_OK", 1)
+
+was_base, was_head = doc.get("base_sha"), doc.get("head_sha")
+for name, value in (("base_sha", was_base), ("head_sha", was_head)):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
+        refuse(f"missing or malformed {name}")
+
+def git(*args, binary=False):
+    proc = subprocess.run(["git", "-C", repo, *args], capture_output=True)
+    if proc.returncode:
+        refuse(f"git {' '.join(args)} failed")
+    return proc.stdout if binary else proc.stdout.decode().strip()
+
+for sha in (was_base, was_head):
+    git("cat-file", "-e", f"{sha}^{{commit}}")
+now_base = git("rev-parse", f"{base_ref}^{{commit}}")
+now_head = git("rev-parse", f"{head_ref}^{{commit}}")
+if now_head != was_head:
+    refuse(f"candidate head mismatch: receipt {was_head[:12]}, current {now_head[:12]}")
+
+# The receipt is interpreted only by the exact base-owned verifier which made
+# its contract. A changed consumer is itself a named affected dependency.
+recorded_verifier = git("show", f"{was_base}:tools/gatekeeper-verify-merge.sh",
+                        binary=True)
+if pathlib.Path(verifier_path).read_bytes() != recorded_verifier:
+    refuse("running verifier is not the recorded BASE authority")
+
+def paths_between(left, right):
+    raw = git("diff", "--name-only", "-z", left, right, "--", binary=True)
+    return {p.decode("utf-8", "surrogateescape")
+            for p in raw.split(b"\0") if p}
+
+def manifest(name):
+    value = doc.get(name)
+    if not isinstance(value, list) or any(not isinstance(p, str) for p in value):
+        refuse(f"missing or malformed {name}")
+    # The real verdict producer records pytest selections relative to the
+    # plugin root. Compare those with repo-relative git paths in one namespace.
+    prefix = "vibe-ic-marketplace/plugins/vibe-ic/"
+    return {prefix + path if name in {"selected_files", "base_selected_files"}
+            and path.startswith("programs/") else path for path in value}
+
+candidate_fork = git("merge-base", was_base, was_head)
+candidate_paths = paths_between(candidate_fork, was_head)
+evidence_paths = (manifest("selected_files") |
+                  manifest("base_selected_files") |
+                  manifest("gate_edited") |
+                  {"tools/gatekeeper-verify-merge.sh",
+                   "vibe-ic-marketplace/plugins/vibe-ic/programs/landing_merge_verdict.py"})
+
+if now_base == was_base:
+    print(f"REASSERT: REUSED — unchanged receipt/head/base {was_head[:12]}")
+    raise SystemExit(0)
+if subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor",
+                   was_base, now_base]).returncode:
+    refuse("current base is not a descendant of the receipt base")
+
+changed = paths_between(was_base, now_base)
+affected_candidate = sorted(changed & candidate_paths)
+affected_evidence = sorted(changed & evidence_paths)
+affected = sorted(set(affected_candidate) | set(affected_evidence))
+if affected:
+    print("REASSERT: REVALIDATE — concrete receipt inputs changed; "
+          "run impacted checks only", file=sys.stderr)
+    for path in affected:
+        kinds = []
+        if path in affected_candidate:
+            kinds.append("candidate-bytes")
+        if path in affected_evidence:
+            kinds.append("named-evidence/dependency")
+        print(f"    {path}\t{'+'.join(kinds)}", file=sys.stderr)
+    raise SystemExit(1)
+
+print(f"REASSERT: REUSED — base advanced {was_base[:12]}..{now_base[:12]} "
+      "only through unrelated paths; no acceptance rerun")
 PY
-  ) || die "--reassert: $REASSERT is not a verdict JSON"
-  [ "$WAS_VERDICT" = "LAND_OK" ] || {
-    echo "REASSERT: REFUSE — the recorded verdict is $WAS_VERDICT, not LAND_OK" >&2
-    exit 1; }
-  [ "$NO_FETCH" = "1" ] || "${G[@]}" fetch -q origin main 2>/dev/null
-  NOW_BASE="$("${G[@]}" rev-parse "$BASE" 2>/dev/null)" || die "cannot resolve $BASE"
-  if [ "$NOW_BASE" != "$WAS_BASE" ]; then
-    echo "REASSERT: REFUSE — the base moved under the verdict" >&2
-    echo "    verified against ${WAS_BASE:0:12}   $BASE is now ${NOW_BASE:0:12}" >&2
-    echo "    re-run the full verify; a pass about an older base is not a pass" >&2
-    exit 1
-  fi
-  REASSERT_VERIFIER_BLOB="$(git -C "$SELF_REPO" hash-object --no-filters \
-    "$SELF/gatekeeper-verify-merge.sh" 2>/dev/null)" \
-    || die "--reassert: cannot hash the running verifier"
-  REASSERT_BASE_VERIFIER_BLOB="$("${G[@]}" rev-parse \
-    "$WAS_BASE:tools/gatekeeper-verify-merge.sh" 2>/dev/null)" \
-    || die "--reassert: recorded base has no verifier"
-  [ "$REASSERT_VERIFIER_BLOB" = "$REASSERT_BASE_VERIFIER_BLOB" ] \
-    || die "--reassert: running verifier is not the recorded BASE authority"
-  echo "REASSERT: OK — $BASE is still ${WAS_BASE:0:12}, head still ${WAS_HEAD:0:12}"
-  exit 0
+  exit $?
 fi
 
 [ -n "$PR" ] || [ -n "$REF" ] || die "give a PR number or --ref <ref>"

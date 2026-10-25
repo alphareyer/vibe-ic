@@ -262,6 +262,7 @@ chip-AGNOSTIC.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -1954,7 +1955,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # leaves no record makes the operator re-derive the reason by hand, which is
     # the habit that ends in landing without looking.
     if a.json_out:
-        Path(a.json_out).write_text(json.dumps({
+        receipt = {
+            "receipt_schema": "vibeic.landing-acceptance.v1",
             "verdict": "LAND_OK" if v.ok else "REFUSE",
             "unmeasurable": v.unmeasurable,
             "admission": v.admission,
@@ -1986,6 +1988,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # anything about what this branch did to the hygiene suite.
             "hygiene_finding_delta": hygiene,
             "selection_size": len(selection),
+            "selected_files": sorted(selection),
             "dropped_selected_files": dropped,
             "candidate_run_truncated": truncated,
             # ARM A's completeness, machine-readably (vibe-ic#1443).
@@ -1993,6 +1996,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # reader must be able to tell that from "it fired and found
             # nothing", which is why the size travels with the list.
             "base_selection_size": len(base_selection),
+            "base_selected_files": sorted(base_selection),
             "dropped_base_selected_files": base_dropped,
             # PER-FILE COMPLETENESS, FROM STRUCTURED JUNIT (vibe-ic#1709). The
             # `*_checked` flags travel with the lists for the reason
@@ -2034,7 +2038,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "disclosures": v.disclosures,
             "git_version": a.git_version,
             "git_version_required_for_merge_tree": a.merge_tree_min_version,
-        }, indent=2) + "\n")
+        }
+        receipt["receipt_sha256"] = hashlib.sha256(
+            json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+            .encode("utf-8")
+        ).hexdigest()
+        Path(a.json_out).write_text(json.dumps(receipt, indent=2) + "\n")
 
     if v.unmeasurable:
         return RC_CANNOT_MEASURE

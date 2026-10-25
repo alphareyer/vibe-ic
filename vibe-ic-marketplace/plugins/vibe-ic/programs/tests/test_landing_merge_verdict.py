@@ -908,6 +908,11 @@ def test_cli_returns_zero_and_names_the_verified_commit(tmp_path):
     assert "LAND OK" in r.stdout
     assert doc["verdict"] == "LAND_OK"
     assert doc["verified_sha"] == SHA
+    assert doc["receipt_schema"] == "vibeic.landing-acceptance.v1"
+    assert doc["selected_files"] == _SEL
+    claimed = doc.pop("receipt_sha256")
+    assert claimed == hashlib.sha256(json.dumps(
+        doc, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     assert not [key for key in doc if key.startswith("protected")], sorted(doc)
 
 
@@ -3515,35 +3520,129 @@ def test_pid_only_term_kills_a_term_ignoring_b2_and_removes_worktrees(
         sandbox, tmp_path, "B2", True)
 
 
-def _reassert(sandbox, path):
+def _reassert(sandbox, path, head=None):
+    doc = json.loads(path.read_text())
+    head = head or doc["head_sha"]
     return _pr.run(
         ["bash", str(_VERIFY), "--reassert", str(path), "--base", "main",
-         "--repo", str(sandbox), "--no-fetch"],
+         "--reassert-head", head, "--repo", str(sandbox), "--no-fetch"],
         capture_output=True, text=True)
 
 
-def test_reassert_refuses_when_the_base_moved(sandbox, tmp_path):
-    """A pass is about a BASE. Other agents land while a verify runs, and #1019
-    says so explicitly — a verdict whose base has moved describes a tree nobody
-    is about to create. The base is rewritten in the RECORD rather than in the
-    shared repo, so this test cannot reorder into another one's way."""
-    r, doc = _verify(sandbox, "innocuous_green", tmp_path)
-    assert r.returncode == 0, r.stdout + r.stderr
-    good = tmp_path / "v_innocuous_green.json"
-    assert _reassert(sandbox, good).returncode == 0
+def _clone_for_reassert(sandbox, tmp_path):
+    repo = tmp_path / "reassert-repo"
+    cloned = _pr.run(["git", "clone", "-q", str(sandbox), str(repo)],
+                     capture_output=True, text=True)
+    assert cloned.returncode == 0, cloned.stderr
+    _git(repo, "config", "user.email", "t@localhost")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "checkout", "-q", "main")
+    return repo
 
-    stale = tmp_path / "stale.json"
-    doc["base_sha"] = "0" * 40
-    stale.write_text(json.dumps(doc))
-    moved = _reassert(sandbox, stale)
-    assert moved.returncode == 1, moved.stdout + moved.stderr
-    assert "the base moved" in moved.stderr
+
+def _advance_main(repo, rel, content):
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    _git(repo, "add", "--", rel)
+    assert _git(repo, "commit", "-qm", f"advance {rel}").returncode == 0
+
+
+def _write_reassert_receipt(repo, path, verdict="LAND_OK"):
+    dependency = ("vibe-ic-marketplace/plugins/vibe-ic/"
+                  "programs/tests/test_thing.py")
+    doc = {
+        "receipt_schema": "vibeic.landing-acceptance.v1",
+        "verdict": verdict,
+        "base_sha": _git(repo, "rev-parse", "main").stdout.strip(),
+        "head_sha": _git(repo, "rev-parse", "innocuous_green").stdout.strip(),
+        "selected_files": [dependency],
+        "base_selected_files": [dependency],
+        "gate_edited": [],
+    }
+    doc["receipt_sha256"] = hashlib.sha256(json.dumps(
+        doc, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    path.write_text(json.dumps(doc))
+    return doc
+
+
+def test_reassert_reuses_unchanged_receipt_without_rerun(sandbox, tmp_path):
+    good = tmp_path / "v_innocuous_green.json"
+    _write_reassert_receipt(sandbox, good)
+    reused = _reassert(sandbox, good)
+    assert reused.returncode == 0, reused.stdout + reused.stderr
+    assert "REASSERT: REUSED" in reused.stdout
+    assert "rerun" not in reused.stderr.lower()
+
+
+def test_reassert_reuses_receipt_after_unrelated_base_landing(sandbox, tmp_path):
+    good = tmp_path / "v_innocuous_green.json"
+    _write_reassert_receipt(sandbox, good)
+    repo = _clone_for_reassert(sandbox, tmp_path)
+    _advance_main(repo, "unrelated-owner.txt", "independent landing\n")
+    reused = _reassert(repo, good)
+    assert reused.returncode == 0, reused.stdout + reused.stderr
+    assert "only through unrelated paths" in reused.stdout
+
+
+def test_reassert_changed_candidate_input_requests_bounded_revalidation(
+        sandbox, tmp_path):
+    good = tmp_path / "v_innocuous_green.json"
+    _write_reassert_receipt(sandbox, good)
+    repo = _clone_for_reassert(sandbox, tmp_path)
+    _advance_main(repo, "notes_green.txt", "main changed candidate bytes\n")
+    changed = _reassert(repo, good)
+    assert changed.returncode == 1, changed.stdout + changed.stderr
+    assert "REASSERT: REVALIDATE" in changed.stderr
+    assert "notes_green.txt\tcandidate-bytes" in changed.stderr
+    assert "full verify" not in changed.stderr.lower()
+
+
+@pytest.mark.parametrize("selection_namespace", ["repo", "plugin"])
+def test_reassert_changed_named_dependency_blocks_reuse(sandbox, tmp_path, selection_namespace):
+    good = tmp_path / "v_innocuous_green.json"
+    doc = _write_reassert_receipt(sandbox, good)
+    assert doc["base_selected_files"]
+    repo = _clone_for_reassert(sandbox, tmp_path)
+    dependency = doc["base_selected_files"][0]
+    if selection_namespace == "plugin":
+        # The real verdict producer stores pytest selection paths relative to
+        # the plugin root; git diff reports them relative to the repository.
+        prefix = "vibe-ic-marketplace/plugins/vibe-ic/"
+        doc["selected_files"] = [dependency.removeprefix(prefix)]
+        doc["base_selected_files"] = [dependency.removeprefix(prefix)]
+        doc.pop("receipt_sha256")
+        doc["receipt_sha256"] = hashlib.sha256(json.dumps(
+            doc, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        good.write_text(json.dumps(doc))
+    _advance_main(repo, dependency, "def test_changed_dependency():\n    assert True\n")
+    changed = _reassert(repo, good)
+    assert changed.returncode == 1, changed.stdout + changed.stderr
+    assert "named-evidence/dependency" in changed.stderr
+    assert dependency in changed.stderr
+
+
+def test_reassert_rejects_tampered_or_mismatched_receipt(sandbox, tmp_path):
+    good = tmp_path / "v_innocuous_green.json"
+    doc = _write_reassert_receipt(sandbox, good)
+
+    tampered = tmp_path / "tampered.json"
+    doc["selected_files"].append("forged.py")
+    tampered.write_text(json.dumps(doc))
+    refused = _reassert(sandbox, tampered)
+    assert refused.returncode == 2, refused.stdout + refused.stderr
+    assert "receipt digest mismatch" in refused.stderr
+
+    mismatch = _reassert(sandbox, good, head="main")
+    assert mismatch.returncode == 2, mismatch.stdout + mismatch.stderr
+    assert "candidate head mismatch" in mismatch.stderr
 
 
 def test_reassert_refuses_a_record_that_was_not_a_pass(sandbox, tmp_path):
-    r, _ = _verify(sandbox, "innocuous_red", tmp_path)
-    assert r.returncode == 1
-    bad = _reassert(sandbox, tmp_path / "v_innocuous_red.json")
+    receipt = tmp_path / "v_innocuous_red.json"
+    doc = _write_reassert_receipt(sandbox, receipt, verdict="REFUSE")
+    bad = _reassert(sandbox, receipt,
+                    head=doc["head_sha"])
     assert bad.returncode == 1, bad.stdout + bad.stderr
     assert "not LAND_OK" in bad.stderr
 

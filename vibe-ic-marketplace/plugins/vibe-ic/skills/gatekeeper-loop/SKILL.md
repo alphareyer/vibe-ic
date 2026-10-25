@@ -120,13 +120,15 @@ python3 plugins/vibe-ic/skills/gatekeeper-loop/programs/poll_prs.py
 ```
 
 The program lists every open, **non-draft** PR against `main`,
-**newest-first** (highest PR number first). Exit codes are the cron
+**ready-first**. A CLEAN/MERGEABLE signal is an advisory service-order hint,
+never acceptance; unknown candidates follow, then known DIRTY/CONFLICTING
+candidates. PR number is only a tie-breaker. Exit codes are the cron
 driver's signal:
 
 | rc | Meaning | Gatekeeper action |
 |----|---------|-------------------|
 | 0  | No actionable PRs | Output `(no actionable PRs)` and idle this tick (healthy idle — see §STOP CONDITION) |
-| 1  | ≥1 actionable | Process each PR listed, newest-first |
+| 1  | ≥1 actionable | Process each PR listed, ready-first |
 | 2  | I/O / auth error | Log + exit; retry next tick (do NOT treat as actionable) |
 
 One rule: **actionable = ANY open, non-draft PR targeting `main`.** A
@@ -138,6 +140,13 @@ context only** — it never filters on them. A PR GitHub currently reports
 it back to the author; silently dropping it from the poll would **wedge**
 the PR with no path forward (a §4.05 leak at the poll layer — the poll
 must not mask a PR that needs the gate to say "fix your branch").
+
+**Ready-first is binding:** an independently accepted candidate proceeds to
+the next available serialized merge lock promptly. An unrelated earlier PR,
+lower/higher PR number, handoff, or queue position is not a dependency and
+must not block it. Genuine declared dependencies, overlapping source ownership,
+an explicit owner hold, or a failed required gate still block. Exactly one
+writer may hold the merge lock.
 
 ### Step 2 — machine gates (required status checks)
 
@@ -374,18 +383,19 @@ gh pr merge <num> --squash --delete-branch
 ```
 
 The merge uses `--squash` and NEVER `--admin` / `--force` (see §Hard
-rules). After release, the loop moves to the next PR; the next PR rebases
-onto the **now-advanced** `origin/main`, so each landing is serialized and
-re-validated against the latest tree — and `--reassert` refuses a verdict whose
-base moved while it waited, because other agents land while a verify runs.
+rules). After release, the loop moves to the next ready PR. Landing remains
+serialized, but acceptance work is not repeated merely because another agent
+landed unrelated bytes. `--reassert <receipt> --reassert-head <headRef>` binds
+the exact candidate head and compares the advanced base with the receipt's
+candidate/evidence/dependency manifest: disjoint movement reuses the receipt;
+overlap names the affected paths and requests only their impacted checks.
 
-> **why re-run on the rebased tree is not optional:** the PR's own CI ran
+> **why affected checks on changed inputs are not optional:** the PR's own CI ran
 > against the base it was opened on. Between then and now, the queue has
-> merged other PRs. A clean 3-way merge proves the *text* doesn't
-> conflict; it does NOT prove the *behaviour* still holds. Re-running the
-> required checks on the rebased tree is the only thing that catches a
-> semantic conflict — this is exactly the class of bug a serialized merge
-> queue exists to prevent.
+> merged other PRs. A clean 3-way merge proves the *text* doesn't conflict;
+> it does NOT prove behaviour still holds when candidate-owned or named
+> evidence/dependency bytes changed. Bounded revalidation catches that class
+> without discarding independent completed evidence.
 
 ## Hard rules (non-negotiable)
 
@@ -540,12 +550,19 @@ Each tick must:
 1. python3 plugins/vibe-ic/skills/gatekeeper-loop/programs/poll_prs.py --repo <owner/repo> --base main
 2. If rc=0 → output "(no actionable PRs)" and exit (healthy idle).
 3. If rc=2 → log + exit. Retry next tick.
-4. If rc=1 → for each PR in `actionable[]` (newest-first). The PR author is
+4. If rc=1 → for each PR in `actionable[]` (ready-first). The PR author is
    irrelevant — the gatekeeper MAY merge its OWN authored PR; the gates are
    the quality guarantee, not identity separation:
      a. git fetch origin; run gatekeeper_review.py --version-by-gatekeeper
         (machine gates; the PR is VERSION-LESS so the version gate DEFERS)
-        on base=origin/main head=<headRef>.
+        on base=origin/main head=<headRef>. Before repeating an already
+        completed V2 acceptance, run `tools/gatekeeper-verify-merge.sh
+        --reassert <verdict.json> --reassert-head <headRef> --base origin/main`. A valid unchanged
+        receipt is consumed directly. Unrelated base movement also reuses the
+        receipt. Only concrete changed candidate/evidence/dependency paths
+        trigger bounded revalidation of the impacted checks; missing,
+        tampered, or mismatched receipts fail closed. Waiting, handoff, agent
+        identity, or base movement alone never requests a repeat acceptance.
         - RED → gh pr review --request-changes with the verbatim failing
           output in the 繁中 5-section comment; continue.
      b. GREEN → Step-2.7 adversarial review on the PR diff
@@ -584,7 +601,7 @@ Deterministic gates + programs backing this skill (the loop SCAFFOLD is
 fully programmable; only Step 2.7 is genuine LLM judgment):
 
 - Poll / actionability (every open, non-draft PR against `main`,
-  newest-first): `skills/gatekeeper-loop/programs/poll_prs.py`
+  ready-first): `skills/gatekeeper-loop/programs/poll_prs.py`
 - Machine-gate aggregator (required status checks, cadence-aware):
   `gatekeeper_review.py` (the required-check runner this loop invokes)
 - Serialized merge-queue lock (one merge in flight, dead-PID self-heal):
