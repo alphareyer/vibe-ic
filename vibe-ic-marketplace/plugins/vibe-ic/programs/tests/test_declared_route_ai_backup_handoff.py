@@ -202,7 +202,7 @@ def _solve_after_ai_route(bench: str, dataset, run, **kwargs) -> int:
                                         jobs=kwargs.get("jobs", 1))
 
 
-def test_prompt_only_normal_entry_reaches_waive_before_d1_qualification(tmp_path, monkeypatch):
+def test_prompt_only_normal_entry_reaches_waive_without_d1_qualification(tmp_path, monkeypatch):
     dataset, run = tmp_path / 'dataset', tmp_path / 'run'
     _write_dataset(dataset, {'neutral_generation': _BUILD_PROMPT})
     calls = []
@@ -225,11 +225,17 @@ def test_prompt_only_normal_entry_reaches_waive_before_d1_qualification(tmp_path
     monkeypatch.setattr(bd.subprocess, 'run', producer)
     assert _solve_after_ai_route('verilogeval-human', dataset, run) == 2
     assert [argv[argv.index('--exit-step') + 1] for argv in calls] == ['2']
+    assert all(argv[argv.index('--rtl-input') + 1] == 'original' for argv in calls)
     task, = _read_jsonl(run / bd._BACKUP_WORKLIST)
     assert task['handoff_source'] == 'rtl_gen_waive'
     result, = json.loads((run / 'solve_report.json').read_text())['results']
-    assert result['effective_entry'] == 'D1'
-    assert result['phase1_frontdoor']['native_verdict'] == 'NOT_MEASURED'
+    assert result['effective_entry'] == '1'
+    assert result['phase1_frontdoor'] == {
+        'status': 'NOT_IN_SCOPE',
+        'input_contract': 'original',
+        'reason': 'bounded RTL uses the unchanged original request',
+        'native_verdict': 'NOT_MEASURED',
+    }
     assert result['d1_activation'] is None
 
 

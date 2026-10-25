@@ -2202,6 +2202,8 @@ def detect_ic_class(project: Path) -> Tuple[str, str]:
     Adapter shape: keep the Tuple[str, str] contract used by the
     registry lookup and step_rtl_gen so no other call sites change.
     """
+    if _pl.rtl_input(project) == "original":
+        return ("unknown", "original-input RTL contract; structured Ldocs are not consumed")
     gd = _pl.generated_docs_dir(project)
     if not gd.is_dir():
         return ("unknown", "generated_docs/ not present — Phase 1 (doc-extraction) not run")
@@ -2707,9 +2709,13 @@ def _try_spec_artifact_registry_rtl(
 
     top = "chip_top"
     ifc = ""
+    if _pl.rtl_input(project) == "original":
+        top = _phase1_declared_module_name(text)
+        if top is None:
+            return None
     try:
         _l9 = _pl.generated_docs_dir(project) / "L9_INTEGRATION_SPEC.json"
-        if _l9.is_file():
+        if _pl.rtl_input(project) != "original" and _l9.is_file():
             ifc = _l9.read_text(errors="replace")
             top = json.loads(ifc).get("top_module") or "chip_top"
     except (OSError, ValueError):
@@ -2768,6 +2774,8 @@ def _try_deterministic_rtl_dispatch(project: Path, t0: float) -> Optional[StepRe
     Spec is looked for at the conventional locations below; its ``module`` field
     names the emitted ``rtl/<module>.sv``."""
     _phase1_project_checkpoint(project)
+    if _pl.rtl_input(project) == "original":
+        return None  # this emitter requires the separately selected structured-spec contract
     spec = None
     for cand in ("phase2/stage1/rtl_spec.json", "phase2/rtl_spec.json",
                  "input/rtl_spec.json", "phase2/stage1/rtl_spec.yaml",
@@ -3200,7 +3208,9 @@ def _gather_phase1_plain_spec_text(
             f"the project provenance boundary could not be resolved: {exc}")
     if project_binding is not None:
         project_binding.require_current()
-    for directory in (_pl.input_prompt_dir(project), _pl.input_doc_dir(project)):
+    directories = ((_pl.input_prompt_dir(project), _pl.input_doc_dir(project))
+                   if _pl.rtl_input(project) == "structured" else (project / "input",))
+    for directory in directories:
         if project_binding is not None:
             project_binding.require_current()
         try:
@@ -3225,7 +3235,9 @@ def _gather_phase1_plain_spec_text(
                     "the operator-prose source root is not a directory")
             allowed_root = directory.resolve(strict=True)
             allowed_root.relative_to(project_root)
-            entries = sorted(allowed_root.rglob("*"))
+            entries = (_pl.original_input_sources(project)
+                       if _pl.rtl_input(project) == "original"
+                       else sorted(allowed_root.rglob("*")))
         except ValueError as exc:
             return _phase1_plain_spec_gather_refusal(
                 project, directory, _PHASE1_PROSE_PROVENANCE_REFUSED,
@@ -3285,7 +3297,9 @@ def _gather_phase1_plain_spec_text(
                 # would silently change the grammar the deterministic parser sees.
                 if project_binding is not None:
                     project_binding.require_current()
-                _chunk_text = resolved.read_text(encoding="utf-8")
+                _chunk_text = (resolved.read_bytes().decode("utf-8")
+                               if _pl.rtl_input(project) == "original"
+                               else resolved.read_text(encoding="utf-8"))
                 if project_binding is not None:
                     project_binding.require_current()
             except UnicodeError as exc:
@@ -7470,7 +7484,11 @@ def _stage_author_knowledge_digests(project: Path) -> Tuple[str, Dict[str, Any]]
     n_decl_fields = 0
     n_decl_required = 0
     try:
-        _p, _contracts = _decl.stage_contract(project)
+        # This advisory producer reads structured Ldocs. The original-input
+        # author receives every source clause directly rather than an old
+        # generated declaration contract from a different input authority.
+        _p, _contracts = (_decl.stage_contract(project)
+                          if _pl.rtl_input(project) == "structured" else (None, []))
         if _contracts:
             decl_contract_path = str(_p)
             _names = {f["name"]: f for c in _contracts for f in c["fields"]}
@@ -7577,6 +7595,7 @@ def _stage_author_knowledge_digests(project: Path) -> Tuple[str, Dict[str, Any]]
            f"(`--project`, not one file out of the set; #2086):\n"
            f"    python3 plugins/vibe-ic/programs/lesson_consumption_check.py "
            f"--project {project} --digest {digest_path} --ack {ack_path}"
+         + (" --rtl-input original" if _pl.rtl_input(project) == "original" else "")
          + (f" \\\n        --scoring-record {scoring_record_path}"
             if scoring_record_path else "")
          + f" --strict"
@@ -7586,6 +7605,19 @@ def _stage_author_knowledge_digests(project: Path) -> Tuple[str, Dict[str, Any]]
         if strong_titles and ack_path else "")
     extras: Dict[str, Any] = {"lessons_digest": digest_path,
                               "lessons_count": n_lessons}
+    if _pl.rtl_input(project) == "original":
+        original = project / "input/phase1_prompt.md"
+        context = _pl.original_input_sources(project)[1:]
+        extras.update(input_authority="original", read_prompt_from=str(original),
+                      original_prompt_sha256=hashlib.sha256(original.read_bytes()).hexdigest(),
+                      original_prompt_bytes=original.stat().st_size,
+                      read_context_from=[{"path": str(p), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
+                                         for p in context])
+        lessons_hint += ("\nINPUT AUTHORITY: read the COMPLETE original prompt at "
+                         f"`{original}` and every supplied context file named in the handoff. "
+                         "The original specification controls ports and behavior; generated Ldocs "
+                         "are not the input contract for this bounded RTL authoring request. "
+                         "No D1 document-quality PASS or RTL behavior PASS is asserted.")
     if strong_titles:
         extras["lessons_strong_matches"] = strong_titles
         extras["lessons_ack_path"] = ack_path
@@ -8139,9 +8171,10 @@ def step_rtl_gen(project: Path, ic_class: str,
             _RTL_SESSION_BINDING = None
             if prior_owned and prior_project == project:
                 _RTL_SESSION_PROJECT = stage_project
-            result = _step_rtl_gen_bound(
-                stage_project, ic_class, force_regen, t0, stage_binding,
-                snapshot_manifest=baseline)
+            with _pl.rtl_input_view(stage_project, _pl.rtl_input(project)):
+                result = _step_rtl_gen_bound(
+                    stage_project, ic_class, force_regen, t0, stage_binding,
+                    snapshot_manifest=baseline)
             stage_binding.require_current()
             # #2183 — THE FILES, not only the StepResult. Every generator above
             # ran against `stage_project` and any of them may have recorded
@@ -13977,15 +14010,19 @@ def _step_rtl_hygiene_native(project: Path) -> StepResult:
 
 
 def step_rtl_lint_tool(project: Path, *, pdk_name: Optional[str] = None,
-                       bounded_rtl: bool = False) -> Optional[StepResult]:
+                       bounded_rtl: bool = False,
+                       top_name: Optional[str] = None,
+                       container: str = _pin.default_container_name()) -> Optional[StepResult]:
     """Flow Step 2 lint through the tool: LibreLane Verilator.Lint + its gate.
 
     A bounded RTL request with no PDK and no explicit implementation/step
     choice uses the existing native project hygiene gate. Other requests
     select LibreLane with the PDK declared by Phase 2; the image is
     `librelane_contract.resolve_image` and the PDK root `pdk_root_resolution`.
-    An explicit `direct` selection returns None and
-    the step is unchanged. `librelane` judges Verilator.Lint with
+    An explicit `direct` selection keeps the structured path unchanged. The
+    original-input contract runs timing-aware native RTL lint here, using the
+    existing Verilator transcript judge without synthesis admission or a later
+    synthesis transcript. `librelane` judges Verilator.Lint with
     `verilator_lint_gate`; `dual` also runs `rtl_hygiene_lint --severity ERROR`
     and blocks on the union, recording which arm found what. The linted files
     are the step-9 synthesis input (`silicon_rtl_selection`), so a lint of a
@@ -13996,7 +14033,67 @@ def step_rtl_lint_tool(project: Path, *, pdk_name: Optional[str] = None,
     except _ll.Refusal as exc:
         return StepResult("rtl_lint_tool", "FAIL", 0.0, str(exc))
     if mode == "direct":
-        return None
+        if _pl.rtl_input(project) != "original":
+            return None
+        t0 = time.time()
+        from _rtl_include_hub import silicon_rtl_selection
+        import verilator_lint_gate as _vlg
+        import instrument_calibration as _calibration
+        report = project / "reports/phase2/lint/rtl_hygiene.json"
+        transcript = report.with_name("native-verilator.log")
+        extras = {"input_contract": "original", "tool_mode": "direct",
+                  "producer": "rtl_lint_tool", "checker": _vlg.GATE}
+        rtl = silicon_rtl_selection(_pl.rtl_dir(project))
+        if not rtl or not top_name:
+            return StepResult("rtl_validate", "FAIL", time.time() - t0,
+                              "original RTL lint requires selected RTL sources and its top",
+                              extras=extras)
+        report.parent.mkdir(parents=True, exist_ok=True)
+        support = sorted(p for p in _pl.rtl_dir(project).rglob("*")
+                         if p.is_file() and p.suffix.lower() in (".v", ".sv", ".vh", ".svh", ".h"))
+        inputs = list(dict.fromkeys([*_pl.original_input_sources(project), *support]))
+        command = ["verilator", "--lint-only", "--timing", "--Wall", "-Wno-fatal",
+                   "--top-module", top_name,
+                   *["-I" + str(p) for p in sorted({p.parent for p in support})], *map(str, rtl)]
+        measured = {"gate": _vlg.GATE, "tool": "verilator", "top": top_name,
+                    "command": command, "transcript": str(transcript),
+                    "blocking_warning_codes": sorted(_vlg.BLOCKING_WARNINGS)}
+        try:
+            hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
+            measured["input_sha256"] = hashes
+            execute = _verilator_stage_exec(container)
+            version_rc, version_out, version_err = execute(["verilator", "--version"], project)
+            measured["tool_version"] = version_out.strip() if version_rc == 0 else None
+            rc, out, err = execute(command, project)
+            _aa.write_text(transcript, out + err)
+            measured["exit_code"] = rc
+            parsed = _vlg.parse_transcript(out + err)
+            design_paths = [str(p) for p in support]
+            design_paths += [_to_container_path(str(p), container) for p in support]
+            blocked = _vlg.blocking(parsed["diagnostics"], design_paths)
+            measured.update(findings=parsed["diagnostics"], blocking=blocked)
+            current_inputs = list(dict.fromkeys([*_pl.original_input_sources(project),
+                *(p for p in _pl.rtl_dir(project).rglob("*") if p.is_file()
+                  and p.suffix.lower() in (".v", ".sv", ".vh", ".svh", ".h"))]))
+            current = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in current_inputs}
+            if hashes != current:
+                status, detail = "FAIL", "original RTL/input changed during native lint"
+            elif blocked:
+                status, detail = "FAIL", f"native RTL lint reported {len(blocked)} blocking diagnostic(s)"
+            elif rc or parsed["exiting_errors"]:
+                status, detail = "NOT_MEASURED", f"native RTL lint did not complete (rc={rc})"
+            else:
+                status, detail = "PASS", "native timing-aware RTL lint completed without blocking diagnostics"
+        except (OSError, ValueError, subprocess.SubprocessError, _calibration.Uncalibrated) as exc:
+            status, detail = "NOT_MEASURED", f"original RTL lint could not be measured: {exc}"
+        measured.update(verdict=status, reason=detail)
+        _aa.write_json(report, measured)
+        extras.update(command=command, exit_code=measured.get("exit_code"),
+                      input_sha256=measured.get("input_sha256"),
+                      tool_version=measured.get("tool_version"))
+        return StepResult("rtl_validate", status, time.time() - t0,
+                          detail, [str(p) for p in (report, transcript) if p.is_file()],
+                          extras=extras, reason_class="execution_error" if status == "NOT_MEASURED" else "")
     from _rtl_include_hub import silicon_rtl_selection
     import verilator_lint_gate as _vlg
     t0 = time.time()
@@ -24563,7 +24660,8 @@ def step_emit_phase2_manifests(project: Path,
     rtl_dir = _pl.rtl_dir(project)
 
     # Step 2: lint
-    if (project / "reports").is_dir() or by_name.get("yosys_synth", _ABSENT_STEP).status == _V.Verdict.PASS.value:
+    _original_hygiene = (by_name.get("rtl_validate", _ABSENT_STEP).extras or {}).get("input_contract") == "original"
+    if not _original_hygiene and ((project / "reports").is_dir() or by_name.get("yosys_synth", _ABSENT_STEP).status == _V.Verdict.PASS.value):
         # THREE DEFECTS IN FIVE LINES, all measured on run21 (a signed
         # serial-parallel multiplier that lints clean), where step 2 FAILed
         # EVIDENCE_MISSING (#433): "reports/phase2/lint/rtl_hygiene.json →
@@ -26579,6 +26677,8 @@ def main() -> int:
                    help="Forward --skip-analog to final_audit so analog A1-A8 "
                         "file-existence checks don't FAIL a digital-only project. "
                         "Captured from v0.1.53 CVDP run.")
+    p.add_argument("--rtl-input", choices=("structured", "original"), default="structured",
+                   help="Use the complete original specification as Step 1/2 authority; structured remains the default.")
     p.add_argument("--entry-step", default=None,
                    help="START the flow at this canonical step id instead of "
                         "the beginning (e.g. 4 for a debug task, 2 for an "
@@ -26660,6 +26760,13 @@ def main() -> int:
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
     try:
+        _pl.select_rtl_input(project, args.rtl_input, args.entry_step, args.exit_step)
+        if args.rtl_input == "original":
+            source_top = _phase1_declared_module_name(_gather_phase1_plain_spec_text(project).text)
+            if source_top and args.top_name not in ("chip_top", source_top):
+                raise ValueError(f"ORIGINAL_TOP_CONFLICT: --top-name {args.top_name} conflicts with original {source_top}")
+            if source_top:
+                args.top_name = source_top
         _activate_runtime_program_tree(project)
     except Exception as exc:
         print(f"REFUSED: runtime program tree: {exc}", file=sys.stderr)
@@ -26960,7 +27067,7 @@ def main() -> int:
 
     _canonical = _canonical_admission.admit_span(
         project, "phase2", PROGRAMS_DIR, args.container,
-        {"top_name": args.top_name, "pdk": args.pdk,
+        {"top_name": args.top_name, "pdk": args.pdk, "rtl_input": args.rtl_input,
          "max_rtl_repair_retries": args.max_rtl_repair_retries,
          "skip_hardware": args.skip_hardware, "skip_phase3": args.skip_phase3,
          "skip_analog": args.skip_analog, "entry_step": args.entry_step,
@@ -26982,7 +27089,9 @@ def main() -> int:
         and _lint_scope.is_rtl_only_evidence(exit_step=args.exit_step))
     if (str(args.entry_step) == "2" and str(args.exit_step) == "2"
             and _lint_contract.selected_mode(project, "2") == "librelane"):
-        row = step_rtl_lint_tool(project, pdk_name=args.pdk, bounded_rtl=_bounded_rtl_lint)
+        row = step_rtl_lint_tool(
+            project, pdk_name=args.pdk, bounded_rtl=_bounded_rtl_lint,
+            top_name=args.top_name, container=args.container)
         raw_context = os.environ.get("VIBEIC_FLOW109_CONTEXT")
         if raw_context:
             row.extras["context_sha256"] = json.loads(Path(raw_context).read_text())["context_sha256"]
@@ -27046,7 +27155,7 @@ def main() -> int:
     # admission above already checked the DECLARED inputs of the entry span —
     # a narrower and more accurate question — so do not re-impose the step-1
     # precondition on a run that is not entering at step 1.
-    if L_count < 13 and not _entry_site:
+    if L_count < 13 and not _entry_site and args.rtl_input != "original":
         # ORGANIC-20260606-phase1-prompt-mode-nested-generated-docs (#424):
         # name the one-level-too-deep layout explicitly when present, so a
         # caller on a pre-fix phase1 artefact sees the structural cause
@@ -27077,14 +27186,20 @@ def main() -> int:
     _p1_note = ""
     try:
         import _phase1_producer_identity as _p1id_mod
-        _fr = _p1id_mod.assess(project, PROGRAMS_DIR)
+        _fr = (_p1id_mod.assess(project, PROGRAMS_DIR)
+               if args.rtl_input != "original" else {"state": _p1id_mod.REUSE})
         if _fr.get("state") != _p1id_mod.REUSE:
             _p1_note = (f"; STALE_GENERATED_DOCS: {_fr.get('state')} "
                         f"({_fr.get('reason')}): {_fr.get('why')}")
     except Exception:                                      # noqa: BLE001
         pass
-    plan.append(StepResult("phase1_precheck", "PASS", 0.0,
-                           f"{L_count}/13 L docs present{_p1_note}"))
+    if args.rtl_input == "original":
+        plan.append(StepResult("phase1_precheck", "NOT_APPLICABLE", 0.0,
+                               "bounded original-input RTL contract; D1 documents are not consumed",
+                               declared_by="--rtl-input original"))
+    else:
+        plan.append(StepResult("phase1_precheck", "PASS", 0.0,
+                               f"{L_count}/13 L docs present{_p1_note}"))
 
     # Step 1 — class detect (always)
     ic_class, evidence = detect_ic_class(project)
@@ -27246,7 +27361,9 @@ def main() -> int:
     elif _after_exit("rtl_validate"):
         plan.append(_exit_sentinel("rtl_lint_tool"))
     else:
-        _tool_lint = step_rtl_lint_tool(project, pdk_name=args.pdk, bounded_rtl=_bounded_rtl_lint)
+        _tool_lint = step_rtl_lint_tool(
+            project, pdk_name=args.pdk, bounded_rtl=_bounded_rtl_lint,
+            top_name=args.top_name, container=args.container)
         if _tool_lint is not None:
             plan.append(_tool_lint)
 
