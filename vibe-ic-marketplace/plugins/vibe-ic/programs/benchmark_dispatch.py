@@ -149,10 +149,19 @@ def _ordered_parallel_map(items: Iterable[T], worker: Callable[[T], R],
     if jobs <= 1 or len(rows) <= 1:
         return [worker(row) for row in rows]
     ordered: list[R | None] = [None] * len(rows)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
+    futures = {}
+    try:
         futures = {pool.submit(worker, row): i for i, row in enumerate(rows)}
         for future in concurrent.futures.as_completed(futures):
             ordered[futures[future]] = future.result()
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
     return [row for row in ordered if row is not None]
 
 
