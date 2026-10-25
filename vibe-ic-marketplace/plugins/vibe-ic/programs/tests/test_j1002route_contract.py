@@ -13,6 +13,7 @@ sys.path.insert(0, str(PROGRAMS))
 import route_decision as rd  # noqa: E402
 import task_nature_route as tnr  # noqa: E402
 import benchmark_dispatch as bd  # noqa: E402
+import benchmark_io_adapter as bio  # noqa: E402
 
 
 def _route(prompt: str, *, nature: str = "spec_generation",
@@ -77,6 +78,65 @@ def test_semantic_payload_is_invariant_under_opaque_coordinator_identity():
     r2 = _route(prompt, source="a" * 64,
                 context={"problem_id": "p-2", "project_path": "/tmp/two"})
     assert r1 == r2
+
+
+def _staged_route_input(tmp_path, context=None):
+    project = tmp_path / "run" / "projects" / "neutral_input"
+    prompt = "Complete the supplied module without renaming its interface.\n"
+    staged = bio.stage("cvdp", {
+        "id": "neutral_input",
+        "record": {"input": {"prompt": prompt, "context": context or {}}},
+    }, project)
+    proposal = tnr.route_task(prompt, rtl_paths=list(context or {}))
+    return project, staged, proposal
+
+
+def test_issued_route_payload_preserves_exact_supplied_context(tmp_path):
+    context = {
+        "rtl/neutral.sv": "// supplied λ\r\nmodule neutral(input a, output b);\r\nendmodule\r\n",
+        "notes/interface.md": "Keep the declared interface.\n\n  Preserve spacing.\n",
+    }
+    project, staged, proposal = _staged_route_input(tmp_path, context)
+    task = bd._make_ai_route_task(
+        "neutral_input", project, staged, proposal, tmp_path / "run", "cvdp",
+        benchmark="opaque-suite", dataset_path=tmp_path / "opaque-dataset")
+    payload = task["semantic_payload"]
+    assert payload["context"]["supplied_context"] == context
+    assert payload["prompt"] == (project / "input/phase1_prompt.md").read_text()
+    assert all(opaque not in json.dumps(payload) for opaque in
+               ("opaque-suite", "opaque-dataset", str(project)))
+
+
+@pytest.mark.parametrize("damage", ["bytes", "manifest", "prompt"])
+def test_issued_route_rejects_changed_original_input(tmp_path, damage):
+    project, staged, proposal = _staged_route_input(
+        tmp_path, {"neutral.sv": "module neutral; endmodule\n"})
+    if damage == "bytes":
+        (project / "input/public_original/files/neutral.sv").write_text("changed\n")
+    elif damage == "manifest":
+        staged["public_original_input"] = dict(staged["public_original_input"],
+                                                source_sha256="0" * 64)
+    else:
+        (project / "input/phase1_prompt.md").write_text("A changed request.\n")
+    with pytest.raises(ValueError, match="PUBLIC_INPUT_HANDOFF_INVALID"):
+        bd._make_ai_route_task("neutral_input", project, staged, proposal,
+                               tmp_path / "run", "cvdp")
+
+
+def test_prompt_only_issued_route_keeps_existing_payload_bytes(tmp_path):
+    project, staged, proposal = _staged_route_input(tmp_path)
+    prompt = (project / "input/phase1_prompt.md").read_text()
+    previous_payload = tnr.semantic_routing_payload(prompt, context={
+        "program_proposal": {
+            "nature": proposal.get("nature"),
+            "entry_nature": proposal.get("entry_nature"),
+            "source": proposal.get("source"),
+            "needs_ai_parse": proposal.get("needs_ai_parse"),
+        }})
+    task = bd._make_ai_route_task("neutral_input", project, staged, proposal,
+                                  tmp_path / "run", "cvdp")
+    assert json.dumps(task["semantic_payload"], sort_keys=True).encode() == \
+        json.dumps(previous_payload, sort_keys=True).encode()
 
 
 @pytest.mark.parametrize(

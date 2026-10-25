@@ -5960,18 +5960,9 @@ def _publish_current_receipt(project: Path, kind: str, value: dict,
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def _activate_route_d1(project: Path, task: dict, route_receipt: dict,
-                       runner: Path, runner_budget,
-                       *, run_scope: str | None = None,
-                       delivery_route: str = "ip") -> tuple[dict, dict, dict]:
-    """Run/consume D1 and return (frontdoor, pending, activation).
-
-    D1 is a two-stage admission: the pending record is visible before the
-    canonical D1-only runner, and activation is published only after the
-    runner emitted current L-doc provenance. A runner refusal or missing
-    provenance therefore cannot unlock any later step.
-    """
-    import emit_attestation as emit_attestation          # noqa: PLC0415
+def _prepare_route_d1(project: Path, task: dict, route_receipt: dict,
+                      *, run_scope: str) -> dict:
+    """Publish the existing source-authorized pending state, without a verdict."""
     import route_decision as rd                            # noqa: PLC0415
 
     project = Path(project).resolve()
@@ -6000,6 +5991,24 @@ def _activate_route_d1(project: Path, task: dict, route_receipt: dict,
         step="D1", pending=pending, activation=None,
         route_receipt=route_receipt, task_sha256=task_sha,
         source_sha256=source_sha)
+    _require_route_admission(run_p, task, route_receipt, require_d1=False)
+    return pending
+
+
+def _activate_route_d1(project: Path, task: dict, route_receipt: dict,
+                       runner: Path, runner_budget,
+                       *, run_scope: str | None = None,
+                       delivery_route: str = "ip") -> tuple[dict, dict, dict]:
+    """Qualify full D1 workflows after publishing source-authorized pending."""
+    import emit_attestation as emit_attestation          # noqa: PLC0415
+    import route_decision as rd                          # noqa: PLC0415
+
+    project = Path(project).resolve()
+    run_scope = str(run_scope or uuid.uuid4().hex)
+    pending = _prepare_route_d1(project, task, route_receipt, run_scope=run_scope)
+    source_sha = route_receipt["source_sha256"]
+    task_sha = task["task_sha256"]
+    run_p = project.parent.parent
     ldoc_root = project / "phase1" / "generated_docs"
     ldoc_handle = _sha256_text(str(ldoc_root.resolve()))
     frontdoor = _ensure_phase1_frontdoor(
@@ -6452,20 +6461,30 @@ def _make_ai_route_task(problem_id: str, project: Path, staged: dict,
     """Issue an input-only route question before any design runner executes."""
     import task_nature_route as tnr                       # noqa: PLC0415
     import route_decision as rd                            # noqa: PLC0415
+    import benchmark_io_adapter as bio                  # noqa: PLC0415
     project, run_p = Path(project).resolve(), Path(run_p).resolve()
     prompt = project / "input" / "phase1_prompt.md"
     prompt_sha = _sha256_text(prompt.read_text(errors="replace"))
     safe = _safe_problem_id(str(problem_id))
     prompt_text = prompt.read_text(errors="replace")
     prompt_delivery = tnr.prompt_delivery_requirements(prompt_text)
+    design_context = {"program_proposal": {
+        "nature": proposal.get("nature"),
+        "entry_nature": proposal.get("entry_nature"),
+        "source": proposal.get("source"),
+        "needs_ai_parse": proposal.get("needs_ai_parse"),
+    }}
+    public_input = bio.public_original_input(
+        project, problem_id, prompt_sha, expected=staged["public_original_input"])
+    if public_input.get("status") == "PRESENT":
+        # Carry the supplied design input alongside the prompt, without
+        # leaking coordinator paths or changing prompt-only task identities.
+        original_root = project / "input" / "public_original" / "files"
+        design_context["supplied_context"] = {
+            row["relative_path"]: (original_root / row["relative_path"])
+            .read_bytes().decode("utf-8") for row in public_input["files"]}
     semantic_payload = tnr.semantic_routing_payload(
-        prompt_text,
-        context={"program_proposal": {
-            "nature": proposal.get("nature"),
-            "entry_nature": proposal.get("entry_nature"),
-            "source": proposal.get("source"),
-            "needs_ai_parse": proposal.get("needs_ai_parse"),
-        }})
+        prompt_text, context=design_context)
     response_path = str((run_p / "ai_routes" / safe /
                          f"{prompt_sha}.json").resolve())
     coordinator_binding = rd.build_coordinator_binding(
