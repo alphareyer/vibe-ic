@@ -26,7 +26,7 @@ import mixed_signal_m3_run as m3
 SCHEMA = "vibeic.flow109.mixed-prelayout.v1"
 INPUT = "input/flow109/M02.json"
 NATIVE_CONTRACT = "input/mixed_signal/native.json"
-REQUIRED_PREDECESSORS = ("M01", "A07", "D09", "D13")
+REQUIRED_PREDECESSORS = ("M01",)
 
 
 def _sha(path):
