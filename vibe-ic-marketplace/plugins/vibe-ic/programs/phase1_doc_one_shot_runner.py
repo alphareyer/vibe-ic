@@ -51454,7 +51454,11 @@ def _v647_drop_redundant_bit_scalars(pins):
 
     Drops `<base><digits>` iff (a) a sibling named exactly `<base>` exists with
     width>1 (a packed bus), AND (b) the scalar is itself a bit (width None or 1)
-    — a genuine independent port carrying its own multi-bit width is KEPT.
+    AND (c) the row has no independent declaration provenance. A structured
+    port declaration with a functional direction is authoritative even when
+    its scalar name resembles a bus bit. Keep its rtl_name/direction intact;
+    case or direction alone does not rescue an unprovenanced expansion.
+    A genuine independent port carrying its own multi-bit width is also KEPT.
     chip-AGNOSTIC: pure `<base><digits>` name shape + packed-parent width check,
     no chip/SKU literal."""
     if not isinstance(pins, list):
@@ -51471,6 +51475,11 @@ def _v647_drop_redundant_bit_scalars(pins):
         w = p.get("width")
         return w is None or w == 1
 
+    def _is_declared_port(p):
+        direction = str(p.get("mode") or p.get("direction") or p.get("dir") or "").strip().lower()
+        return (direction in {"input", "output", "inout"}
+                and _v2060_record_declares_a_port_table(p))
+
     packed_bases = {
         str(p.get("name", "")).lower()
         for p in pins
@@ -51484,7 +51493,7 @@ def _v647_drop_redundant_bit_scalars(pins):
         if isinstance(p, dict) and p.get("name"):
             m = _RE_V647_BIT_SCALAR.match(str(p["name"]))
             if (m and m.group("base").lower() in packed_bases
-                    and _is_bit_scalar(p)):
+                    and _is_bit_scalar(p) and not _is_declared_port(p)):
                 dropped += 1
                 continue   # phantom per-bit scalar of an existing packed bus
         out.append(p)

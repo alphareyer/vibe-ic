@@ -21,6 +21,7 @@ chip-AGNOSTIC: pure `<base><digits>` name shape + packed-parent width check; no
 chip/SKU literal.
 """
 import sys
+import json
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,60 @@ def test_keeps_packed_bus_and_independent_ports_NOLEAK():
 def test_no_packed_bus_is_noop():
     pins = [{"name": "a", "width": 1}, {"name": "a3"}]
     assert R._v647_drop_redundant_bit_scalars(pins) == pins
+
+
+@pytest.mark.parametrize("form", ["bullet", "header"])
+def test_native_declared_scalar_ports_survive_packed_prefix(tmp_path, form):
+    source = (
+        "Module Name: SignalUnit\n\n"
+        "- input lane (6 bits)\n"
+        "- output lane1 (1 bit)\n"
+        "- output LANE3 (1 bit)\n"
+        "- input lane4 (1 bit)\n"
+        if form == "bullet" else
+        "module SignalUnit (input [5:0] lane, output lane1, output LANE3, input lane4);\n"
+    )
+    project = tmp_path / "declared"
+    doc = project / "input/docs/interface.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(source)
+    extracted = {doc.name: source}
+    l1 = json.loads(R.gen_l1_datasheet(project, extracted).path.read_text())
+    public = {p.get("rtl_name") or p["name"]: p for p in l1["pin_table"]}
+    expected = {"lane": "input", "lane1": "output", "LANE3": "output", "lane4": "input"}
+    assert set(public) == set(expected)
+    assert all(R._v2060_record_declares_a_port_table(p) for p in public.values())
+    l9 = json.loads(R.gen_l9_integration_spec(project, extracted, {}).path.read_text())
+    for key in ("ports", "top_ports", "top_module_pins"):
+        actual = {p["name"]: p["direction"] for p in l9[key]}
+        assert actual == expected
+    assert public["lane"]["width"] == 6
+
+
+def test_case_and_direction_without_declaration_do_not_save_phantoms():
+    pins = [
+        {"name": "lane", "width": 6, "mode": "input", "rtl_name": "lane"},
+        {"name": "lane1", "width": 1, "mode": "output", "rtl_name": "LANE1",
+         "extraction_strategy": "pin_table_keyword_scan"},
+        {"name": "lane3", "width": 1, "mode": "input", "rtl_name": "lane3"},
+    ]
+    assert R._v647_drop_redundant_bit_scalars(pins) == pins[:1]
+
+
+def test_existing_neutral_rtl_interface_keeps_its_declared_roster(tmp_path):
+    from programs.tests._hostpaths import require_repo
+    source = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+                          "tests", "fixtures", "iface_table_roles", "neutral_reg.v")
+    project = tmp_path / "artifact"
+    doc = project / "input/docs/interface.sv"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(source.read_text())
+    extracted = {doc.name: doc.read_text()}
+    l1 = json.loads(R.gen_l1_datasheet(project, extracted).path.read_text())
+    l9 = json.loads(R.gen_l9_integration_spec(project, extracted, {}).path.read_text())
+    original = {p.get("rtl_name") or p["name"]: p.get("direction") or p.get("mode") for p in l1["pin_table"]}
+    assert {p["name"]: p["direction"] for p in l9["top_ports"]} == original
+    assert {"address", "write_data", "read_data"} <= set(original)
 
 
 # ── (2) the acceptance: full phase1 → exactly one io_in, zero scalars ─────────
