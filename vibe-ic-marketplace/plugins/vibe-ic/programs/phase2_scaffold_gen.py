@@ -289,6 +289,92 @@ def _record_declared_width(entry: dict, name: str,
         into[key] = w.strip()
 
 
+def _consumer_parametric_width(entry: dict, parameters: object,
+                               module_owner: object
+                               ) -> tuple[dict | None, str | None]:
+    """Validate producer-owned ``width_resolution`` for the top emitter.
+
+    The Phase-1 producer deliberately keeps the default numeric width in the
+    ordinary ``width`` cell and moves the source range into auditable nested
+    provenance.  Numeric-only scaffold consumers may continue to use that
+    default.  The module emitter may restore the symbolic range only when the
+    provenance binds, case-sensitively, to exactly one parameter in this same
+    document and independently recomputes the published numeric width.
+
+    ``(None, None)`` means no nested declaration was supplied.  A non-empty
+    reason means one was supplied but is not trustworthy, and callers must
+    refuse rather than freeze the default width into the interface.
+    """
+    if not isinstance(entry, dict) or "width_resolution" not in entry:
+        return None, None
+    resolution = entry.get("width_resolution")
+    if not isinstance(resolution, dict):
+        return None, "width_resolution is not an object"
+    if resolution.get("scope") != "same_document_parameters":
+        return None, "width_resolution scope is not same_document_parameters"
+    symbolic = resolution.get("width_symbolic")
+    identifier = resolution.get("identifier")
+    if not isinstance(symbolic, str) or not symbolic.strip():
+        return None, "width_resolution has no symbolic range"
+    if not isinstance(identifier, str) or not re.fullmatch(
+            r"[A-Za-z_]\w*", identifier):
+        return None, "width_resolution has no legal identifier"
+    if not isinstance(module_owner, str) or not re.fullmatch(
+            r"[A-Za-z_]\w*", module_owner):
+        return None, "the L9 top module cannot own a parameter"
+    if not isinstance(parameters, list):
+        return None, "L9 parameters is not a list"
+
+    # Verilog identifiers are case-sensitive.  Do not repeat the producer's
+    # historical case-folded join here: SIZE and size can denote two different
+    # declarations, and choosing either would be guessing.
+    matches = [row for row in parameters if isinstance(row, dict)
+               and row.get("name") == identifier]
+    if len(matches) != 1:
+        return None, (f"identifier {identifier!r} matches {len(matches)} "
+                      "same-document parameters exactly")
+    parameter = matches[0]
+    owner = parameter.get("module_owner")
+    if owner is not None and owner != module_owner:
+        return None, (f"parameter {identifier!r} is owned by {owner!r}, "
+                      f"not {module_owner!r}")
+    raw_default = parameter.get("default")
+    if isinstance(raw_default, bool) or not re.fullmatch(
+            r"[+-]?\d+", str(raw_default).strip()):
+        return None, f"parameter {identifier!r} has no decimal integer default"
+    default = int(str(raw_default).strip(), 10)
+    if resolution.get("parameter_default_int") != default:
+        return None, "width_resolution parameter default is stale"
+    if str(resolution.get("parameter_default")).strip() != str(raw_default).strip():
+        return None, "width_resolution parameter default spelling is stale"
+
+    from _specrtl_common import (WIDTH_UNKNOWN, _resolve_bracket_width,
+                                 declared_parametric_range)
+    owned = dict(parameter, module_owner=module_owner)
+    packed = declared_parametric_range(symbolic, [owned], module_owner)
+    if packed is None:
+        return None, "symbolic range is unsupported or not owned by the module"
+    recomputed = _resolve_bracket_width(packed, {identifier: default})
+    width = entry.get("width")
+    published = resolution.get("resolved_width")
+    if (isinstance(width, bool) or not isinstance(width, int) or width < 1
+            or isinstance(published, bool) or not isinstance(published, int)
+            or published < 1):
+        return None, "resolved width is not a positive integer"
+    if recomputed == WIDTH_UNKNOWN or recomputed != width or published != width:
+        return None, "symbolic range does not recompute the published width"
+    msb, lsb = entry.get("msb"), entry.get("lsb")
+    if (resolution.get("msb"), resolution.get("lsb")) != (msb, lsb):
+        return None, "width_resolution bounds are stale"
+    if (not isinstance(msb, int) or isinstance(msb, bool)
+            or not isinstance(lsb, int) or isinstance(lsb, bool)
+            or abs(msb - lsb) + 1 != width):
+        return None, "published bounds do not describe the published width"
+    return ({"range": packed, "symbolic": symbolic.strip(),
+             "identifier": identifier, "parameter": dict(parameter),
+             "default": default}, None)
+
+
 def unresolved_width_ports(signals: list[dict]) -> list[dict]:
     """Signals `derive_signals` refused to assign a width to."""
     return [s for s in signals
@@ -417,6 +503,8 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
     seen: set[str] = set()
     # name -> the width TEXT the layers state and this function cannot use.
     declared_unresolved: dict[str, str] = {}
+    parametric_bindings: dict[str, dict] = {}
+    resolution_refusals: dict[str, str] = {}
     # names whose width came from a range this function actually parsed, as
     # opposed to the 1-bit default. A port that got a real number from L17
     # is RESOLVED even if an L9 twin also carries an unusable string.
@@ -484,6 +572,18 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
             if not isinstance(port, dict):
                 continue
             name = port.get("name") or ""
+            clean_name = _sanitize_id(str(name))
+            binding, refusal = _consumer_parametric_width(
+                port, l9.get("parameters"), l9.get("top_module"))
+            if refusal is not None:
+                resolution_refusals[clean_name] = refusal
+            elif binding is not None:
+                old = parametric_bindings.get(clean_name)
+                if old is not None and old != binding:
+                    resolution_refusals[clean_name] = (
+                        "duplicate port views disagree on width_resolution")
+                else:
+                    parametric_bindings[clean_name] = binding
             direction = _normalize_dir(port.get("direction") or "input")
             # What the LAYER states, or the sentinel when it states nothing.
             # This used to be `port.get("width", 1)`, which supplied the
@@ -525,6 +625,19 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
     # unusable one would otherwise keep the 1-bit default and lose the fact
     # that a declaration exists which this function never managed to read.
     for s in signals:
+        refusal = resolution_refusals.get(s["name"])
+        if refusal is not None:
+            s["width"] = None
+            s["width_declared"] = "invalid width_resolution: " + refusal
+            continue
+        binding = parametric_bindings.get(s["name"])
+        if binding is not None:
+            # Keep the producer's numeric default for consumers whose scope
+            # cannot see DUT parameters (TB and wrappers), while carrying the
+            # exact owned declaration to the top-module emitter.
+            s["width_declared"] = binding["symbolic"]
+            s["width_parameter_binding"] = binding
+            continue
         text = declared_unresolved.get(s["name"])
         if text is None or s["name"] in resolved_from_layer:
             continue
@@ -645,18 +758,32 @@ def derive_clock_period_ns(l8: dict, *, default_ns: float = 10.0) -> tuple[float
 def emit_top_v(top: str, signals: list[dict], l1_ic_name: str,
                *, parameters: list[dict] | None = None) -> str:
     from _specrtl_common import declared_parametric_range
-    symbolic = {s['name']: declared_parametric_range(
-        s.get('width_declared'), parameters, top) for s in signals
-        if s.get('width') is None}
+    symbolic = {}
+    for signal in signals:
+        binding = signal.get("width_parameter_binding")
+        bound_parameters = parameters
+        if isinstance(binding, dict) and isinstance(binding.get("parameter"), dict):
+            bound_parameters = [dict(binding["parameter"], module_owner=top)]
+        if signal.get("width") is None or binding is not None:
+            symbolic[signal["name"]] = declared_parametric_range(
+                signal.get("width_declared"), bound_parameters, top)
     # Module emission alone can preserve owned unbound parameters. Numeric
     # consumers and callers without the declaration still use the old refusal.
     require_resolved_widths([s for s in signals if not symbolic.get(s['name'])],
                             f"{top}_top.v")
     header = f'module {top} ('
     if any(symbolic.values()):
+        header_parameters = list(parameters) if isinstance(parameters, list) else []
+        known = {p.get("name") for p in header_parameters if isinstance(p, dict)}
+        for signal in signals:
+            binding = signal.get("width_parameter_binding")
+            parameter = binding.get("parameter") if isinstance(binding, dict) else None
+            if isinstance(parameter, dict) and parameter.get("name") not in known:
+                header_parameters.append(parameter)
+                known.add(parameter.get("name"))
         declarations = [f"    parameter {p['name']}" +
                         (f" = {p['default']}" if p.get('default') is not None else '')
-                        for p in parameters]
+                        for p in header_parameters]
         header = f'module {top} #(\n' + ',\n'.join(declarations) + '\n) ('
     lines: list[str] = [
         "// Auto-generated by phase2_scaffold_gen.py — DO NOT EDIT THE PORT",

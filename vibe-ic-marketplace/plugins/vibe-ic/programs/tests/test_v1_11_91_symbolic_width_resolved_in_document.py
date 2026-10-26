@@ -78,7 +78,8 @@ def _l9(symbolic: str = "size-1:0", parameters=None) -> dict:
             "extraction_strategy": "rst_grid_interface_table",
             "width": _PROSE_WIDTH, "width_symbolic": symbolic,
             "description": "parallel multiplicand"}
-    return {"parameters": [dict(p) for p in
+    return {"top_module": "spm",
+            "parameters": [dict(p) for p in
                            (parameters if parameters is not None
                             else [_SIZE_PARAM])],
             "ports": [dict(port)], "top_ports": [dict(port)],
@@ -141,10 +142,12 @@ def test_the_consumer_then_derives_32_and_the_emitters_render():
     p1._v1_11_91_resolve_symbolic_port_widths_in_doc(doc)
     sig = _derive_x(doc)
     assert sig["width"] == 32
-    assert "width_declared" not in sig
+    assert sig["width_declared"] == "size-1:0"
 
     sigs = psg.derive_signals({}, doc)
-    assert "[31:0] x" in psg.emit_top_v("spm", sigs, "spm")
+    top = psg.emit_top_v("spm", sigs, "spm")
+    assert "parameter size = 32" in top
+    assert "[size-1:0] x" in top
     assert "[31:0] x" in psg.emit_tb_v("spm", sigs)
     assert "[31:0] x" in psg.emit_soc_wrap_v("spm", sigs, [])
     psg.emit_cocotb_test("spm", sigs, {}, [])
@@ -246,8 +249,9 @@ def test_the_refusal_assertions_would_catch_a_guessing_resolver(monkeypatch):
     `AttributeError`: absence, not disagreement. That proves the file is new,
     not that its refusal assertions discriminate. This substitutes a resolver
     that answers EVERY range with 32 — the guessing failure #404 is about —
-    and shows all seven refusal cases flip, so the assertions above are load
-    bearing rather than vacuous.
+    and shows the producer writes the guessed result.  The downstream
+    consumer must then refuse its fabricated identifier/provenance instead of
+    converting that write into an actionable parameter declaration.
     """
     def _guess(symbolic, parameters):
         if not isinstance(symbolic, str) or not symbolic.strip():
@@ -273,7 +277,9 @@ def test_the_refusal_assertions_would_catch_a_guessing_resolver(monkeypatch):
         assert p1._v1_11_91_resolve_symbolic_port_widths_in_doc(doc) == 3, case
         assert _x(doc)["width"] == 32, case
         assert "width_symbolic" not in _x(doc), case
-        assert _derive_x(doc)["width"] == 32, case
+        consumed = _derive_x(doc)
+        assert consumed["width"] is None, case
+        assert "invalid width_resolution" in consumed["width_declared"], case
 
 
 # ---------------------------------------------------------------------------
