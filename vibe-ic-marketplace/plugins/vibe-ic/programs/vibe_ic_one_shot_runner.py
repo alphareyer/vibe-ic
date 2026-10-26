@@ -2541,17 +2541,78 @@ def _resume_dependency_graph() -> Tuple[List[str], Dict[str, set]]:
     import _flow_yaml
     rows = _flow_yaml.load().get("steps") or []
     order = [str(row["id"]) for row in rows if isinstance(row, dict) and "id" in row]
+    declared = set(order)
     graph: Dict[str, set] = {sid: set() for sid in order}
     for row in rows:
         if not isinstance(row, dict) or "id" not in row:
             continue
         sid = str(row["id"])
         for dep in row.get("blocks_on") or []:
-            graph[sid].add(str(dep))
+            if str(dep) in declared:
+                graph[sid].add(str(dep))
         for item in row.get("required_inputs") or []:
-            if isinstance(item, dict) and item.get("from") is not None:
+            if (isinstance(item, dict) and item.get("from") is not None
+                    and str(item["from"]) in declared):
                 graph[sid].add(str(item["from"]))
     return order, graph
+
+
+def _validated_disproven_output(project: Path, item: Mapping[str, Any],
+                                 consumer: str, versions: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Validate an existing immutable failed-consumer receipt.
+
+    The receipt is an ordinary retained ``outputs.json`` attempt, not a new
+    evidence format.  It must be content-addressed, fail for the named
+    consumer, and bind one exact input to the current retained producer output.
+    """
+    sid = str(item.get("step_id") or "")
+    receipt_rel = item.get("receipt")
+    receipt_sha = item.get("receipt_sha256")
+    output_rel = item.get("output_path")
+    output_sha = item.get("output_sha256")
+    if not all(isinstance(value, str) and value for value in
+               (receipt_rel, receipt_sha, output_rel, output_sha)):
+        return None, f"step {sid} disproval lacks immutable receipt/output bindings"
+    receipt = (project / receipt_rel).resolve()
+    root = project.resolve()
+    allowed_roots = ((root / "steps").resolve(),
+                     (root / "reports/step_versions").resolve())
+    if (not receipt.is_relative_to(root) or receipt.name != "outputs.json"
+            or not any(receipt.is_relative_to(folder) for folder in allowed_roots)
+            or not receipt.is_file()):
+        return None, f"step {sid} disproval receipt is not a retained outputs.json"
+    raw = receipt.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != receipt_sha:
+        return None, f"step {sid} disproval receipt hash mismatch"
+    try:
+        record = json.loads(raw)
+    except (ValueError, TypeError):
+        return None, f"step {sid} disproval receipt is not valid JSON"
+    result = record.get("result") or {}
+    consumed = (result.get("canonical_consumer")
+                or result.get("canonical_step_result") or {})
+    consumed_status = consumed.get("verdict") or consumed.get("status")
+    if (str(record.get("id")) != consumer or record.get("status") != "FAIL"
+            or record.get("canonical_pass") is not False
+            or consumed_status != "FAIL" or not record.get("started_at")
+            or not record.get("finished_at") or record.get("capture_errors")):
+        return None, f"step {sid} disproval is not a bound failed consumer {consumer} receipt"
+    bound = (record.get("inputs") or {}).get(output_rel)
+    bound_sha = bound.get("sha256") if isinstance(bound, dict) else bound
+    if bound_sha != output_sha:
+        return None, f"step {sid} disproval consumer subject hash mismatch"
+    retained = versions.latest_pass(project, sid)
+    if not retained or not retained.get("canonical_pass"):
+        return None, f"step {sid} has no retained canonical PASS to invalidate"
+    outputs = {row.get("rel"): row.get("sha256")
+               for row in retained.get("outputs") or [] if isinstance(row, dict)}
+    live = (project / output_rel).resolve()
+    if (outputs.get(output_rel) != output_sha or not live.is_relative_to(root)
+            or not live.is_file()
+            or hashlib.sha256(live.read_bytes()).hexdigest() != output_sha):
+        return None, f"step {sid} disproval is stale or does not bind the retained output"
+    return (f"failed consumer {consumer} receipt {receipt_rel} "
+            f"sha256={receipt_sha} rejects {output_rel} sha256={output_sha}"), None
 
 
 def _minimal_resume_plan(project: Path, request: Mapping[str, Any]) -> Dict[str, Any]:
@@ -2639,10 +2700,11 @@ def _minimal_resume_plan(project: Path, request: Mapping[str, Any]) -> Dict[str,
         if not isinstance(item, dict) or str(item.get("step_id")) not in ancestors:
             continue
         sid = str(item.get("step_id"))
-        proof = str(item.get("evidence") or "").strip()
-        if not proof:
-            unresolved.append(f"step {sid} was declared wrong without evidence")
-        else:
+        proof, refusal = _validated_disproven_output(
+            project, item, consumer, versions)
+        if refusal:
+            unresolved.append(refusal)
+        elif proof:
             disproven[sid] = proof
 
     invalid = {}

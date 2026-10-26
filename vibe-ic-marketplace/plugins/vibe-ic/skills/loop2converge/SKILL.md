@@ -101,23 +101,36 @@ only on a plugin upgrade, a repaired read path, or a suspicion of stale evidence
   Unknown impact is neither PASS nor permission to restart an entire phase.
 - Use the existing canonical bounded entry and dependency records. Preserve timestamped
   prior outputs and historical verdicts; do not delete them to force freshness.
-- Execute only the declared continuation window. An explicit user-requested full rerun
-  is allowed and must be recorded as such.
+- Route every ordinary recovery through the canonical entry's
+  `--resume-request <json>` decision before launch. The request names the failed
+  `consumer_step`, whether that consumer is to be revalidated, and any byte-identical
+  relocation. The runner replaces a proposed range with the one exact existing entry
+  selected by retained hashes; `UNRESOLVED` launches nothing. Do not invoke a guessed
+  broad `--entry-step/--exit-step` window first and inspect it afterwards.
+- An explicit user-requested fresh/full rerun remains available: put the exact steps in
+  `explicit_rerun_steps` and record the owner's reason in the same request. This is the
+  only ordinary-continuation path allowed to bypass evidence-derived reuse.
 
-The canonical entry prints a `continuation_plan-<timestamp>.json` path before a
-bounded dispatch. Read its input/output byte differences before proposing the next
-window. It preserves historical verdicts and never expands the requested scope.
+Write the request under the project's own control tree, for example
+`reports/orchestrator/resume_request.json`, then call the normal canonical entry with
+`--resume-request` pointing to it. The canonical entry writes
+`minimal_resume_plan-<timestamp>.json` **before** dispatch and automatically forwards
+only its exact selected entry/exit. Read `status`, `execution_steps`, `reason`, reused
+checkpoints, and unknown impact from that program result; do not duplicate its graph
+walk in prose. The lower-level `continuation_plan-<timestamp>.json` remains the
+read-only byte inventory for the selected bounded dispatch.
+
 `unchanged` means retained bytes match, not that a demonstrated producer defect is
-cleared. Missing paths, changed shared reports and unknown provenance require owner
-inspection; this inventory does not automatically choose upstream reruns. Use the
-existing `step_output_collector.continuation_evidence(project, steps)` for the same
-read-only inventory before launching a proposed window.
+cleared. To invalidate unchanged producer output, `disproven_outputs` must cite an
+existing retained failed consumer `outputs.json`, its SHA-256, the exact consumed
+output path and that retained output's SHA-256. Free-form assertions, stale receipts,
+PASS receipts and subject-hash mismatches resolve to `UNRESOLVED` and launch nothing.
 
-Example: an SDC reader repair requires comparing the deck actually consumed by the
-failed signoff step with the current canonical deck. It does not by itself justify
-repeating synthesis, floorplan, or placement. Program enforcement of this continuation
-selection is tracked separately in #3480; this guidance is not a claim that enforcement
-has already shipped.
+Example: an SDC reader repair names the affected reader as `consumer_step`, supplies
+the old/new paths in `equivalent_relocations`, and sets `revalidate_consumer: true`.
+The program independently compares the bytes and launches that reader's exact existing
+entry; it does not repeat synthesis, floorplan, or placement merely because the path or
+plugin version changed.
 
 **Long runs must survive your turn.** `setsid nohup … &` with a done-file, then poll.
 A turn that ends takes the run's reader with it and the deliverable is never written.

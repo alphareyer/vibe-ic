@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
+import datetime
 from pathlib import Path
 
 
-PROGRAMS = Path(__file__).resolve().parents[1]
+PROGRAMS = Path(os.environ.get(
+    "VIBEIC_TEST_PROGRAMS", Path(__file__).resolve().parents[1])).resolve()
 sys.path.insert(0, str(PROGRAMS))
 
 import phase3_one_shot_runner as phase3  # noqa: E402
@@ -62,6 +65,29 @@ def _install_graph(monkeypatch):
                         lambda: (ORDER, GRAPH))
 
 
+def _failed_consumer_receipt(project: Path, producer="16", consumer="32"):
+    output_rel = f"outputs/{producer}.txt"
+    output_sha = _sha((project / output_rel).read_bytes())
+    path = project / f"steps/phase/stage/{consumer}_failed/outputs.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "id": consumer, "status": "FAIL", "canonical_pass": False,
+        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "capture_errors": [],
+        "inputs": {output_rel: {"sha256": output_sha}}, "outputs": [],
+        "result": {"canonical_consumer": {"verdict": "FAIL"}},
+    }
+    path.write_text(json.dumps(record))
+    return {
+        "step_id": producer,
+        "receipt": str(path.relative_to(project)),
+        "receipt_sha256": _sha(path.read_bytes()),
+        "output_path": output_rel,
+        "output_sha256": output_sha,
+    }
+
+
 def test_same_sdc_bytes_path_repair_launches_only_reader(tmp_path, monkeypatch):
     _install_graph(monkeypatch)
     _checkpoint_tree(tmp_path)
@@ -111,14 +137,79 @@ def test_missing_output_selects_owner_and_defers_dependents(tmp_path, monkeypatc
     assert "15" in plan["reused_checkpoints"]
 
 
-def test_proven_bad_output_overrides_unchanged_hashes(tmp_path, monkeypatch):
+def test_free_form_disproval_cannot_schedule_producer(tmp_path, monkeypatch):
     _install_graph(monkeypatch)
     _checkpoint_tree(tmp_path)
     plan = front._minimal_resume_plan(tmp_path, _request(
         disproven_outputs=[{"step_id": "16",
                             "evidence": "consumer receipt rejects clock topology"}]))
+    assert plan["status"] == "UNRESOLVED"
+    assert plan["execution_steps"] == []
+
+
+def test_hash_bound_failed_consumer_receipt_invalidates_unchanged_output(
+        tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _checkpoint_tree(tmp_path)
+    proof = _failed_consumer_receipt(tmp_path)
+    plan = front._minimal_resume_plan(
+        tmp_path, _request(disproven_outputs=[proof]))
     assert plan["execution_steps"] == ["16"]
-    assert "disproven" in plan["reason"]
+    assert "failed consumer 32 receipt" in plan["reason"]
+
+
+def test_mismatched_consumer_receipt_binding_is_unresolved(tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _checkpoint_tree(tmp_path)
+    proof = _failed_consumer_receipt(tmp_path)
+    proof["output_sha256"] = "0" * 64
+    plan = front._minimal_resume_plan(
+        tmp_path, _request(disproven_outputs=[proof]))
+    assert plan["status"] == "UNRESOLVED"
+    assert plan["execution_steps"] == []
+    assert any("subject hash mismatch" in item for item in plan["unknown_impact"])
+
+
+def test_forged_consumer_receipt_hash_is_unresolved(tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _checkpoint_tree(tmp_path)
+    proof = _failed_consumer_receipt(tmp_path)
+    proof["receipt_sha256"] = "f" * 64
+    plan = front._minimal_resume_plan(
+        tmp_path, _request(disproven_outputs=[proof]))
+    assert plan["status"] == "UNRESOLVED"
+    assert plan["execution_steps"] == []
+    assert any("receipt hash mismatch" in item for item in plan["unknown_impact"])
+
+
+def test_nonfailed_consumer_receipt_is_unresolved(tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _checkpoint_tree(tmp_path)
+    proof = _failed_consumer_receipt(tmp_path)
+    receipt = tmp_path / proof["receipt"]
+    record = json.loads(receipt.read_text())
+    record["status"] = "PASS"
+    record["canonical_pass"] = True
+    receipt.write_text(json.dumps(record))
+    proof["receipt_sha256"] = _sha(receipt.read_bytes())
+    plan = front._minimal_resume_plan(
+        tmp_path, _request(disproven_outputs=[proof]))
+    assert plan["status"] == "UNRESOLVED"
+    assert plan["execution_steps"] == []
+    assert any("not a bound failed consumer" in item
+               for item in plan["unknown_impact"])
+
+
+def test_stale_consumer_receipt_binding_is_unresolved(tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _checkpoint_tree(tmp_path)
+    proof = _failed_consumer_receipt(tmp_path)
+    (tmp_path / proof["output_path"]).write_text("later output bytes")
+    plan = front._minimal_resume_plan(
+        tmp_path, _request(disproven_outputs=[proof]))
+    assert plan["status"] == "UNRESOLVED"
+    assert plan["execution_steps"] == []
+    assert any("stale" in item for item in plan["unknown_impact"])
 
 
 def test_insufficient_provenance_is_unresolved_without_launch(tmp_path, monkeypatch):
@@ -165,3 +256,79 @@ def test_reverse_old_broad_window_would_launch_forbidden_upstream(tmp_path, monk
     old_broad_decision = ORDER[ORDER.index("7"):ORDER.index("18") + 1]
     assert {"9", "15", "16", "17", "18"} <= set(old_broad_decision)
     assert not ({"9", "15", "16", "17", "18"} & set(plan["execution_steps"]))
+
+
+def test_actual_yaml_graph_excludes_external_pseudo_sources(tmp_path, monkeypatch):
+    import step_output_collector as collector
+    order, graph = front._resume_dependency_graph()
+    assert "external" not in graph
+    assert all("external" not in deps for deps in graph.values())
+    monkeypatch.setattr(collector, "continuation_evidence", lambda *_: {
+        "checkpoints": [
+            {"step_id": sid, "observation": "unchanged", "differences": []}
+            for sid in order
+        ]
+    })
+    plan = front._minimal_resume_plan(
+        tmp_path, _request("8", revalidate_consumer=True,
+                           reason="same-byte reader repair"))
+    assert plan["status"] == "READY"
+    assert plan["execution_steps"] == ["8"]
+
+
+def test_actual_frontdoor_resume_request_bounds_existing_entry(
+        tmp_path, monkeypatch):
+    import step_output_collector as collector
+    from _route_fixture import stage_owner_route
+    order, _ = front._resume_dependency_graph()
+    monkeypatch.setattr(collector, "continuation_evidence", lambda *_: {
+        "requested_steps": order,
+        "automatically_added_steps": [],
+        "unknown_impact": [],
+        "checkpoints": [
+            {"step_id": sid, "observation": "unchanged", "differences": []}
+            for sid in order
+        ],
+        "retained_unchanged_steps": order,
+    })
+    request = tmp_path / "reports/orchestrator/resume_request.json"
+    request.parent.mkdir(parents=True)
+    request.write_text(json.dumps(_request(
+        "17", revalidate_consumer=True, reason="ordinary placement consumer recovery")))
+    stage_owner_route(tmp_path, "ic")
+    monkeypatch.setattr(front, "_capture_container_image", lambda *_: {})
+
+    class ReachedExistingEntry(Exception):
+        pass
+
+    def dispatch(label, runner, argv, **kwargs):
+        assert Path(runner).name == "phase3_one_shot_runner.py"
+        assert argv[argv.index("--entry-step") + 1] == "17"
+        assert argv[argv.index("--exit-step") + 1] == "17"
+        plans = list((tmp_path / "reports/orchestrator").glob(
+            "minimal_resume_plan-*.json"))
+        assert len(plans) == 1
+        assert json.loads(plans[0].read_text())["execution_steps"] == ["17"]
+        raise ReachedExistingEntry
+
+    monkeypatch.setattr(front, "_run_phase", dispatch)
+    monkeypatch.setattr(sys, "argv", [
+        "runner", str(tmp_path), "--route", "ic", "--execution-mode", "default",
+        "--resume-request", str(request), "--container", "", "--no-dashboard",
+    ])
+    try:
+        front.main()
+    except ReachedExistingEntry:
+        pass
+    else:
+        raise AssertionError("ordinary resume did not reach the existing exact entry")
+
+
+def test_loop2converge_ordinary_guidance_uses_same_program_decision():
+    text = (PROGRAMS.parent / "skills/loop2converge/SKILL.md").read_text()
+    section = text.split("### 1.2 — Establish the smallest necessary continuation", 1)[1]
+    section = section.split("## 2 —", 1)[0]
+    assert "Route every ordinary recovery" in section
+    assert "--resume-request <json>" in section
+    assert "minimal_resume_plan-<timestamp>.json" in section
+    assert "Program enforcement of this continuation selection is tracked separately" not in section
