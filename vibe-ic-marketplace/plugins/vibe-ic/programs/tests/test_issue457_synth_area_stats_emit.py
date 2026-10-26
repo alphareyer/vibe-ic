@@ -303,6 +303,19 @@ def test_unpriced_cells_count_toward_mapped_total_and_consumer_accepts(tmp_path)
     assert accepted["cell_count"] == 3
 
 
+def test_missing_unpriced_netlist_instance_refutes_total_count(tmp_path):
+    """R2 must cover the unpriced portion promoted into ``cell_count``."""
+    missing_unpriced = UNPRICED_NETLIST.replace(
+        "  generic_unpriced_cell u0 (.A(a), .Y(y));\n", "")
+    project, _log, _ = _write(tmp_path, UNPRICED_LOG, missing_unpriced)
+    r = _run(project)
+    assert r.returncode == 2, (
+        "producer emitted a total of 3 after corroborating only the two "
+        f"priced instances: stdout={r.stdout!r} stderr={r.stderr!r}")
+    assert "REFUSED" in r.stderr
+    assert not (project / "phase2/stage2/synth/stats.json").exists()
+
+
 def test_zero_cell_area_block_remains_a_refusal(tmp_path):
     log = ("=== empty_design ===\n\n"
            "        0        - cells\n\n"

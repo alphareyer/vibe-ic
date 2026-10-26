@@ -330,10 +330,13 @@ def corroborate(block: Block, netlist_path: Optional[Path]) -> Dict[str, Any]:
                 "block's counts include every instance — the two are not "
                 "comparable")
         else:
-            per, total = count_netlist_cells(ntext, [r[2] for r in block.rows])
+            expected = ([(n, cell) for n, _area, cell in block.rows]
+                        + block.unpriced)
+            per, total = count_netlist_cells(
+                ntext, [cell for _n, cell in expected])
             mism = {c: {"block": n, "netlist": per[c]}
-                    for n, _a, c in block.rows if per[c] != n}
-            r2["block_cell_count"] = block.row_cell_sum
+                    for n, c in expected if per[c] != n}
+            r2["block_cell_count"] = block.tabulated_cell_sum
             r2["netlist_instantiations"] = total
             r2["status"] = "AGREE" if not mism else "REFUTED"
             if mism:
