@@ -83,6 +83,32 @@ def test_soc_wrapper_without_reset_does_not_fabricate_native_reset():
     assert ".rst(" not in wrapper
 
 
+def test_soc_wrapper_refuses_unknown_reset_polarity_before_write(tmp_path):
+    cases = [
+        ("reset", "polarity unspecified"),
+        ("reset_x", ""),
+        ("rst_n", "active-high reset"),
+    ]
+    for reset_name, comment in cases:
+        signals = [
+            {"name": "clk", "direction": "input", "width": 1,
+             "comment": ""},
+            {"name": reset_name, "direction": "input", "width": 1,
+             "comment": comment},
+        ]
+        target = tmp_path / f"{reset_name}_soc_wrap.v"
+        try:
+            text = scaf.emit_soc_wrap_v("unknown", signals, [])
+        except scaf.UnknownResetPolarity as exc:
+            observed = "REFUSED_UNKNOWN_RESET_POLARITY"
+            assert exc.port == reset_name
+        else:
+            observed = _connection(text, reset_name)
+            target.write_text(text)
+        assert observed == "REFUSED_UNKNOWN_RESET_POLARITY"
+        assert not target.exists()
+
+
 def test_real_producer_active_high_reset_is_adapted_to_apb_presetn():
     raw = os.environ.get("ISSUE3473_PROJECT")
     if not raw:

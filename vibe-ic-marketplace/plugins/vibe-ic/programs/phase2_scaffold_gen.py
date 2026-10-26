@@ -254,6 +254,17 @@ class UnresolvedPortWidth(RuntimeError):
             % (artefact, len(ports), detail))
 
 
+class UnknownResetPolarity(RuntimeError):
+    """A reset port exists, but its polarity is not safe to infer."""
+
+    def __init__(self, artefact: str, port: str) -> None:
+        self.artefact = artefact
+        self.port = port
+        super().__init__(
+            f"{artefact}: reset port {port!r} has unknown, ambiguous, or "
+            "contradictory polarity; refusing to emit reset wiring")
+
+
 # Distinguishes "the layer stated no width" from every value a layer CAN
 # state — including the `1` that `dict.get`'s default used to supply, which
 # was then indistinguishable from a layer that really said 1.
@@ -1277,6 +1288,58 @@ def _is_active_low_reset_name(n: str) -> bool:
     return n.endswith("_n") or n.endswith("_b") or n.endswith("_l")
 
 
+def _reset_polarity(signal: dict) -> bool | None:
+    """Return True for known-low, False for known-high, else None.
+
+    The exact active-high names below preserve the existing named contract;
+    unlike the former fallback, an arbitrary reset-like name is not promoted
+    to active-high.  Explicit prose/metadata may establish a polarity, while
+    an unknown marker or contradictory sources always fail closed.
+    """
+    name = str(signal.get("name") or "").strip().lower()
+    declared: set[bool] = set()
+    explicitly_unknown = False
+
+    if "active_low" in signal:
+        value = signal.get("active_low")
+        if isinstance(value, bool):
+            declared.add(value)
+        else:
+            explicitly_unknown = True
+
+    for key in ("polarity", "reset_polarity"):
+        if key not in signal:
+            continue
+        value = str(signal.get(key) or "").strip().lower().replace("_", "-")
+        if value in ("active-low", "low"):
+            declared.add(True)
+        elif value in ("active-high", "high"):
+            declared.add(False)
+        else:
+            explicitly_unknown = True
+
+    comment = str(signal.get("comment") or "").lower()
+    normalized = re.sub(r"[-_]", " ", comment)
+    if re.search(r"\bactive\s+low\b", normalized):
+        declared.add(True)
+    if re.search(r"\bactive\s+high\b", normalized):
+        declared.add(False)
+    if re.search(r"\b(?:polarity\s+)?(?:unknown|unspecified|ambiguous|tbd)\b",
+                 normalized):
+        explicitly_unknown = True
+
+    if _is_active_low_reset_name(name):
+        declared.add(True)
+    elif name in ("rst", "reset", "reset_in"):
+        # These are the exact active-high forms already covered by the
+        # scaffold contract.  There is deliberately no generic else=False.
+        declared.add(False)
+
+    if explicitly_unknown or len(declared) != 1:
+        return None
+    return declared.pop()
+
+
 def _detect_clk_port(signals: list[dict]) -> str | None:
     """Return the name of the most clock-like INPUT port, else None."""
     for s in signals:
@@ -1287,15 +1350,18 @@ def _detect_clk_port(signals: list[dict]) -> str | None:
     return None
 
 
-def _detect_rst_port(signals: list[dict]) -> tuple[str | None, bool]:
-    """Return (reset_input_name, active_low). active_low True only for
-    canonical active-low forms (rst_n / resetn / aresetn / _n / _b / _l …)."""
+def _detect_rst_port(signals: list[dict]) -> tuple[str | None, bool | None]:
+    """Return ``(reset_input_name, active_low)`` with explicit uncertainty.
+
+    ``True`` and ``False`` mean known active-low and active-high respectively;
+    ``None`` means absent (when the name is also None) or polarity unknown.
+    """
     for s in signals:
         if s["direction"] != "input":
             continue
         if _is_reset_name(s["name"]):
-            return s["name"], _is_active_low_reset_name(s["name"])
-    return None, False
+            return s["name"], _reset_polarity(s)
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -1315,6 +1381,8 @@ def emit_cocotb_test(top: str, signals: list[dict], l8: dict,
     period_ns, period_note = derive_clock_period_ns(l8)
     clk = _detect_clk_port(signals)
     rst, active_low = _detect_rst_port(signals)
+    if rst is not None and active_low is None:
+        raise UnknownResetPolarity(f"{top}_cocotb_test.py", rst)
 
     lines: list[str] = [
         '"""Auto-generated cocotb test skeleton for ' + top + '.',
@@ -1445,6 +1513,8 @@ def emit_soc_wrap_v(top: str, signals: list[dict], regs: list[dict]) -> str:
     # Native (non-clock/reset) ports we re-expose at the wrapper boundary.
     clk = _detect_clk_port(signals)
     rst, rst_active_low = _detect_rst_port(signals)
+    if rst is not None and rst_active_low is None:
+        raise UnknownResetPolarity(f"{top}_soc_wrap.v", rst)
     native = [s for s in signals
               if s["name"] != clk and s["name"] != rst]
 
