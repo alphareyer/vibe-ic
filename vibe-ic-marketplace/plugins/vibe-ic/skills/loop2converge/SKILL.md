@@ -107,9 +107,12 @@ only on a plugin upgrade, a repaired read path, or a suspicion of stale evidence
   relocation. The runner replaces a proposed range with the one exact existing entry
   selected by retained hashes; `UNRESOLVED` launches nothing. Do not invoke a guessed
   broad `--entry-step/--exit-step` window first and inspect it afterwards.
-- An explicit user-requested fresh/full rerun remains available: put the exact steps in
-  `explicit_rerun_steps` and record the owner's reason in the same request. This is the
-  only ordinary-continuation path allowed to bypass evidence-derived reuse.
+- An explicit user-requested fresh/full rerun remains available: put one canonical,
+  contiguous existing-entry window (for example Steps 17–18) in
+  `explicit_rerun_steps` and record the owner's reason in the same request. The exact
+  first and last IDs are forwarded as the existing entry/exit window; sparse or
+  automatically inferred multi-step sets remain `UNRESOLVED`. This is the only
+  ordinary-continuation path allowed to bypass evidence-derived reuse.
 
 Write the request under the project's own control tree, for example
 `reports/orchestrator/resume_request.json`, then call the normal canonical entry with
@@ -121,10 +124,13 @@ walk in prose. The lower-level `continuation_plan-<timestamp>.json` remains the
 read-only byte inventory for the selected bounded dispatch.
 
 `unchanged` means retained bytes match, not that a demonstrated producer defect is
-cleared. To invalidate unchanged producer output, `disproven_outputs` must cite an
-existing retained failed consumer `outputs.json`, its SHA-256, the exact consumed
-output path and that retained output's SHA-256. Free-form assertions, stale receipts,
-PASS receipts and subject-hash mismatches resolve to `UNRESOLVED` and launch nothing.
+cleared. To invalidate unchanged producer output, `disproven_outputs` must cite the
+failed consumer `outputs.json` selected by the collector's current `steps/index.json`
+attempt, its SHA-256, the exact consumed output path and that retained output's
+SHA-256. The collector's attempt metadata and complete input snapshot (including an
+explicitly empty `capture_errors`) must agree. Free-form, unindexed, escaping,
+incomplete, stale, PASS, wrong-consumer and subject/hash-mismatched receipts resolve
+to `UNRESOLVED` and launch nothing.
 
 Example: an SDC reader repair names the affected reader as `consumer_step`, supplies
 the old/new paths in `equivalent_relocations`, and sets `revalidate_consumer: true`.

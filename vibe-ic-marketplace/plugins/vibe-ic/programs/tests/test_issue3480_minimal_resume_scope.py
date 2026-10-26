@@ -5,7 +5,6 @@ import hashlib
 import json
 import os
 import sys
-import datetime
 from pathlib import Path
 
 
@@ -14,6 +13,7 @@ PROGRAMS = Path(os.environ.get(
 sys.path.insert(0, str(PROGRAMS))
 
 import phase3_one_shot_runner as phase3  # noqa: E402
+import step_output_collector as collector  # noqa: E402
 import vibe_ic_one_shot_runner as front  # noqa: E402
 
 
@@ -68,17 +68,12 @@ def _install_graph(monkeypatch):
 def _failed_consumer_receipt(project: Path, producer="16", consumer="32"):
     output_rel = f"outputs/{producer}.txt"
     output_sha = _sha((project / output_rel).read_bytes())
-    path = project / f"steps/phase/stage/{consumer}_failed/outputs.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        "id": consumer, "status": "FAIL", "canonical_pass": False,
-        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "capture_errors": [],
-        "inputs": {output_rel: {"sha256": output_sha}}, "outputs": [],
-        "result": {"canonical_consumer": {"verdict": "FAIL"}},
-    }
-    path.write_text(json.dumps(record))
+    attempt = collector.begin_step(
+        project, consumer, {output_rel: {"sha256": output_sha}})
+    collector.finish_step(
+        project, attempt, verdict="FAIL", canonical_pass=False,
+        result={"canonical_consumer": {"verdict": "FAIL"}})
+    path = project / attempt["storage_root"] / attempt["folder"] / "outputs.json"
     return {
         "step_id": producer,
         "receipt": str(path.relative_to(project)),
@@ -182,6 +177,109 @@ def test_forged_consumer_receipt_hash_is_unresolved(tmp_path, monkeypatch):
     assert any("receipt hash mismatch" in item for item in plan["unknown_impact"])
 
 
+def test_self_hashed_unindexed_consumer_receipt_is_unresolved(tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _checkpoint_tree(tmp_path)
+    proof = _failed_consumer_receipt(tmp_path)
+    authentic = tmp_path / proof["receipt"]
+    forged = tmp_path / "steps/forged/not-indexed/32_fake/outputs.json"
+    forged.parent.mkdir(parents=True)
+    forged.write_bytes(authentic.read_bytes())
+    proof["receipt"] = str(forged.relative_to(tmp_path))
+    proof["receipt_sha256"] = _sha(forged.read_bytes())
+    plan = front._minimal_resume_plan(
+        tmp_path, _request(disproven_outputs=[proof]))
+    assert plan["status"] == "UNRESOLVED"
+    assert plan["execution_steps"] == []
+    assert any("registered complete consumer attempt" in item
+               for item in plan["unknown_impact"])
+
+
+def test_escaping_consumer_receipt_is_unresolved(tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _checkpoint_tree(tmp_path)
+    proof = _failed_consumer_receipt(tmp_path)
+    outside = tmp_path.parent / "outside-consumer-outputs.json"
+    outside.write_bytes((tmp_path / proof["receipt"]).read_bytes())
+    proof["receipt"] = str(Path("..") / outside.name)
+    proof["receipt_sha256"] = _sha(outside.read_bytes())
+    plan = front._minimal_resume_plan(
+        tmp_path, _request(disproven_outputs=[proof]))
+    assert plan["status"] == "UNRESOLVED"
+    assert plan["execution_steps"] == []
+
+
+def test_incomplete_consumer_capture_is_unresolved(tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _checkpoint_tree(tmp_path)
+    proof = _failed_consumer_receipt(tmp_path)
+    receipt = tmp_path / proof["receipt"]
+    record = json.loads(receipt.read_text())
+    del record["capture_errors"]
+    receipt.write_text(json.dumps(record))
+    proof["receipt_sha256"] = _sha(receipt.read_bytes())
+    plan = front._minimal_resume_plan(
+        tmp_path, _request(disproven_outputs=[proof]))
+    assert plan["status"] == "UNRESOLVED"
+    assert plan["execution_steps"] == []
+
+
+def test_wrong_consumer_identity_is_unresolved(tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _checkpoint_tree(tmp_path)
+    proof = _failed_consumer_receipt(tmp_path)
+    receipt = tmp_path / proof["receipt"]
+    record = json.loads(receipt.read_text())
+    record["id"] = "18"
+    receipt.write_text(json.dumps(record))
+    proof["receipt_sha256"] = _sha(receipt.read_bytes())
+    plan = front._minimal_resume_plan(
+        tmp_path, _request(disproven_outputs=[proof]))
+    assert plan["status"] == "UNRESOLVED"
+    assert plan["execution_steps"] == []
+
+
+def test_wrong_declared_consumer_input_is_unresolved(tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _checkpoint_tree(tmp_path)
+    proof = _failed_consumer_receipt(tmp_path)
+    receipt = tmp_path / proof["receipt"]
+    attempt_path = receipt.parent / "attempt.json"
+    record = json.loads(receipt.read_text())
+    attempt = json.loads(attempt_path.read_text())
+    for document in (record, attempt):
+        document["inputs"][proof["output_path"]]["sha256"] = "e" * 64
+    receipt.write_text(json.dumps(record))
+    attempt_path.write_text(json.dumps(attempt))
+    proof["receipt_sha256"] = _sha(receipt.read_bytes())
+    plan = front._minimal_resume_plan(
+        tmp_path, _request(disproven_outputs=[proof]))
+    assert plan["status"] == "UNRESOLVED"
+    assert plan["execution_steps"] == []
+    assert any("subject hash mismatch" in item for item in plan["unknown_impact"])
+
+
+def test_wrong_captured_consumer_input_is_unresolved(tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _checkpoint_tree(tmp_path)
+    proof = _failed_consumer_receipt(tmp_path)
+    receipt = tmp_path / proof["receipt"]
+    attempt_path = receipt.parent / "attempt.json"
+    record = json.loads(receipt.read_text())
+    attempt = json.loads(attempt_path.read_text())
+    for document in (record, attempt):
+        document["input_files"][0]["sha256"] = "e" * 64
+    receipt.write_text(json.dumps(record))
+    attempt_path.write_text(json.dumps(attempt))
+    proof["receipt_sha256"] = _sha(receipt.read_bytes())
+    plan = front._minimal_resume_plan(
+        tmp_path, _request(disproven_outputs=[proof]))
+    assert plan["status"] == "UNRESOLVED"
+    assert plan["execution_steps"] == []
+    assert any("input capture does not bind" in item
+               for item in plan["unknown_impact"])
+
+
 def test_nonfailed_consumer_receipt_is_unresolved(tmp_path, monkeypatch):
     _install_graph(monkeypatch)
     _checkpoint_tree(tmp_path)
@@ -231,6 +329,16 @@ def test_explicit_rerun_reason_is_retained(tmp_path, monkeypatch):
         explicit_rerun_steps=["15"], reason="owner requested fresh floorplan"))
     assert plan["execution_steps"] == ["15"]
     assert plan["reason"] == "explicit rerun request: owner requested fresh floorplan"
+    assert front._minimal_resume_entry(plan) == ("15", "15")
+
+
+def test_automatic_or_disjoint_multi_step_selection_has_no_window(monkeypatch):
+    _install_graph(monkeypatch)
+    assert front._minimal_resume_entry({
+        "status": "READY", "execution_steps": ["17", "18"]}) is None
+    assert front._minimal_resume_entry({
+        "status": "READY", "selection": "explicit_owner_window",
+        "execution_steps": ["17", "32"]}) is None
 
 
 def test_planning_preserves_historical_records_and_neutral_project(tmp_path, monkeypatch):
@@ -322,6 +430,56 @@ def test_actual_frontdoor_resume_request_bounds_existing_entry(
         pass
     else:
         raise AssertionError("ordinary resume did not reach the existing exact entry")
+
+
+def test_actual_frontdoor_owner_contiguous_window_reaches_existing_entry(
+        tmp_path, monkeypatch):
+    from _route_fixture import stage_owner_route
+    order, _ = front._resume_dependency_graph()
+    monkeypatch.setattr(collector, "continuation_evidence", lambda *_: {
+        "requested_steps": order, "automatically_added_steps": [],
+        "unknown_impact": [], "retained_unchanged_steps": order,
+        "checkpoints": [{"step_id": sid, "observation": "unchanged",
+                         "differences": []} for sid in order],
+    })
+    request = tmp_path / "reports/orchestrator/resume_request.json"
+    request.parent.mkdir(parents=True)
+    request.write_text(json.dumps(_request(
+        explicit_rerun_steps=["17", "18"],
+        reason="owner requested fresh placement through CTS")))
+    stage_owner_route(tmp_path, "ic")
+    monkeypatch.setattr(front, "_capture_container_image", lambda *_: {})
+
+    class ReachedExistingWindow(Exception):
+        pass
+
+    def dispatch(label, runner, argv, **kwargs):
+        assert Path(runner).name == "phase3_one_shot_runner.py"
+        assert argv[argv.index("--entry-step") + 1] == "17"
+        assert argv[argv.index("--exit-step") + 1] == "18"
+        plan_path, = (tmp_path / "reports/orchestrator").glob(
+            "minimal_resume_plan-*.json")
+        plan = json.loads(plan_path.read_text())
+        assert plan["execution_steps"] == ["17", "18"]
+        assert plan["reason"] == "explicit rerun request: owner requested fresh placement through CTS"
+        raise ReachedExistingWindow
+
+    monkeypatch.setattr(front, "_run_phase", dispatch)
+    monkeypatch.setattr(sys, "argv", [
+        "runner", str(tmp_path), "--route", "ic", "--execution-mode", "default",
+        "--resume-request", str(request), "--container", "", "--no-dashboard",
+    ])
+    try:
+        front.main()
+    except ReachedExistingWindow:
+        pass
+    else:
+        plan_path, = (tmp_path / "reports/orchestrator").glob(
+            "minimal_resume_plan-*.json")
+        plan = json.loads(plan_path.read_text())
+        assert plan["status"] == "READY"
+        assert plan["execution_steps"] == ["17", "18"]
+        raise AssertionError("owner contiguous rerun did not reach the existing window")
 
 
 def test_loop2converge_ordinary_guidance_uses_same_program_decision():

@@ -2573,12 +2573,12 @@ def _validated_disproven_output(project: Path, item: Mapping[str, Any],
     if not all(isinstance(value, str) and value for value in
                (receipt_rel, receipt_sha, output_rel, output_sha)):
         return None, f"step {sid} disproval lacks immutable receipt/output bindings"
-    receipt = (project / receipt_rel).resolve()
     root = project.resolve()
-    allowed_roots = ((root / "steps").resolve(),
-                     (root / "reports/step_versions").resolve())
-    if (not receipt.is_relative_to(root) or receipt.name != "outputs.json"
-            or not any(receipt.is_relative_to(folder) for folder in allowed_roots)
+    receipt = (root / receipt_rel).resolve()
+    retained_root = versions._versions_root(root).resolve()
+    if (not receipt.is_relative_to(retained_root)
+            or receipt_rel != str(receipt.relative_to(root))
+            or receipt.name != "outputs.json" or receipt.is_symlink()
             or not receipt.is_file()):
         return None, f"step {sid} disproval receipt is not a retained outputs.json"
     raw = receipt.read_bytes()
@@ -2588,6 +2588,35 @@ def _validated_disproven_output(project: Path, item: Mapping[str, Any],
         record = json.loads(raw)
     except (ValueError, TypeError):
         return None, f"step {sid} disproval receipt is not valid JSON"
+    # Content addressing proves only that the caller supplied the bytes it
+    # hashed.  Producer authority comes from the collector's existing attempt
+    # journal and current index row, all naming this exact retained folder.
+    try:
+        indexed = [row for row in versions._read_index(root).get("steps", [])
+                   if isinstance(row, dict) and str(row.get("id")) == consumer]
+        if len(indexed) != 1:
+            raise ValueError
+        index_row = indexed[0]
+        attempt = json.loads((receipt.parent / "attempt.json").read_text())
+        folder = receipt.parent.relative_to(retained_root)
+        identity = ("id", "name", "phase", "stage", "folder")
+        if (index_row.get("versioned") is not True
+                or index_row.get("status") != "FAIL"
+                or str(folder) != index_row.get("folder")
+                or receipt != retained_root / index_row["folder"] / "outputs.json"
+                or any(record.get(key) != index_row.get(key) for key in identity)
+                or any(record.get(key) != attempt.get(key) for key in identity)
+                or attempt.get("status") != "RUNNING"
+                or record.get("storage_root") != str(retained_root.relative_to(root))
+                or attempt.get("storage_root") != record.get("storage_root")
+                or record.get("started_at") != attempt.get("started_at")
+                or record.get("inputs") != attempt.get("inputs")
+                or record.get("input_files") != attempt.get("input_files")
+                or record.get("capture_errors") != []
+                or attempt.get("capture_errors") != []):
+            raise ValueError
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None, f"step {sid} disproval is not a registered complete consumer attempt"
     result = record.get("result") or {}
     consumed = (result.get("canonical_consumer")
                 or result.get("canonical_step_result") or {})
@@ -2595,12 +2624,27 @@ def _validated_disproven_output(project: Path, item: Mapping[str, Any],
     if (str(record.get("id")) != consumer or record.get("status") != "FAIL"
             or record.get("canonical_pass") is not False
             or consumed_status != "FAIL" or not record.get("started_at")
-            or not record.get("finished_at") or record.get("capture_errors")):
+            or not record.get("finished_at")):
         return None, f"step {sid} disproval is not a bound failed consumer {consumer} receipt"
     bound = (record.get("inputs") or {}).get(output_rel)
     bound_sha = bound.get("sha256") if isinstance(bound, dict) else bound
     if bound_sha != output_sha:
         return None, f"step {sid} disproval consumer subject hash mismatch"
+    captured = [row for row in record.get("input_files") or []
+                if isinstance(row, dict) and row.get("rel") == output_rel]
+    if len(captured) != 1:
+        return None, f"step {sid} disproval consumer input capture is incomplete"
+    captured = captured[0]
+    snapshot_rel = captured.get("snapshot")
+    snapshot = receipt.parent / snapshot_rel if isinstance(snapshot_rel, str) else None
+    if (captured.get("sha256") != output_sha
+            or type(captured.get("size")) is not int or captured["size"] < 0
+            or snapshot_rel != str(Path("inputs") / output_rel)
+            or snapshot is None or snapshot.is_symlink() or not snapshot.is_file()
+            or not snapshot.resolve().is_relative_to(receipt.parent.resolve())
+            or snapshot.stat().st_size != captured["size"]
+            or hashlib.sha256(snapshot.read_bytes()).hexdigest() != output_sha):
+        return None, f"step {sid} disproval consumer input capture does not bind subject bytes"
     retained = versions.latest_pass(project, sid)
     if not retained or not retained.get("canonical_pass"):
         return None, f"step {sid} has no retained canonical PASS to invalidate"
@@ -2689,6 +2733,7 @@ def _minimal_resume_plan(project: Path, request: Mapping[str, Any]) -> Dict[str,
             "schema": "vibeic/minimal-resume-plan/1", "status": "READY",
             "reason": "explicit rerun request: " + str(request.get("reason") or "operator request"),
             "consumer_step": consumer, "execution_steps": explicit,
+            "selection": "explicit_owner_window",
             "next_step": explicit[0], "remaining_explicit_steps": explicit[1:],
             "reused_checkpoints": [], "unknown_impact": [],
             "historical_records_mutated": False,
@@ -2778,12 +2823,24 @@ def _write_minimal_resume_plan(project: Path, plan: Mapping[str, Any]) -> Path:
 
 
 def _minimal_resume_entry(plan: Mapping[str, Any]) -> Optional[Tuple[str, str]]:
-    """Translate one READY action to the existing exact bounded entry."""
+    """Translate one action or explicit contiguous window to an existing entry."""
     steps = list(plan.get("execution_steps") or [])
-    if plan.get("status") != "READY" or len(steps) != 1:
+    if plan.get("status") != "READY" or not steps:
         return None
-    step = str(steps[0])
-    return step, step
+    steps = [str(step) for step in steps]
+    if len(steps) == 1:
+        return steps[0], steps[0]
+    if plan.get("selection") != "explicit_owner_window":
+        return None
+    order, _ = _resume_dependency_graph()
+    try:
+        start = order.index(steps[0])
+        end = order.index(steps[-1])
+    except ValueError:
+        return None
+    if start >= end or steps != order[start:end + 1]:
+        return None
+    return steps[0], steps[-1]
 
 
 def main() -> int:
@@ -3005,15 +3062,16 @@ def _main() -> int:
             print(f"REFUSED: minimal resume request: {exc}", file=sys.stderr)
             return 2
         _selected = list(_resume_plan.get("execution_steps") or [])
-        if len(_selected) > 1:
-            # Sparse explicit operations remain expressible through the
-            # existing explicit window interface.  Never widen min..max here.
+        _resume_entry = _minimal_resume_entry(_resume_plan)
+        if _selected and _resume_entry is None:
+            # Never infer a window from an automatic/disjoint set.  Only the
+            # owner's explicit canonical contiguous list reaches the already
+            # supported entry/exit interface.
             _resume_plan["status"] = "UNRESOLVED"
             _resume_plan["unknown_impact"] = [
-                "multiple explicit steps require separate declared windows"]
+                "multiple steps are not one explicit canonical contiguous window"]
             _resume_plan["execution_steps"] = []
             _selected = []
-        _resume_entry = _minimal_resume_entry(_resume_plan)
         if _resume_entry:
             args.entry_step, args.exit_step = _resume_entry
 
