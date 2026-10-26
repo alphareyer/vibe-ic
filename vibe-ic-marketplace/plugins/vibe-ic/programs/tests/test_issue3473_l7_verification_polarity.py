@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 
 def test_l7_suite_references_preserve_positive_and_reject_denied(tmp_path):
     from programs import phase1_doc_one_shot_runner as producer
@@ -31,4 +33,17 @@ def test_l7_suite_references_preserve_positive_and_reject_denied(tmp_path):
         "evidence": "input/docs/verification_plan.md",
         "extraction_strategy": "test_suite_reference",
     }]
+    assert emitted["no_verification_strategy_in_input"] is False
+
+
+@pytest.mark.parametrize("text", [
+    "The verification plan must use verilator. Cocotb is not required.",
+    "Cocotb is not required. The verification plan must use verilator.",
+])
+def test_l7_positive_sentence_survives_neighbor_exclusion(tmp_path, text):
+    from programs import phase1_doc_one_shot_runner as producer
+
+    result = producer.gen_l7_test_debug(tmp_path, {"verification_plan.md": text})
+    emitted = json.loads(result.path.read_text())
+    assert [row["phase"] for row in emitted["verification_strategy"]] == ["verilator"]
     assert emitted["no_verification_strategy_in_input"] is False

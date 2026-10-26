@@ -41269,12 +41269,13 @@ def gen_l7_test_debug(project: Path,
             for _, suite_re in _VSUITE_INLINE_PATTERNS:
                 for match in suite_re.finditer(line):
                     denied = ("\u274c" in line or (bullet and negative_list))
-                    clause_start, clause_end = 0, len(line)
+                    clause_start, clause_end = _prose_sentence_scope(
+                        line, match.start(), match.end())
                     for boundary in _vsuite_clause_break_re.finditer(line):
                         if boundary.end() <= match.start():
-                            clause_start = boundary.end()
+                            clause_start = max(clause_start, boundary.end())
                         elif boundary.start() >= match.end():
-                            clause_end = boundary.start()
+                            clause_end = min(clause_end, boundary.start())
                             break
                     clause = line[clause_start:clause_end]
                     if _prose_is_denied(clause, ignore_bracketed=False):
