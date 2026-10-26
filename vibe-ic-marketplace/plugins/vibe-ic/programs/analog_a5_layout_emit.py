@@ -1455,6 +1455,7 @@ class Plan:
         self.island_patches: dict = {}
         self.patch_of: Dict[Tuple[str, tuple], str] = {}
         self.row_base = 0
+        self.access_necks: List[dict] = []
         # the gencells' OWN geometry, placed. The emitter does not draw it
         # and cannot change it, but its routing runs beside it, and a
         # clearance record that cannot see the thing the routing is closest
@@ -2005,6 +2006,29 @@ def friendly_conductor(rows: Sequence[dict], layer: str, x: int, y: int,
 # So the island is placed, not assumed: this index answers "may a box of
 # this size stand here?" for the device geometry, and the search below takes
 # the nearest position to the terminal where the answer is yes.
+def _rectangle_union_area(boxes: Sequence[Sequence[int]]) -> int:
+    """Exact area of axis-aligned native-grid rectangles, including overlaps."""
+    boxes = [b for b in boxes if b[0] < b[2] and b[1] < b[3]]
+    xs = sorted({x for b in boxes for x in (b[0], b[2])})
+    area = 0
+    for left, right in zip(xs, xs[1:]):
+        intervals = sorted((b[1], b[3]) for b in boxes
+                           if b[0] < right and left < b[2])
+        low = high = None
+        length = 0
+        for bottom, top in intervals:
+            if high is None or bottom > high:
+                if high is not None:
+                    length += high - low
+                low, high = bottom, top
+            else:
+                high = max(high, top)
+        if high is not None:
+            length += high - low
+        area += (right - left) * length
+    return area
+
+
 class Sites:
     """The device geometry an island must clear, indexed by layer and cell.
 
@@ -2021,6 +2045,7 @@ class Sites:
     def __init__(self, rows: Sequence[dict], geo: Geo) -> None:
         self.geo = geo
         self.grid: Dict[tuple, List[dict]] = {}
+        self.polygons: Dict[tuple, List[dict]] = {}
         for r in rows:
             self.add(r)
 
@@ -2031,6 +2056,8 @@ class Sites:
         that is what a wider island makes possible where a narrower one
         could not reach."""
         b = r["box"]
+        if "lcomp" in r:
+            self.polygons.setdefault((r["layer"], r["lcomp"]), []).append(r)
         for gx in range(b[0] // self.CELL, b[2] // self.CELL + 1):
             for gy in range(b[1] // self.CELL, b[3] // self.CELL + 1):
                 self.grid.setdefault((r["layer"], gx, gy), []).append(r)
@@ -2081,10 +2108,14 @@ class Sites:
                         return False
                     continue
                 if r["lcomp"] in merged:
-                    # one polygon with this island: no spacing rule applies
-                    # between the parts of a single polygon — but a polygon
-                    # this island has no business joining is a SHORT.
                     if friendly is None or r.get("comp") != friendly:
+                        return False
+                    # Joining one part does not excuse a narrow notch beside
+                    # another part of the same native polygon.
+                    b = r["box"]
+                    dx = max(b[0] - box[2], box[0] - b[2], 0)
+                    dy = max(b[1] - box[3], box[1] - b[3], 0)
+                    if (dx or dy) and dx < s and dy < s:
                         return False
                     continue
                 b = r["box"]
@@ -2093,6 +2124,16 @@ class Sites:
                 if dx < s and dy < s:
                     return False
         return True
+
+    def merged_area(self, box: Sequence[int], layer: str, friendly) -> int:
+        """Area actually joined on this metal; another layer adds no area."""
+        components = {r["lcomp"] for r in self.near(layer, box, 0)
+                      if r.get("comp") == friendly and "lcomp" in r
+                      and r["box"][0] < box[2] and box[0] < r["box"][2]
+                      and r["box"][1] < box[3] and box[1] < r["box"][3]}
+        boxes = [box] + [r["box"] for component in components
+                        for r in self.polygons[(layer, component)]]
+        return _rectangle_union_area(boxes)
 
     def touches(self, box: Sequence[int], layer: str, friendly) -> bool:
         """True when the box actually OVERLAPS the conductor it is there to
@@ -2144,7 +2185,9 @@ def _island_candidates(span: int):
 
 def _via_stack(plan: Plan, net: str, x: int, y: int, level: int, geo: Geo,
                top: int = 3, sites: Optional["Sites"] = None,
-               friendly=None, dev: Optional[dict] = None) -> Tuple[int, int]:
+               friendly=None, dev: Optional[dict] = None,
+               compact_terminal: bool = False,
+               exit_path: Optional[Tuple[int, int, int]] = None) -> Tuple[int, int]:
     """Carry a terminal from the metal the gencell delivered it on to the
     routing layer, and give every cut the metal the deck demands around it.
 
@@ -2175,6 +2218,8 @@ def _via_stack(plan: Plan, net: str, x: int, y: int, level: int, geo: Geo,
 
     pad = max(geo.via_pad[k] for k in vias)
     pad_min = max(geo.via_pad_min[k] for k in vias)
+    if compact_terminal:
+        pad = pad_min
     enc_short = max(geo.short_half[k] - geo.via_pad[k] for k in vias)
     enc_long = max(geo.enc_half[k] - geo.via_pad[k] for k in vias)
 
@@ -2223,13 +2268,33 @@ def _via_stack(plan: Plan, net: str, x: int, y: int, level: int, geo: Geo,
                 box = (x + dx - ax, y + dy - ay, x + dx + ax, y + dy + ay)
                 if not sites.clear(box, layers, friendly, net):
                     continue
+                if exit_path is not None:
+                    lane, ey, half = exit_path
+                    cx0, cy0 = x + dx, y + dy
+                    jog = (cx0 - half, min(cy0, ey) - half,
+                           cx0 + half, max(cy0, ey) + half)
+                    escape = (min(cx0, lane) - half, ey - half,
+                              max(cx0, lane) + half, ey + half)
+                    if not all(sites.clear(path, ["metal3"], friendly, net)
+                               for path in (jog, escape)):
+                        continue
                 if not sites.touches(box, term_layer, friendly):
+                    continue
+                if (friendly is not None and area < area_full
+                        and sites.merged_area(box, term_layer, friendly)
+                        < geo.area_lam2.get(level, 0)):
                     continue
                 placed = (x + dx, y + dy, ax, ay, p)
                 break
             if placed is not None:
                 break
         if placed is None:
+            if compact_terminal or exit_path is not None:
+                purpose = "compact terminal access" if compact_terminal else "body exit path"
+                raise Refusal(
+                    f"no source-legal {purpose} exists within "
+                    f"{ISLAND_SEARCH_LAMBDA} lambda of ({x}, {y}); refusing "
+                    f"instead of drawing the colliding fallback island")
             plan.deviate(dev or {}, "via_island_clearance_lambda",
                          geo.metal_space(term_layer), 0,
                          f"no position within {ISLAND_SEARCH_LAMBDA} lambda "
@@ -2248,6 +2313,142 @@ def _via_stack(plan: Plan, net: str, x: int, y: int, level: int, geo: Geo,
         plan.paint(net, f"metal{k + 1}", cx - hx, cy - hy, cx + hx, cy + hy)
         plan.paint(net, f"via{k}", cx - ph, cy - ph, cx + ph, cy + ph)
     return cx, cy
+
+
+def _terminal_needs_compact_access(group: dict, groups: Sequence[dict],
+                                   geo: Geo) -> bool:
+    """Whether the emitted preferred island violates a neighbouring stub."""
+    requested = geo.wire[3]
+    half = max((requested + 1) // 2, 1)
+    for label in group["labels"]:
+        level = label.get("level", group.get("level", 3))
+        if level > ROUTE_LEVEL:
+            continue
+        preferred = Plan()
+        _via_stack(preferred, "<preferred access>", 0, 0, level, geo,
+                   top=ROUTE_LEVEL)
+        boxes = [r["box"] for r in preferred.shapes
+                 if r["layer"] == "metal3"]
+        footprint = ((min(b[0] for b in boxes), min(b[1] for b in boxes),
+                      max(b[2] for b in boxes), max(b[3] for b in boxes))
+                     if boxes else (-half, -half, half, half))
+        island = (label["x"] + footprint[0], label["y"] + footprint[1],
+                  label["x"] + footprint[2], label["y"] + footprint[3])
+        for other in groups:
+            if other.get("body_tap") or other["net"] == group["net"]:
+                continue
+            for peer in other["labels"]:
+                stub = (peer["x"] - half, peer["y"] - half,
+                        peer["x"] + half, peer["y"] + half)
+                space = geo.metal_space("metal3", island, stub)
+                dx = max(island[0] - stub[2], stub[0] - island[2], 0)
+                dy = max(island[1] - stub[3], stub[1] - island[3], 0)
+                if dx < space and dy < space:
+                    return True
+    return False
+
+
+def _terminal_access_width(group: dict, groups: Sequence[dict], geo: Geo) -> int:
+    """Return a source-declared legal neck width, or refuse missing authority."""
+    requested = geo.wire[3]
+    if group.get("body_tap") or not _terminal_needs_compact_access(
+            group, groups, geo):
+        return requested
+    minimum_um = geo.rules.get("metal_width_um", {}).get(3)
+    if minimum_um is None:
+        raise Refusal(
+            "compact metal3 terminal access is required, but the retained "
+            "PDK source declares no metal3 minimum width")
+    minimum = int(math.ceil(minimum_um * geo.lam - 1e-9))
+    if minimum <= 0 or minimum >= requested:
+        raise Refusal(
+            f"compact metal3 terminal access is required, but source minimum "
+            f"{minimum_um}um cannot narrow requested {requested / geo.lam}um")
+    return minimum
+
+
+def _collect_close_plain_rows(groups: List[dict], bbox: Sequence[int],
+                              geo: Geo) -> bool:
+    """Move dense singleton terminal rows outside before collecting on M2."""
+    plain = [g for g in groups if not g.get("body_tap")]
+    if not plain or not any(not g["strapped"] for g in plain):
+        return False
+    route_space = geo.metal_space("metal3")
+    for rule in geo.rules.get("metal_width_spacing_um", {}).get(3, []):
+        if geo.wire[3] / geo.lam > rule["width_gt_um"]:
+            route_space = max(
+                route_space,
+                int(math.ceil(rule["spacing_um"] * geo.lam - 1e-9)))
+    spacing = geo.wire[3] + route_space
+    close_rows = any(
+        g["net"] != other["net"]
+        and 0 < abs(g["escape_y"] - other["escape_y"]) < spacing
+        for g in plain for other in groups)
+    tight_islands = any(_terminal_needs_compact_access(g, plain, geo)
+                        for g in plain)
+    if not (close_rows or tight_islands):
+        return False
+    split = (min(g["y"] for g in plain) + max(g["y"] for g in plain)) / 2
+    below = above = 0
+    for g in sorted(plain, key=lambda item: (-len(item["labels"]), item["y"])):
+        g["strapped"] = True
+        if g["y"] <= split:
+            below += 1
+            g["escape_y"] = bbox[1] - below * geo.pitch()
+        else:
+            above += 1
+            g["escape_y"] = bbox[3] + above * geo.pitch()
+    return True
+
+
+def _body_escape_side(group: dict, bbox: Sequence[int], dense: bool,
+                      default: str) -> str:
+    if not dense or not group.get("body_tap"):
+        return default
+    x = group["labels"][0]["x"]
+    return "left" if abs(x - bbox[0]) <= abs(bbox[2] - x) else "right"
+
+
+def _paint_terminal_stub(plan: Plan, group: dict, dev: dict, cx: int, cy: int,
+                         ey: int, geo: Geo) -> None:
+    requested = geo.wire[3]
+    width = group.get("access_width", requested)
+    minimum_um = geo.rules.get("metal_width_um", {}).get(3)
+    minimum = (int(math.ceil(minimum_um * geo.lam - 1e-9))
+               if minimum_um is not None else None)
+    if width <= 0 or width > requested or (minimum is not None and width < minimum):
+        raise Refusal(
+            f"unsafe metal3 terminal neck width {width / geo.lam}um; "
+            f"requested={requested / geo.lam}um source_minimum={minimum_um}um")
+    half = max(requested // 2, 1)
+    if width == requested:
+        plan.paint(group["net"], "metal3", cx - half, min(cy, ey) - half,
+                   cx + half, max(cy, ey) + half)
+        return
+    if minimum_um is None:
+        raise Refusal("compact metal3 terminal access lacks source width authority")
+    neck_half = max((width + 1) // 2, 1)
+    ox, oy = dev["origin"]
+    margin = half + geo.spacing_reach("metal3")
+    boundary = oy + (dev["bbox"][1] - margin if ey < cy
+                     else dev["bbox"][3] + margin)
+    flare = max(ey, boundary) if ey < cy else min(ey, boundary)
+    neck = (cx - neck_half, min(cy, flare) - neck_half,
+            cx + neck_half, max(cy, flare) + neck_half)
+    plan.paint(group["net"], "metal3", *neck)
+    plan.paint(group["net"], "metal3", cx - half, min(flare, ey) - half,
+               cx + half, max(flare, ey) + half)
+    plan.access_necks.append({
+        "device": dev["dev"]["name"], "net": group["net"],
+        "layer": "metal3", "requested_width_um": requested / geo.lam,
+        "actual_width_um": (2 * neck_half) / geo.lam,
+        "neck_box_lambda": list(neck), "flare_y_lambda": flare,
+        "native_cell_bbox_lambda": [ox + dev["bbox"][0], oy + dev["bbox"][1],
+                                      ox + dev["bbox"][2], oy + dev["bbox"][3]],
+        "source_minimum_width_um": minimum_um,
+        "scope": ("native terminal access geometry; actual extracted "
+                  "resistance/current still require EM grading"),
+    })
 
 
 def build_plan(devs: Sequence[dict], ports: Sequence[str],
@@ -2396,7 +2597,12 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
                            "body_tap_local": (None if direct_m1
                                                else body_tap_local),
                            "body_tap_direct_m1": direct_m1,
+                           "body_tap": True,
                            "level": 1})
+
+        dense_collection = _collect_close_plain_rows(groups, cell["bbox"], geo)
+        for g in groups:
+            g["access_width"] = _terminal_access_width(g, groups, geo)
 
         # two groups escaping at one height take opposite sides, so their
         # metal3 runs are on opposite sides of the device and never meet
@@ -2404,7 +2610,9 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
             row = sorted([g for g in groups if g["escape_y"] == y],
                          key=lambda g: min(l["x"] for l in g["labels"]))
             for idx, g in enumerate(row):
-                g["side"] = "left" if idx % 2 == 0 else "right"
+                g["side"] = _body_escape_side(
+                    g, cell["bbox"], dense_collection,
+                    "left" if idx % 2 == 0 else "right")
                 if idx >= 2:
                     plan.deviate(
                         dev, "escape_sides_available", 2, idx + 1,
@@ -2565,6 +2773,25 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
             for k, g in enumerate(gs):
                 g["lane_x"] = base + step * (k + 1) * d["access_pitch"]
 
+    # Reserve every collected terminal's M3 access before lowering the
+    # collection strap to M2. Later islands must see all neighbouring stubs.
+    for d in per_dev:
+        for g in d["groups"]:
+            if not g["strapped"]:
+                continue
+            endpoints = []
+            ey = g["abs_escape_y"]
+            for lx, ly, level in g["abs_labels"]:
+                fr = friendly_conductor(d["rows"], f"metal{level}", lx, ly,
+                                        reach=geo.default_space)
+                cx, cy = _via_stack(
+                    plan, g["net"], lx, ly, level, geo, top=ROUTE_LEVEL,
+                    sites=sites, friendly=fr, dev=d["dev"],
+                    compact_terminal=g["access_width"] < geo.wire[3])
+                _paint_terminal_stub(plan, g, d, cx, cy, ey, geo)
+                endpoints.append((cx, ey))
+            g["stub_endpoints"] = endpoints
+
     for d in per_dev:
         for g in d["groups"]:
             net, ey, lane = g["net"], g["abs_escape_y"], g["lane_x"]
@@ -2587,23 +2814,29 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
                     plan.paint(net, tap_metal_contact, tx - hp, ty - hp,
                                tx + hp, ty + hp)
             if g["strapped"]:
-                # THE STUB STARTS WHERE THE STACK ENDED UP. An island that
-                # was moved a lambda off its label and then wired from the
-                # label is not connected to itself.
                 xs = []
-                for (lx, ly, level) in g["abs_labels"]:
-                    fr = friendly_conductor(d["rows"], f"metal{level}", lx, ly,
-                                            reach=geo.default_space)
-                    cx, cy = _via_stack(plan, net, lx, ly, level, geo, top=2,
-                                        sites=sites, friendly=fr,
-                                        dev=d["dev"])
+                landing_boxes = []
+                for sx, sy in g["stub_endpoints"]:
+                    first_paint = len(plan.shapes)
+                    cx, cy = _via_stack(plan, net, sx, sy, 3, geo, top=2,
+                                        sites=sites, dev=d["dev"])
+                    landing_boxes.extend(
+                        r["box"] for r in plan.shapes[first_paint:]
+                        if r["layer"] == "metal2")
+                    plan.paint(net, "metal3", min(sx, cx) - hw3, sy - hw3,
+                               max(sx, cx) + hw3, sy + hw3)
+                    plan.paint(net, "metal3", cx - hw3, min(sy, cy) - hw3,
+                               cx + hw3, max(sy, cy) + hw3)
                     xs.append(cx)
-                    plan.paint(net, "metal2", cx - hw2, min(cy, ey),
-                               cx + hw2, max(cy, ey))
-                plan.paint(net, "metal2", min(xs) - hw2, ey - hw2,
-                           max(xs) + hw2, ey + hw2)
+                    plan.paint(net, "metal2", cx - hw2, min(cy, ey) - hw2,
+                               cx + hw2, max(cy, ey) + hw2)
+                plan.paint(
+                    net, "metal2",
+                    min([min(xs) - hw2] + [b[0] for b in landing_boxes]),
+                    min([ey - hw2] + [b[1] for b in landing_boxes]),
+                    max([max(xs) + hw2] + [b[2] for b in landing_boxes]),
+                    max([ey + hw2] + [b[3] for b in landing_boxes]))
                 joint = max(xs) if g["side"] == "right" else min(xs)
-                _via_stack(plan, net, joint, ey, 2, geo, top=3, sites=sites)
             elif g["level"] > ROUTE_LEVEL:
                 # THE TERMINAL IS DELIVERED ABOVE THE ROUTING LAYER, and
                 # every plane between the two is the DEVICE'S OWN.
@@ -2674,7 +2907,11 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
                                         reach=geo.default_space)
                 cx, cy = _via_stack(plan, net, lx, ly, level, geo,
                                     top=ROUTE_LEVEL,
-                                    sites=sites, friendly=fr, dev=d["dev"])
+                                    sites=sites, friendly=fr, dev=d["dev"],
+                                    exit_path=(lane, ey, hw3)
+                                    if g.get("body_tap") and any(
+                                        p["strapped"] for p in d["groups"]
+                                        if not p.get("body_tap")) else None)
                 joint = cx
                 if cy != ey:
                     # a metal3 jog back to the escape height. Metal3 is the
@@ -2684,9 +2921,15 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
                     # one moved island from re-ordering every lane.
                     plan.paint(net, "metal3", cx - hw3, min(cy, ey) - hw3,
                                cx + hw3, max(cy, ey) + hw3)
-            # across to the lane on metal3, then straight down to the rail
-            plan.paint(net, "metal3", min(joint, lane) - hw3, ey - hw3,
-                       max(joint, lane) + hw3, ey + hw3)
+            # Collections cross neighbouring M3 stubs on M2, then rise at
+            # the already allocated lane. Singles retain their M3 escape.
+            esc_layer, esc_half = (("metal2", hw2) if g["strapped"]
+                                   else ("metal3", hw3))
+            plan.paint(net, esc_layer, min(joint, lane) - esc_half,
+                       ey - esc_half, max(joint, lane) + esc_half,
+                       ey + esc_half)
+            if g["strapped"]:
+                _via_stack(plan, net, lane, ey, 2, geo, top=3, sites=sites)
             ry = row_rails[d["row"]][net]
             plan.paint(net, "metal3", lane - hw3, ry, lane + hw3, ey)
             _via_stack(plan, net, lane, ry, 2, geo, top=3,
@@ -3651,6 +3894,7 @@ def emit_block(project: Path, block: str, stage: Stage, magicrc: str,
 
     report["result"] = "OK"
     report["shapes_painted"] = len(plan.shapes)
+    report["terminal_access_necks"] = list(plan.access_necks)
     # WHAT THE GENCELLS LEFT UNROUTED AND TOO SMALL, and what became of it.
     # See `floating_metal_patches`.
     fl = dict(plan.island_patches)
