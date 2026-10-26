@@ -383,7 +383,36 @@ def derive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
     ref = _ruling_ref(att["citation"])
     docs = design_docs(project)
     declines, outcomes = die_size_statements(docs)
-    fixed = FPC._prose_die_area(project, list(docs))
+    floorplan = FPC.extract_floorplan_contract(project)
+    fixed_wxh = floorplan.get("die_area_budget_um")
+    fixed_source = floorplan.get("die_area_source")
+    fixed = ((fixed_wxh, fixed_source)
+             if isinstance(fixed_wxh, str) and isinstance(fixed_source, str)
+             else None)
+    floorplan_inputs = {
+        hint["source"] for hint in floorplan.get("floorplan_hints", [])
+        if isinstance(hint, dict) and hint.get("kind") == "die_area"
+        and isinstance(hint.get("source"), str)
+    }
+    typed_die_sources = set(floorplan_inputs)
+    if fixed:
+        floorplan_inputs.add(fixed[1])
+    if fixed and fixed[1] not in typed_die_sources:
+        conflicts = sorted(
+            (hint["value"], hint["source"])
+            for hint in floorplan.get("floorplan_hints", [])
+            if isinstance(hint, dict) and hint.get("kind") == "die_area"
+            and isinstance(hint.get("value"), str)
+            and isinstance(hint.get("source"), str)
+            and hint["value"] != fixed[0]
+        )
+        if conflicts:
+            detail = ", ".join(f"{value} um ({source})"
+                               for value, source in conflicts)
+            return {"status": "REFUSED", "rc": 1,
+                    "reason": (f"the design's fixed die {fixed[0]} um "
+                               f"({fixed[1]}) conflicts with typed floorplan "
+                               f"config: {detail}")}
     operator = (_operator_die_basis(project, doc)
                 if deliverable == TD.DELIVERABLE_DIE else {})
     if operator.get("error"):
@@ -485,6 +514,7 @@ def derive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
     # part of what the answer was derived from.
     inputs = sorted({rel for rel, _p, _t in docs}
                     | {rel for rel, _t in l7_docs(project)}
+                    | floorplan_inputs
                     | set(operator.get("inputs", [])))
     digest = TD.derived_inputs_sha256(project, inputs)
     if digest is None:                               # pragma: no cover
