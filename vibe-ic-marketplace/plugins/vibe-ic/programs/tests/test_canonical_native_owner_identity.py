@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import threading
 
 import pytest
 
@@ -25,8 +26,12 @@ def admission_case(tmp_path, monkeypatch):
     programs.mkdir(parents=True)
     (programs.parent / 'flow').mkdir()
     import librelane_contract
-    for name in ['design_one_shot_runner.py', 'phase3_one_shot_runner.py',
+    for name in ['vibe_ic_one_shot_runner.py', 'design_one_shot_runner.py',
+                 'phase3_one_shot_runner.py',
                  'librelane_contract.py', 'execution_backend_producers.py',
+                 'execution_policy.py', 'execution_modes.py',
+                 'execution_frontend_providers.py',
+                 'execution_frontend_worker.py', 'lec_run.py',
                  'drv_capture_plan.py', 'drv_signoff_capture.py',
                  'serial_parallel_mul_synth.py',
                  *librelane_contract.PLUGIN_HOST_MODULES]:
@@ -35,6 +40,166 @@ def admission_case(tmp_path, monkeypatch):
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo'))
     shutil.copyfile(actual.parent / 'flow/phase1_phase2_phase3.yaml', programs.parent / 'flow/phase1_phase2_phase3.yaml')
     return module, project, programs
+
+
+def test_step13_owner_change_reopens_then_duplicate_guard_still_refuses(
+        admission_case):
+    module, project, programs = admission_case
+    config = {'pdk': 'fixture-pdk', 'entry_step': '14', 'exit_step': '14'}
+
+    first = module.admit_span(
+        project, 'phase2', programs, 'fixture-container', config)
+    unchanged = module.admit_span(
+        project, 'phase2', programs, 'fixture-container', config)
+    owner = programs / 'lec_run.py'
+    owner.write_bytes(owner.read_bytes() + b'\n# changed Step13 owner source\n')
+    changed = module.admit_span(
+        project, 'phase2', programs, 'fixture-container', config)
+    repeated = module.admit_span(
+        project, 'phase2', programs, 'fixture-container', config)
+
+    assert first.admitted and first.reason == 'ADMITTED'
+    assert not unchanged.admitted
+    assert unchanged.reason == 'DUPLICATE_NO_NEW_EVIDENCE'
+    assert unchanged.identity == first.identity
+    assert changed.admitted and changed.reason == 'ADMITTED'
+    assert changed.identity_sha256 != first.identity_sha256
+    assert (changed.identity['program_source_sha256']
+            != first.identity['program_source_sha256'])
+    for key in first.identity.keys() - {'program_source_sha256'}:
+        assert changed.identity[key] == first.identity[key], key
+    assert not repeated.admitted
+    assert repeated.reason == 'DUPLICATE_NO_NEW_EVIDENCE'
+    assert repeated.identity == changed.identity
+
+
+def test_unrelated_non_program_bytes_do_not_manufacture_new_evidence(
+        admission_case):
+    module, project, programs = admission_case
+    config = {'pdk': 'fixture-pdk', 'entry_step': '14', 'exit_step': '14'}
+    first = module.admit_span(
+        project, 'phase2', programs, 'fixture-container', config)
+    (programs / 'operator-notes.txt').write_text(
+        'not executable canonical program input\n')
+    repeated = module.admit_span(
+        project, 'phase2', programs, 'fixture-container', config)
+    assert not repeated.admitted
+    assert repeated.reason == 'DUPLICATE_NO_NEW_EVIDENCE'
+    assert repeated.identity == first.identity
+
+
+@pytest.mark.parametrize('operation', ['missing', 'renamed'])
+def test_missing_or_renamed_step13_owner_refuses_before_admission(
+        admission_case, operation):
+    module, project, programs = admission_case
+    owner = programs / 'lec_run.py'
+    if operation == 'missing':
+        owner.unlink()
+    else:
+        owner.rename(programs / 'lec_run.relocated.py')
+
+    refused = module.admit_span(
+        project, 'phase2', programs, 'fixture-container',
+        {'pdk': 'fixture-pdk', 'entry_step': '14', 'exit_step': '14'})
+    assert not refused.admitted
+    assert refused.reason == 'CANONICAL_PROGRAM_SOURCE_UNAVAILABLE'
+    assert 'programs/lec_run.py' in refused.detail
+    ledger = module.ledger_path(project)
+    assert not ledger.exists() or not ledger.read_text().strip()
+
+
+def test_step13_owner_unreadable_at_snapshot_binding_refuses_without_ledger(
+        admission_case, monkeypatch):
+    module, project, programs = admission_case
+    owner = (programs / 'lec_run.py').resolve()
+    original_open = module.os.open
+
+    def refuse_owner(path, flags, *args, **kwargs):
+        if Path(path).resolve() == owner:
+            raise PermissionError('injected unreadable Step13 owner')
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, 'open', refuse_owner)
+    refused = module.admit_span(
+        project, 'phase2', programs, 'fixture-container',
+        {'pdk': 'fixture-pdk', 'entry_step': '14', 'exit_step': '14'})
+
+    assert not refused.admitted
+    assert refused.reason == 'CANONICAL_PROGRAM_SOURCE_UNAVAILABLE'
+    assert 'programs/lec_run.py (unreadable)' in refused.detail
+    ledger = module.ledger_path(project)
+    assert not ledger.exists() or not ledger.read_text().strip()
+
+
+def test_step13_owner_is_read_once_for_bound_program_identity(
+        admission_case, monkeypatch):
+    module, project, programs = admission_case
+    owner = (programs / 'lec_run.py').resolve()
+    original_open = module.os.open
+    owner_opens = 0
+
+    def count_owner(path, flags, *args, **kwargs):
+        nonlocal owner_opens
+        if Path(path).resolve() == owner:
+            owner_opens += 1
+            if owner_opens > 1:
+                raise PermissionError('second Step13-owner read is forbidden')
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, 'open', count_owner)
+    admitted = module.admit_span(
+        project, 'phase2', programs, 'fixture-container',
+        {'pdk': 'fixture-pdk', 'entry_step': '14', 'exit_step': '14'})
+
+    assert admitted.admitted and admitted.reason == 'ADMITTED'
+    assert owner_opens == 1
+
+
+def test_step13_owner_fifo_refuses_without_blocking_or_ledger(admission_case):
+    module, project, programs = admission_case
+    owner = programs / 'lec_run.py'
+    owner.unlink()
+    os.mkfifo(owner)
+    observed = []
+
+    def invoke():
+        observed.append(module.admit_span(
+            project, 'phase2', programs, 'fixture-container',
+            {'pdk': 'fixture-pdk', 'entry_step': '14', 'exit_step': '14'}))
+
+    worker = threading.Thread(target=invoke, daemon=True)
+    worker.start()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive(), 'FIFO source blocked canonical admission'
+    assert len(observed) == 1
+    refused = observed[0]
+    assert not refused.admitted
+    assert refused.reason == 'CANONICAL_PROGRAM_SOURCE_UNAVAILABLE'
+    assert 'programs/lec_run.py (not-regular)' in refused.detail
+    ledger = module.ledger_path(project)
+    assert not ledger.exists() or not ledger.read_text().strip()
+
+
+def test_step13_owner_extends_existing_canonical_program_population(
+        admission_case):
+    module, _, programs = admission_case
+    relatives = {
+        path.relative_to(programs.parent).as_posix()
+        for path in module.canonical_program_paths(programs)
+    }
+    assert 'programs/lec_run.py' in relatives
+    assert {
+        'programs/vibe_ic_one_shot_runner.py',
+        'programs/design_one_shot_runner.py',
+        'programs/phase3_one_shot_runner.py',
+        'programs/execution_policy.py',
+        'programs/execution_modes.py',
+        'programs/execution_frontend_providers.py',
+        'programs/execution_frontend_worker.py',
+        'programs/execution_backend_producers.py',
+        'flow/phase1_phase2_phase3.yaml',
+    }.issubset(relatives)
 
 
 @pytest.mark.parametrize('span', ['phase2', 'phase3'])
