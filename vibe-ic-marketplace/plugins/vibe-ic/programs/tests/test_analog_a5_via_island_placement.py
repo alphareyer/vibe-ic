@@ -718,6 +718,24 @@ def test_k_public_authority_is_parsed_and_changed_predicates_are_refused():
                                   PUBLIC_WIDTH_PRL_DECK)
 
 
+def test_l_public_result_binding_is_single_definition():
+    rules = A5E._parse_width_prl_rules(
+        PUBLIC_WIDTH_PRL_CONFIG, PUBLIC_WIDTH_PRL_DECK)
+    assert rules[3][0] == {
+        "source_rule": "Mn_e", "spacing_um": 0.24,
+        "width_gt_um": 0.39, "parallel_gt_um": 1.0,
+    }
+    changed = PUBLIC_WIDTH_PRL_DECK + "\nmn_e_l = met_lay\n"
+    accepted, observed = True, None
+    try:
+        observed = A5E._parse_width_prl_rules(PUBLIC_WIDTH_PRL_CONFIG, changed)
+    except ValueError as exc:
+        accepted, observed = False, str(exc)
+    assert accepted is False, (
+        f"changed native authority was accepted with rules={observed}")
+    assert "reassigned: Mn_e" in observed
+
+
 def test_k_missing_or_stale_runtime_authority_refuses_instead_of_guessing():
     config_path = "/pdk/libs.tech/klayout/tech/drc/rule_decks/sg13g2_tech_default.json"
     deck_path = "/pdk/libs.tech/klayout/tech/drc/rule_decks/beol/5_17_metaln.drc"

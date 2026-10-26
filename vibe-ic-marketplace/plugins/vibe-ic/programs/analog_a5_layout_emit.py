@@ -304,13 +304,20 @@ def _parse_width_prl_rules(configuration: str, source: str) -> dict:
             rf"{stem}_width\s*=\s*drc_rules\['{key}_w'\]\.to_f\s*/\s*2\b",
             rf"{stem}_length\s*=\s*drc_rules\['{key}_cr'\]\.to_f",
             rf"{stem}_l1\s*=\s*met_lay\.sized\(-1\s*\*\s*{stem}_width\.um\)\.sized\({stem}_width\.um\)",
-            rf"(?:{stem}_l\s*=\s*)?met_lay\.sep\({stem}_l1,\s*{stem}_value\.um,\s*projection_limits\({stem}_length\.um\s*\+\s*0\.001\.um,\s*nil\)\)",
         ]
-        if any(len(statements(pattern)) != 1 for pattern in required):
+        predicate = statements(
+            rf"({stem}_l\s*=\s*)?met_lay\.sep\({stem}_l1,\s*{stem}_value\.um,\s*projection_limits\({stem}_length\.um\s*\+\s*0\.001\.um,\s*nil\)\)")
+        if (any(len(statements(pattern)) != 1 for pattern in required)
+                or len(predicate) != 1):
             raise ValueError("unsupported native width/parallel predicate: " + key)
-        if any(len(re.findall(r"(?m)^[ \t]*" + stem + ending + assignments,
-                              source)) != 1
-               for ending in ("_value", "_width", "_length", "_l1")):
+        required_writes = any(
+            len(re.findall(r"(?m)^[ \t]*" + stem + ending + assignments,
+                           source)) != 1
+            for ending in ("_value", "_width", "_length", "_l1"))
+        result_writes = len(re.findall(
+            r"(?m)^[ \t]*" + stem + r"_l" + assignments, source))
+        expected_result_writes = 1 if predicate[0][1] is not None else 0
+        if required_writes or result_writes != expected_result_writes:
             raise ValueError(
                 "native width/parallel predicate was reassigned: " + key)
         values = [config.get(key + ending) for ending in ("", "_w", "_cr")]
