@@ -131,7 +131,7 @@ def test_unsupported_function_is_byte_preserved(tmp_path, kind):
     assert original.read_bytes() == before
 
 
-@pytest.mark.parametrize('kind', ['pure', 'port', 'attribute', 'eco', 'multidecl', 'multiwriter', 'call', 'include-observer'])
+@pytest.mark.parametrize('kind', ['port', 'attribute', 'eco', 'multidecl', 'multiwriter', 'call', 'include-observer'])
 def test_sink_without_complete_elaborated_census_is_preserved(tmp_path, kind):
     declaration = '  logic sink;'
     assignment = '  assign sink = ^source;'
@@ -156,9 +156,6 @@ def test_sink_without_complete_elaborated_census_is_preserved(tmp_path, kind):
     after, remaining = lint(tmp_path, 'after', working)
     assert after.returncode == red.returncode
     assert remaining == findings
-    if kind == 'pure':
-        assert red.returncode == 1
-        assert any(f['rule'] == 'unread-reg' and f['block_eligible'] for f in findings)
     assert original.read_bytes() == before
 
 

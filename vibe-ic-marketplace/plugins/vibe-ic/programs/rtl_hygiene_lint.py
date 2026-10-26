@@ -107,6 +107,7 @@ Generality: applies to ANY Verilog/SystemVerilog design. Finds bugs #1, #2,
 """
 from __future__ import annotations
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -119,6 +120,7 @@ from typing import List, Dict, Set, Tuple, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _provenance as _prov  # noqa: E402  (ORGANIC #770)
+from _atomic_artefact import write_bytes as atomic_write_bytes  # vibe-ic#1082
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -7844,6 +7846,179 @@ def _extract_top_module_body(src: str):
     return src[last_mod_decl:last_endmod], last_mod_decl
 
 
+def _native_unread_sink_proven(module: Dict, name: str) -> bool:
+    """True only when native JSON proves one local driver and zero readers.
+
+    This is deliberately narrower than the ordinary unread-reg diagnostic.  A
+    removable sink must still exist after elaboration, must not alias a module
+    port, and every bit must be driven by exactly one cell output while no cell
+    input consumes any bit.  Unknown cell-port directions refuse the proof.
+    """
+    net = module.get('netnames', {}).get(name)
+    if not isinstance(net, dict):
+        return False
+    bits = {bit for bit in net.get('bits', []) if isinstance(bit, int)}
+    if not bits:
+        return False
+    for port in module.get('ports', {}).values():
+        if bits & {bit for bit in port.get('bits', []) if isinstance(bit, int)}:
+            return False
+    drivers = []
+    for cell_name, cell in module.get('cells', {}).items():
+        directions = cell.get('port_directions', {})
+        for port_name, connection in cell.get('connections', {}).items():
+            overlap = bits & {bit for bit in connection if isinstance(bit, int)}
+            if not overlap:
+                continue
+            direction = directions.get(port_name)
+            if direction in ('input', 'inout') or direction not in ('input', 'output', 'inout'):
+                return False
+            drivers.append((cell_name, port_name, overlap))
+    return len(drivers) == 1 and drivers[0][2] == bits
+
+
+def _pure_unread_sink_rhs(rhs: str) -> bool:
+    """Closed expression subset with no calls, writes, strings or sequencing."""
+    if not rhs.strip() or re.search(r'[$"`;]|\+\+|--', rhs):
+        return False
+    if re.search(r'\b[A-Za-z_]\w*\s*\(', rhs):
+        return False
+    if re.search(r'(?<![=!<>])=(?!=)', rhs):
+        return False
+    return all(rhs.count(opening) == rhs.count(closing)
+               for opening, closing in (('(', ')'), ('[', ']'), ('{', '}')))
+
+
+def _source_edit_lock_path(path: Path) -> Path:
+    """Stable advisory-lock path for one resolved RTL source name.
+
+    The lock deliberately lives outside the source tree: leaving or removing a
+    sidecar beside the RTL either dirties the project or creates an inode-swap
+    race for a waiting process.  This lock excludes cooperating
+    ``rtl_hygiene_lint --fix`` processes.  It cannot exclude a writer which
+    ignores advisory locks, so publication also requires byte identity with
+    the snapshot admitted under this lock.
+    """
+    key = hashlib.sha256(str(path.resolve()).encode('utf-8')).hexdigest()
+    root = Path(tempfile.gettempdir()) / "vibeic-rtl-hygiene-locks"
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return root / (key + ".lock")
+
+
+def _acquire_source_edit_lock(path: Path) -> Optional[int]:
+    """Take the non-blocking per-source edit lock, or refuse with ``None``."""
+    try:
+        fd = os.open(str(_source_edit_lock_path(path)),
+                     os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except OSError:
+        try:
+            os.close(fd)
+        except (OSError, UnboundLocalError):
+            pass
+        return None
+
+
+def _release_source_edit_lock(fd: int) -> None:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def autofix_unread_local_sink(path: Path, native_design: Dict, top: str,
+                              *, _source_lock_fd: Optional[int] = None
+                              ) -> Tuple[int, List[str]]:
+    """Run the unread-sink repair while holding its source transaction lock."""
+    owned_fd = None
+    if _source_lock_fd is None:
+        owned_fd = _acquire_source_edit_lock(path)
+        if owned_fd is None:
+            return 0, []
+    try:
+        return _autofix_unread_local_sink_locked(path, native_design, top)
+    finally:
+        if owned_fd is not None:
+            _release_source_edit_lock(owned_fd)
+
+
+def _autofix_unread_local_sink_locked(path: Path, native_design: Dict,
+                                      top: str) -> Tuple[int, List[str]]:
+    """Remove source-bound pure continuous-assignment sinks.
+
+    The accepted source subset is intentionally small: one source file, one
+    module, one standalone local declaration and one standalone continuous
+    assignment.  Fresh native JSON supplies the complete elaborated bit-use
+    census.  Preprocessor/generate/function/task constructs, attributes,
+    multiple declarations, ports, calls and any residual reference refuse with
+    byte preservation.  Publication is atomic and refuses if the admitted
+    source bytes changed during analysis.
+    """
+    try:
+        raw_bytes = path.read_bytes()
+        raw = raw_bytes.decode('utf-8')
+    except (OSError, UnicodeError):
+        return 0, []
+    expected = native_design.get('_lint_input_sha256', {}).get(str(path.resolve()))
+    if expected != hashlib.sha256(raw_bytes).hexdigest():
+        return 0, []
+    src = strip_comments(raw)
+    regions = _module_regions(src)
+    if (len(regions) != 1 or regions[0][0] != top
+            or re.search(r'`|\(\*|\*\)|\b(?:generate|endgenerate|function|endfunction|'
+                         r'task|endtask|class|interface|package|checker)\b', src)):
+        return 0, []
+    module = native_design.get('modules', {}).get(top)
+    if not isinstance(module, dict):
+        return 0, []
+    candidates = [finding.symbol for finding in rule_undriven_and_unread(src, str(path))
+                  if finding.rule == 'unread-reg' and finding.block_eligible]
+    edits = []
+    names = []
+    for name in sorted(set(candidates)):
+        declaration = re.compile(
+            r'^[ \t]*(?:wire|reg|logic)\s+'
+            r'(?:(?:signed|unsigned)\s+)?(?:\[[^\]\n]+\]\s*)?'
+            + re.escape(name) + r'\s*;[ \t]*(?:\r?\n|$)', re.M)
+        assignment = re.compile(
+            r'^[ \t]*assign\s+' + re.escape(name)
+            + r'\s*=\s*([^;\n]+)\s*;[ \t]*(?:\r?\n|$)', re.M)
+        declarations = list(declaration.finditer(src))
+        assignments = list(assignment.finditer(src))
+        if len(declarations) != 1 or len(assignments) != 1:
+            continue
+        rhs = assignments[0].group(1)
+        if (re.search(r'\b' + re.escape(name) + r'\b', rhs)
+                or not _pure_unread_sink_rhs(rhs)
+                or not _native_unread_sink_proven(module, name)):
+            continue
+        census = list(src)
+        for match in (declarations[0], assignments[0]):
+            census[match.start():match.end()] = ' ' * (match.end() - match.start())
+        if re.search(r'\b' + re.escape(name) + r'\b', ''.join(census)):
+            continue
+        edits.extend([(declarations[0].start(), declarations[0].end()),
+                      (assignments[0].start(), assignments[0].end())])
+        names.append(name)
+    for start, end in sorted(edits, reverse=True):
+        raw = raw[:start] + raw[end:]
+    if edits:
+        # A non-cooperating writer may ignore our advisory lock.  Never publish
+        # the admitted stale snapshot over bytes that changed during analysis.
+        try:
+            if path.read_bytes() != raw_bytes:
+                return 0, []
+        except OSError:
+            return 0, []
+        replacement = raw.encode('utf-8')
+        atomic_write_bytes(path, replacement)
+        if path.read_bytes() != replacement:
+            raise RuntimeError(
+                f"SOURCE_POSTCONDITION_FAILED: atomic sink repair changed: {path}")
+    return len(names), names
+
+
 def autofix_automatic_case_default(path: Path) -> Tuple[int, List[str]]:
     """Make an automatic function's proven implicit-X return explicit.
 
@@ -8021,13 +8196,44 @@ def main():
         outreg_total = 0
         clock_toggle_total = 0
         automatic_case_total = 0
+        unread_sink_total = 0
+        unread_native_design = None
+        unread_native_top = None
+        if len(args.files) == 1:
+            candidate_path = Path(args.files[0])
+            try:
+                candidate_source = strip_comments(candidate_path.read_text(errors='replace'))
+                candidate_regions = _module_regions(candidate_source)
+                has_unread = any(
+                    finding.rule == 'unread-reg' and finding.block_eligible
+                    for finding in rule_undriven_and_unread(
+                        candidate_source, str(candidate_path)))
+                if has_unread and len(candidate_regions) == 1:
+                    unread_native_top = candidate_regions[0][0]
+                    unread_native_design = _native_driver_view(
+                        args.files, unread_native_top, [], [], [], Path.cwd())
+            except (OSError, ValueError) as exc:
+                print(f"INFO unread-sink-fix-refused: {args.files[0]}: "
+                      f"native symbol/read census unavailable: {exc}")
         for f in args.files:
             p = Path(f)
             if not p.exists():
                 print(f"WARNING: file not found: {f}", file=sys.stderr)
                 continue
-            pre_text = p.read_text(errors="replace")
+            source_lock_fd = _acquire_source_edit_lock(p)
+            if source_lock_fd is None:
+                print(f"INFO source-fix-refused: {f}: another cooperating "
+                      "rtl_hygiene_lint source transaction holds the lock")
+                continue
+            pre_bytes = p.read_bytes()
             pre_ok = _compiles(p) if _iv else False
+            ur, urnames = (autofix_unread_local_sink(
+                p, unread_native_design, unread_native_top,
+                _source_lock_fd=source_lock_fd)
+                if (_iv and pre_ok and unread_native_design is not None
+                    and unread_native_top is not None) else (0, []))
+            if ur:
+                print(f"{f}: removed {ur} proven pure unread local sink(s): {urnames}")
             # ORGANIC-20260703 — repair an input/inout port illegally declared
             # `reg` (uncompilable on the icarus-13 CVDP scorer) BEFORE the other
             # fixers; the `reg` on a net is always removable without semantics.
@@ -8077,9 +8283,24 @@ def main():
             if any(fd.rule == 'unread-reg' for fd in rule_undriven_and_unread(remaining, f)):
                 print(f"INFO unread-sink-fix-refused: {f}: complete elaborated source/include "
                       "read and ownership census unavailable; findings retained")
-            if _iv and pre_ok and (ir or orr or n or g or w or s or ct or ac) and not _compiles(p):
-                p.write_text(pre_text)
-                ir = orr = n = g = w = s = ct = ac = 0
+            post_fix_bytes = p.read_bytes()
+            if _iv and pre_ok and (ur or ir or orr or n or g or w or s or ct or ac) and not _compiles(p):
+                # Roll back only the exact bytes this locked transaction left.
+                # A writer ignoring advisory locks must never have its bytes
+                # replaced by our stale pre-fix snapshot.
+                if p.read_bytes() != post_fix_bytes:
+                    _release_source_edit_lock(source_lock_fd)
+                    print(f"FATAL fix-rollback-refused-source-changed: {f}: "
+                          "source changed after repair; unrelated bytes were "
+                          "preserved", file=sys.stderr)
+                    return 2
+                atomic_write_bytes(p, pre_bytes)
+                if p.read_bytes() != pre_bytes:
+                    _release_source_edit_lock(source_lock_fd)
+                    print(f"FATAL fix-rollback-postcondition-failed: {f}",
+                          file=sys.stderr)
+                    return 2
+                ur = ir = orr = n = g = w = s = ct = ac = 0
                 print(f"WARN fix-reverted-noncompiling: {f} compiled before "
                       f"--fix but not after; ALL fixes reverted (#533 "
                       f"compile-neutrality net — file a backlog with this "
@@ -8092,6 +8313,8 @@ def main():
             outreg_total += orr
             clock_toggle_total += ct
             automatic_case_total += ac
+            unread_sink_total += ur
+            _release_source_edit_lock(source_lock_fd)
         print(f"rtl_hygiene_lint --fix: repaired {total} reset-less registered output(s), "
               f"fenced {guarded_total} sim-only assertion construct(s), "
               f"inserted {cast_total} value-identical width cast(s), "
@@ -8099,7 +8322,8 @@ def main():
               f"promoted {outreg_total} duplicate-declared output port(s) to `output reg`, "
               f"rewrote {sens_total} incomplete sensitivity list(s) to @(*), "
               f"rewrote {clock_toggle_total} delayed oscillator self-toggle(s) to NBA, "
-              f"made {automatic_case_total} automatic function X default(s) explicit")
+              f"made {automatic_case_total} automatic function X default(s) explicit, "
+              f"removed {unread_sink_total} proven pure unread local sink(s)")
         return 0
 
     sev_order = {'ERROR': 2, 'WARN': 1, 'INFO': 0}
