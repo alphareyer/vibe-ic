@@ -251,6 +251,27 @@ def test_unbound_preexisting_l22_goal_is_not_admitted_as_pass(tmp_path):
     assert "source" in row["why"], row
 
 
+def test_owner_label_cannot_spoof_canonical_threshold(tmp_path):
+    """A copied producer label cannot weaken the requirement it cites."""
+    _mk(tmp_path, "# Verification\nThe block must reach toggle coverage "
+                  ">= 95%.\n")
+    import phase1_doc_one_shot_runner as phase1
+    assert phase1._post_emit_l22_coverage_goals(tmp_path) == 1
+    doc_path = (tmp_path / "phase1" / "generated_docs"
+                / "L22_VERIFICATION_PLAN.json")
+    doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    forged = doc["fields"]["coverage_goals"][0]
+    assert forged["target_pct"] == 95.0
+    forged["target_pct"] = 5.0
+    doc_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    row = _step4_summary(tmp_path, {"toggle": {"pct": 10.0}})["rows"][0]
+    assert row["verdict"] == "NOT_MEASURED", row
+    assert row["achieved_pct"] is None, row
+    assert row["source_binding"] == "REFUSED", row
+    assert "target_pct" in row["why"], row
+
+
 @pytest.mark.parametrize("missing", [
     "source", "line", "evidence", "extraction_strategy",
 ])

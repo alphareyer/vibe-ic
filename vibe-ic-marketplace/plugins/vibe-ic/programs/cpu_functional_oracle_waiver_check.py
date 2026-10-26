@@ -60,7 +60,6 @@ import _l10_execution as _l10x  # R-0915-87(2): the ONE execution reader  # noqa
 import l10_coverage_goal_classify as _cgc  # R-0915-113(4)  # noqa: E402
 import l22_coverage_goal_emit as _l22_cov  # canonical L22 owner  # noqa: E402
 import testbench_gen as _tbg  # who owns a case that did not run  # noqa: E402
-from l_doc_consumer_contract import input_doc_texts  # noqa: E402
 
 # The capability-gap token retained on a connectivity-PASS evidence record.
 # A chip-AGNOSTIC capability identifier, NOT a chip/vendor/SKU literal.
@@ -951,8 +950,9 @@ _L22_NUMERIC_OWNERS = frozenset({
 })
 
 
-def _l22_numeric_source_binding(goal: dict, source_texts: dict) -> "tuple[bool, str]":
-    """Whether one L22 numeric goal is bound to its producer's input line."""
+def _l22_numeric_source_binding(
+        goal: dict, canonical_goals: "list[dict]") -> "tuple[bool, str]":
+    """Whether an L22 numeric row exactly matches producer reconstruction."""
     strategy = goal.get("extraction_strategy")
     if strategy not in _L22_NUMERIC_OWNERS:
         return False, ("L22 source binding refused: extraction_strategy is "
@@ -963,23 +963,56 @@ def _l22_numeric_source_binding(goal: dict, source_texts: dict) -> "tuple[bool, 
     source_path = Path(source)
     if source_path.is_absolute() or source.startswith("<outside-project>"):
         return False, "L22 source binding refused: source is not project-relative"
-    text = source_texts.get(source_path)
-    if text is None:
-        return False, ("L22 source binding refused: source is not one of the "
-                       "design's readable input documents")
     line = goal.get("line")
     if type(line) is not int or line <= 0:
         return False, "L22 source binding refused: line is not a positive integer"
-    lines = text.splitlines()
-    if line > len(lines):
-        return False, "L22 source binding refused: line is outside the source document"
     evidence = goal.get("evidence")
     if not isinstance(evidence, str) or not evidence.strip():
         return False, "L22 source binding refused: evidence is absent"
-    if evidence.strip() not in lines[line - 1]:
-        return False, ("L22 source binding refused: evidence is not present on "
-                       "the cited source line")
-    return True, "bound to canonical producer source, line, and evidence"
+    name = goal.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return False, "L22 source binding refused: name is absent"
+    target = goal.get("target_pct")
+    if type(target) not in (int, float):
+        return False, "L22 source binding refused: target_pct is not numeric"
+    if "signoff_gate" not in goal:
+        return False, "L22 source binding refused: signoff role is absent"
+
+    # Provenance selects the producer reconstruction; every consumed semantic
+    # field must then agree.  The claimant-controlled strategy is retained as
+    # a required field, but never establishes ownership on its own.
+    candidates = [
+        canonical for canonical in canonical_goals
+        if canonical.get("extraction_strategy") == strategy
+        and canonical.get("source") == source
+        and canonical.get("line") == line
+        and canonical.get("evidence") == evidence
+    ]
+    if not candidates:
+        return False, ("L22 source binding refused: source, line, evidence, "
+                       "and extraction_strategy do not match a reconstructed "
+                       "canonical goal")
+
+    dimensions = tuple(_cgc.coverage_dimensions(goal)[0])
+    mismatches = []
+    for canonical in candidates:
+        current = []
+        if canonical.get("name") != name:
+            current.append("name")
+        if tuple(_cgc.coverage_dimensions(canonical)[0]) != dimensions:
+            current.append("dimensions")
+        if canonical.get("target_pct") != target:
+            current.append("target_pct")
+        if (canonical.get("signoff_gate") != goal.get("signoff_gate")
+                or canonical.get("signoff_qualifier")
+                != goal.get("signoff_qualifier")):
+            current.append("signoff role")
+        if not current:
+            return True, "exact match to reconstructed canonical producer goal"
+        mismatches.append(current)
+    fields = sorted(set(field for mismatch in mismatches for field in mismatch))
+    return False, ("L22 source binding refused: reconstructed canonical goal "
+                   f"mismatch in {', '.join(fields)}")
 
 
 def _coverage_goal_summary(project: Path) -> dict:
@@ -1008,14 +1041,16 @@ def _coverage_goal_summary(project: Path) -> dict:
         and _cgc.stated_acceptance_percentage(goal)[0] is not None
         and _cgc.coverage_dimensions(goal)[0]
     ]
-    source_texts = {
-        path.relative_to(project): text
-        for path, text in input_doc_texts(project)
-        if path.is_relative_to(project)
-    }
+    reconstruction = _l22_cov.reconstruct_canonical_goals(project)
+    canonical_goals = (reconstruction.get("goals") or []
+                       if reconstruction.get("status") == "OK" else [])
     l22_numeric, l22_unbound = [], []
     for goal in l22_candidates:
-        bound, why = _l22_numeric_source_binding(goal, source_texts)
+        bound, why = _l22_numeric_source_binding(goal, canonical_goals)
+        if reconstruction.get("status") != "OK":
+            why = ("L22 source binding refused: canonical reconstruction "
+                   f"did not complete: {reconstruction.get('reason') or 'unknown'}")
+            bound = False
         (l22_numeric if bound else l22_unbound).append(
             goal if bound else (goal, why))
 

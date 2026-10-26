@@ -330,13 +330,61 @@ def _acceptance_table_goals(project: Path) -> List[Dict[str, Any]]:
     return result
 
 
-def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
+def reconstruct_canonical_goals(project: Path) -> Dict[str, Any]:
+    """Rebuild producer-owned goals from design inputs, without reading L22.
+
+    Consumers use this result to distinguish an emitter row from a row that
+    merely copies the emitter's label.  Keeping reconstruction here ensures
+    admission and emission use the same parser, qualifier, and provenance
+    rules; the stored claimant row is never an input to this decision.
+    """
     gate = _gate_module()
     if gate is None or not hasattr(gate, "_COVERAGE_TARGET_RE"):
         return {"tool": TOOL, "status": "SKIPPED",
                 "reason": "consumer gate absent — refusing to emit against "
                           "a predicate it cannot check",
-                "emitted_count": 0, "emitted": [], "skipped": []}
+                "framed_hits": 0, "goals": [], "skipped": []}
+
+    # include_non_normative=True — an EMITTER must not inherit a GATE's
+    # discard policy. A target the design declares and marks informational
+    # is still declared and must be reconstructed with its advisory role.
+    hits = framed_hits(input_doc_texts(project), gate._COVERAGE_TARGET_RE,
+                       include_non_normative=True)
+    goals: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    for h in hits:
+        targets, refusal = _hit_targets(h)
+        if not targets:
+            skipped.append({"reason": refusal,
+                            "match": str(h.get("match") or "")[:160]})
+            continue
+        src, src_outside = project_relative_source(h.get("source"), project)
+        for name, pct, evidence in targets:
+            qualifier_text = (evidence if len(targets) > 1
+                              else h.get("line_text") or evidence)
+            qualifier = signoff_qualifier(qualifier_text)
+            goal = {
+                "name": name,
+                "target_pct": pct,
+                "signoff_gate": qualifier is None,
+                "signoff_qualifier": qualifier,
+                "source": src,
+                "line": h.get("line"),
+                "evidence": evidence[:200],
+                "extraction_strategy": TOOL,
+            }
+            if src_outside:
+                goal["source_outside_project"] = True
+            goals.append(goal)
+    goals.extend(_acceptance_table_goals(project))
+    return {"tool": TOOL, "status": "OK", "framed_hits": len(hits),
+            "goals": goals, "skipped": skipped}
+
+
+def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
+    reconstructed = reconstruct_canonical_goals(project)
+    if reconstructed.get("status") != "OK":
+        return dict(reconstructed, emitted_count=0, emitted=[])
 
     l22_path = _generated_docs(project) / _L22_NAME
     if not l22_path.is_file():
@@ -353,13 +401,6 @@ def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
         return {"tool": TOOL, "status": "ERROR",
                 "reason": f"{_L22_NAME} is not an object",
                 "emitted_count": 0, "emitted": [], "skipped": []}
-
-    # include_non_normative=True — an EMITTER must not inherit a GATE's
-    # discard policy. A target the design declares and marks informational
-    # is still declared; dropping it makes this layer read as having no
-    # coverage goal at all.
-    hits = framed_hits(input_doc_texts(project), gate._COVERAGE_TARGET_RE,
-                       include_non_normative=True)
 
     # WHERE the goals must land. `l_doc_consumer_contract.l_doc_fields()`
     # merges the nested `fields` payload OVER the top level
@@ -378,44 +419,23 @@ def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
     }
 
     emitted: List[Dict[str, Any]] = []
-    skipped: List[Dict[str, Any]] = []
-    for h in hits:
-        targets, refusal = _hit_targets(h)
-        if not targets:
-            skipped.append({"reason": refusal,
-                            "match": str(h.get("match") or "")[:160]})
+    skipped = reconstructed["skipped"]
+    for goal in reconstructed["goals"]:
+        if goal.get("extraction_strategy") != TOOL:
             continue
-        src, src_outside = project_relative_source(h.get("source"), project)
-        for name, pct, evidence in targets:
-            key = (name.lower(), pct)
-            if key in have:
-                continue
-            have.add(key)
-            # A single shared-threshold target inherits the row qualifier.
-            # Distinct semicolon clauses are bounded independently, so a
-            # qualifier in one clause cannot silently downgrade its sibling.
-            qualifier_text = (evidence if len(targets) > 1
-                              else h.get("line_text") or evidence)
-            qualifier = signoff_qualifier(qualifier_text)
-            goal = {
-                "name": name,
-                "target_pct": pct,
-                "signoff_gate": qualifier is None,
-                "signoff_qualifier": qualifier,
-                "source": src,
-                "line": h.get("line"),
-                "evidence": evidence[:200],
-                "extraction_strategy": TOOL,
-            }
-            if src_outside:
-                goal["source_outside_project"] = True
-            goals.append(goal)
-            emitted.append(goal)
+        key = (str(goal.get("name") or "").lower(), goal.get("target_pct"))
+        if key in have:
+            continue
+        have.add(key)
+        goals.append(goal)
+        emitted.append(goal)
 
     # Source-row identity retains separate populations and makes replay stable.
     table_have = {(g.get("source"), g.get("line"), g.get("extraction_strategy"))
                   for g in goals if isinstance(g, dict)}
-    for goal in _acceptance_table_goals(project):
+    for goal in reconstructed["goals"]:
+        if goal.get("extraction_strategy") != f"{TOOL}.acceptance_table":
+            continue
         key = (goal["source"], goal["line"], goal["extraction_strategy"])
         if key not in table_have:
             goals.append(goal)
@@ -437,7 +457,7 @@ def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
         "tool": TOOL,
         "status": "OK",
         "dry_run": dry_run,
-        "framed_hits": len(hits),
+        "framed_hits": reconstructed["framed_hits"],
         "pre_existing_goals": len(existing) if isinstance(existing, list) else 0,
         "emitted_count": len(emitted),
         "emitted": emitted,
