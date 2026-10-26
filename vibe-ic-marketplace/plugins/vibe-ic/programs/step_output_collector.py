@@ -470,6 +470,80 @@ def latest_pass(project: Path, step_id: str) -> dict | None:
     return record
 
 
+def registered_output_mismatch(project: Path, step_id: str, rel: str,
+                               retained_sha256: str,
+                               current_sha256: str) -> bool:
+    """Confirm one corrupt live output against its registered producer attempt.
+
+    A path and two hashes supplied by a resume caller are not authority.  This
+    predicate accepts only the collector's existing current index row, attempt
+    journal, completed canonical-PASS receipt, and hash-verified retained output
+    snapshot.  It identifies ownership; it does not schedule any descendant.
+    """
+    project = Path(project).resolve()
+    root = _versions_root(project).resolve()
+    try:
+        pointers = json.loads((root / 'latest_pass.json').read_text())['steps']
+        pointer = pointers[str(step_id)]
+        indexed = [row for row in _read_index(project).get('steps', [])
+                   if isinstance(row, dict) and str(row.get('id')) == str(step_id)]
+        if len(indexed) != 1:
+            return False
+        index = indexed[0]
+        folder = Path(pointer['folder'])
+        epoch = root / folder
+        attempt = json.loads((epoch / 'attempt.json').read_text())
+        record = json.loads((epoch / 'outputs.json').read_text())
+        identity = ('id', 'name', 'phase', 'stage', 'folder')
+        if (len(folder.parts) != 3
+                or folder.parts[:2] != (record.get('phase'), record.get('stage'))
+                or not epoch.resolve().is_relative_to(root)
+                or index.get('versioned') is not True
+                or index.get('status') != 'PASS'
+                or str(folder) != index.get('folder')
+                or any(record.get(key) != index.get(key) for key in identity)
+                or any(record.get(key) != attempt.get(key) for key in identity)
+                or attempt.get('status') != 'RUNNING'
+                or record.get('status') != 'PASS'
+                or record.get('canonical_pass') is not True
+                or record.get('storage_root') != str(root.relative_to(project))
+                or attempt.get('storage_root') != record.get('storage_root')
+                or record.get('started_at') != attempt.get('started_at')
+                or record.get('inputs') != attempt.get('inputs')
+                or record.get('input_files') != attempt.get('input_files')
+                or record.get('capture_errors') != []
+                or attempt.get('capture_errors') != []
+                or pointer.get('inputs') != record.get('inputs')
+                or pointer.get('finished_at') != record.get('finished_at')):
+            return False
+        outputs = [row for row in record.get('outputs') or []
+                   if isinstance(row, dict) and row.get('rel') == rel]
+        if len(outputs) != 1:
+            return False
+        output = outputs[0]
+        snapshot_name = output.get('snapshot')
+        snapshot = epoch / snapshot_name if isinstance(snapshot_name, str) else None
+        live_literal = project / rel
+        live = live_literal.resolve()
+        if (output.get('sha256') != retained_sha256
+                or type(output.get('size')) is not int or output['size'] < 0
+                or not isinstance(snapshot_name, str)
+                or Path(snapshot_name).name != snapshot_name
+                or snapshot is None or snapshot.is_symlink() or not snapshot.is_file()
+                or snapshot.resolve().parent != epoch.resolve()
+                or snapshot.stat().st_size != output['size']
+                or _sha(snapshot) != retained_sha256
+                or Path(rel).is_absolute() or live_literal.is_symlink()
+                or not live.is_relative_to(project) or not live.is_file()
+                or str(live.relative_to(project)) != rel
+                or _sha(live) != current_sha256
+                or retained_sha256 == current_sha256):
+            return False
+        return True
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+
+
 def continuation_evidence(project: Path, requested_steps) -> dict:
     """Describe retained bytes before a bounded continuation, without invalidating them.
 
