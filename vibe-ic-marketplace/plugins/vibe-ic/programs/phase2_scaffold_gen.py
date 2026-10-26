@@ -505,6 +505,10 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
     declared_unresolved: dict[str, str] = {}
     parametric_bindings: dict[str, dict] = {}
     resolution_refusals: dict[str, str] = {}
+    # Explicit widths by clean port name.  This is deliberately separate from
+    # ``signals[].width``: _add's scalar 1 is a compatibility default, not a
+    # declaration that may contradict an audited L9 parameter binding.
+    explicit_numeric_widths: dict[str, set[int]] = {}
     # names whose width came from a range this function actually parsed, as
     # opposed to the 1-bit default. A port that got a real number from L17
     # is RESOLVED even if an L9 twin also carries an unusable string.
@@ -553,7 +557,9 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
         if m:
             width = int(m.group(1)) + 1
             name = re.sub(r"\[\d+:0\]", "", str(name))
-            resolved_from_layer.add(_sanitize_id(name))
+            clean_name = _sanitize_id(name)
+            resolved_from_layer.add(clean_name)
+            explicit_numeric_widths.setdefault(clean_name, set()).add(width)
         _record_declared_width(ch, name, declared_unresolved)
         _add(name, direction, width, comment=purpose)
 
@@ -603,7 +609,9 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
                     and width >= 1:
                 # `_WIDTH_NOT_STATED` is not an int, so this arm is now
                 # reachable only from a width the layer actually stated.
-                resolved_from_layer.add(_sanitize_id(name))
+                clean_name = _sanitize_id(name)
+                resolved_from_layer.add(clean_name)
+                explicit_numeric_widths.setdefault(clean_name, set()).add(width)
             else:
                 width = 1
             _record_declared_width(port, name, declared_unresolved)
@@ -632,9 +640,20 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
             continue
         binding = parametric_bindings.get(s["name"])
         if binding is not None:
+            explicit = explicit_numeric_widths.get(s["name"], set())
+            incompatible = sorted(width for width in explicit
+                                  if width != binding["default"])
+            if incompatible:
+                s["width"] = None
+                s["width_declared"] = (
+                    "invalid width_resolution: explicit numeric width(s) "
+                    f"{incompatible!r} disagree with resolved width "
+                    f"{binding['default']}")
+                continue
             # Keep the producer's numeric default for consumers whose scope
             # cannot see DUT parameters (TB and wrappers), while carrying the
             # exact owned declaration to the top-module emitter.
+            s["width"] = binding["default"]
             s["width_declared"] = binding["symbolic"]
             s["width_parameter_binding"] = binding
             continue

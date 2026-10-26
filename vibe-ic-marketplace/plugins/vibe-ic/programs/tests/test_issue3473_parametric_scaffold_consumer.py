@@ -69,6 +69,38 @@ def test_owned_resolution_parameterizes_top_and_preserves_numeric_consumers():
     assert "reg  [31:0] payload_i;" in scaf.emit_tb_v("vector_cell", signals)
 
 
+def test_unhinted_l17_default_is_replaced_by_validated_l9_numeric_width():
+    doc = _document()
+    l17 = {"channels": [{"name": "payload_i", "direction": "input",
+                          # This legacy field is not a supported L17 width
+                          # declaration; only a bracketed channel name is.
+                          "width": 16}]}
+    signals = scaf.derive_signals(l17, doc)
+    payload = next(s for s in signals if s["name"] == "payload_i")
+    assert payload["width"] == 32
+    assert "input  [word_len-1:0] payload_i" in scaf.emit_top_v(
+        "vector_cell", signals, "vector cell", parameters=doc["parameters"])
+    assert "reg  [31:0] payload_i;" in scaf.emit_tb_v("vector_cell", signals)
+    assert "input  [31:0] payload_i," in scaf.emit_soc_wrap_v(
+        "vector_cell", signals, [])
+
+
+def test_explicit_l17_width_disagreement_refuses_before_output_write(tmp_path):
+    doc = _document()
+    l17 = {"channels": [{"name": "payload_i[7:0]",
+                          "direction": "input"}]}
+    signals = scaf.derive_signals(l17, doc)
+    payload = next(s for s in signals if s["name"] == "payload_i")
+    assert payload["width"] is None
+    assert "[8] disagree with resolved width 32" in payload["width_declared"]
+    target = tmp_path / "top.v"
+    with pytest.raises(scaf.UnresolvedPortWidth):
+        target.write_text(scaf.emit_top_v(
+            "vector_cell", signals, "vector cell",
+            parameters=doc["parameters"]))
+    assert not target.exists()
+
+
 @pytest.mark.parametrize("mutate,reason", [
     (lambda d: d["top_ports"][2]["width_resolution"].update(
         parameter_default_int=16), "stale"),
