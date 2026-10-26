@@ -921,12 +921,12 @@ def netlist_content(block_dir) -> BoundedContent:
     one. Exempting silence here is precisely how silence became cheaper than
     disclosure.
     """
-    result = content_class_bounded(
-        [(Path(block_dir) / NETLIST_PROVENANCE_ARTEFACT,
-          NETLIST_CONTENT_KEYS)])
-    if result.klass == CONTENT_UNDISCLOSED:
+    sidecar = Path(block_dir) / NETLIST_PROVENANCE_ARTEFACT
+    result = content_class_bounded([(sidecar, NETLIST_CONTENT_KEYS)])
+    if result.klass == CONTENT_UNDISCLOSED and not sidecar.is_file():
         # A current read validation discloses an existing typed design without
         # pretending that the validator historically emitted its frozen bytes.
+        # A present A3 sidecar remains authoritative even when it is silent.
         import analog_existing_design_validate as existing
         validated = existing.consume(Path(block_dir))
         if validated is not None:

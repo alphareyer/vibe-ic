@@ -97,6 +97,30 @@ def test_a17_reads_the_current_validation_without_manufacturing_emission_history
     assert binding is None
 
 
+def test_present_silent_a3_sidecar_remains_authoritative_for_a3_and_a8(design):
+    import analog_a8_hardmacro_emit as hardmacro
+    project, bdir, _ = design
+    topology = json.loads((bdir / "topology.json").read_text())
+    spec = json.loads((bdir / "spec.json").read_text())
+    spec.update(block="cell", interface={"pins": [
+        {"name": port} for port in topology["ports"]]})
+    (bdir / "spec.json").write_text(json.dumps(spec))
+    (bdir.parent / "analog_block_list.json").write_text(json.dumps({
+        "blocks": ["cell"]}))
+    row = record(design)
+    assert row["status"] == "PASS", row
+    assert existing.consume(bdir) == row
+
+    (bdir / "netlist_provenance.json").write_text("{}")
+    content = common.netlist_content(bdir)
+    assert content.klass == common.CONTENT_UNDISCLOSED
+    assert content.source is None
+    binding, why = hardmacro._declared_a3_subject_binding(
+        project, "cell", bdir, topology)
+    assert binding is None
+    assert why == "A3 netlist provenance names a different block"
+
+
 @pytest.mark.parametrize("old,new", [
     ("w=2u", "w=3u"),
     ("out inp vss vss native_n", "inp out vss vss native_n"),
