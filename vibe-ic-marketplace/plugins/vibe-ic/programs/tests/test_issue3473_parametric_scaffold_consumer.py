@@ -41,7 +41,8 @@ def _document(*, symbolic="word_len-1:0", identifier="word_len",
                          "source": "interface.md"}],
         "top_ports": [
             {"name": "clock_i", "direction": "input", "width": 1},
-            {"name": "reset_i", "direction": "input", "width": 1},
+            {"name": "reset_i", "direction": "input", "width": 1,
+             "description": "active-high reset"},
             {"name": "payload_i", "direction": "input", "width": width,
              "msb": width - 1, "lsb": 0,
              "width_resolution": resolution},
@@ -54,6 +55,149 @@ def _emit(doc):
     signals = scaf.derive_signals({}, doc)
     return signals, scaf.emit_top_v(doc["top_module"], signals, "vector cell",
                                     parameters=doc.get("parameters"))
+
+
+def _connection(wrapper: str, port: str) -> str:
+    prefix = f".{port}("
+    return next(line.strip().rstrip(",") for line in wrapper.splitlines()
+                if line.strip().startswith(prefix))
+
+
+def _scaffold_project(root: Path, reset_port: dict) -> Path:
+    gd = root / "phase1/generated_docs"
+    gd.mkdir(parents=True)
+    (gd / "L1_DATASHEET.json").write_text(json.dumps({
+        "ic_name": "reset_probe",
+    }))
+    (gd / "L9_INTEGRATION_SPEC.json").write_text(json.dumps({
+        "top_module": "reset_probe",
+        "top_ports": [
+            {"name": "clk", "direction": "input", "width": 1},
+            dict(reset_port, direction="input", width=1),
+            {"name": "done", "direction": "output", "width": 1},
+        ],
+    }))
+    return root
+
+
+def _scaffold_files(project: Path) -> list[str]:
+    out = project / "phase2/stage1/scaffold"
+    return sorted(p.name for p in out.iterdir()) if out.is_dir() else []
+
+
+def test_emit_scaffold_refuses_unknown_before_any_output(tmp_path):
+    project = _scaffold_project(tmp_path / "unknown", {
+        "name": "reset_x",
+        "description": "polarity unspecified",
+        "reset_polarity": "unknown",
+    })
+    with pytest.raises(scaf.UnknownResetPolarity):
+        scaf.emit_scaffold(project)
+    files = _scaffold_files(project)
+    tb = project / "phase2/stage1/scaffold/reset_probe_tb.v"
+    guessed_tb = ([line.strip() for line in tb.read_text().splitlines()
+                   if "reset_x =" in line] if tb.is_file() else [])
+    observed = "files=%s;guessed_tb=%s" % (
+        ",".join(files), "|".join(guessed_tb))
+    assert observed == "files=;guessed_tb="
+
+
+def test_emit_scaffold_skips_cannot_bypass_unknown_preflight(tmp_path):
+    project = _scaffold_project(tmp_path / "unknown_skip", {
+        "name": "reset_x",
+        "description": "polarity unspecified",
+        "reset_polarity": "unknown",
+    })
+    with pytest.raises(scaf.UnknownResetPolarity):
+        scaf.emit_scaffold(project, skip_cocotb=True, skip_soc=True)
+    assert _scaffold_files(project) == []
+
+
+@pytest.mark.parametrize(("metadata", "active_low", "wrapper_connection",
+                          "asserted", "released"), [
+    ({"polarity": "active_high"}, False, ".reset_x(~PRESETn)", "1", "0"),
+    ({"active_low": True}, True, ".reset_x(PRESETn)", "0", "1"),
+])
+def test_emit_scaffold_tb_and_wrapper_share_structured_reset_authority(
+        tmp_path, metadata, active_low, wrapper_connection, asserted, released):
+    project = _scaffold_project(tmp_path / ("low" if active_low else "high"),
+                                {"name": "reset_x", **metadata})
+    report = scaf.emit_scaffold(project)
+    out = Path(report["out_dir"])
+    tb = (out / "reset_probe_tb.v").read_text()
+    wrapper = (out / "reset_probe_soc_wrap.v").read_text()
+    signals = scaf.derive_signals({}, json.loads(
+        (project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").read_text()))
+    assert scaf._detect_rst_port(signals) == ("reset_x", active_low)
+    assert _connection(wrapper, "reset_x") == wrapper_connection
+    reset_lines = [line.strip() for line in tb.splitlines()
+                   if line.strip().startswith("reset_x =")]
+    assert reset_lines[-2:] == [
+        f"reset_x = 1'b{asserted};", f"reset_x = 1'b{released};"]
+
+
+@pytest.mark.parametrize(("reset_name", "expected"), [
+    ("rst", ".rst(~PRESETn)"),
+    ("rst_n", ".rst_n(PRESETn)"),
+])
+def test_soc_wrapper_adapts_only_known_reset_polarity(reset_name, expected):
+    doc = _document()
+    doc["top_ports"][1]["name"] = reset_name
+    doc["top_ports"][1]["description"] = (
+        "active-low reset" if reset_name == "rst_n" else "active-high reset")
+    signals = scaf.derive_signals({}, doc)
+    wrapper = scaf.emit_soc_wrap_v(doc["top_module"], signals, [])
+    assert _connection(wrapper, reset_name) == expected
+
+
+def test_soc_wrapper_without_reset_does_not_fabricate_native_reset():
+    doc = _document()
+    signals = [s for s in scaf.derive_signals({}, doc)
+               if not scaf._is_reset_name(s["name"])]
+    wrapper = scaf.emit_soc_wrap_v(doc["top_module"], signals, [])
+    assert ".reset(" not in wrapper
+    assert ".rst(" not in wrapper
+
+
+def test_soc_wrapper_refuses_unknown_reset_polarity_before_write(tmp_path):
+    cases = [
+        ("reset", "polarity unspecified"),
+        ("reset_x", ""),
+        ("rst_n", "active-high reset"),
+    ]
+    for reset_name, comment in cases:
+        signals = [
+            {"name": "clk", "direction": "input", "width": 1,
+             "comment": ""},
+            {"name": reset_name, "direction": "input", "width": 1,
+             "comment": comment},
+        ]
+        target = tmp_path / f"{reset_name}_soc_wrap.v"
+        try:
+            text = scaf.emit_soc_wrap_v("unknown", signals, [])
+        except scaf.UnknownResetPolarity as exc:
+            observed = "REFUSED_UNKNOWN_RESET_POLARITY"
+            assert exc.port == reset_name
+        else:
+            observed = _connection(text, reset_name)
+            target.write_text(text)
+        assert observed == "REFUSED_UNKNOWN_RESET_POLARITY"
+        assert not target.exists()
+
+
+def test_real_producer_active_high_reset_is_adapted_to_apb_presetn():
+    raw = os.environ.get("ISSUE3473_PROJECT")
+    if not raw:
+        pytest.skip("set ISSUE3473_PROJECT to the fresh #3473 producer project")
+    docs = Path(raw) / "phase1/generated_docs"
+    l9 = json.loads((docs / "L9_INTEGRATION_SPEC.json").read_text())
+    l17 = json.loads((docs / "L17_CHANNEL_SIGNAL_CATALOG.json").read_text())
+    fields = l9.get("fields", l9)
+    signals = scaf.derive_signals(l17.get("fields", l17), fields)
+    rst, active_low = scaf._detect_rst_port(signals)
+    assert (rst, active_low) == ("rst", False)
+    wrapper = scaf.emit_soc_wrap_v(fields["top_module"], signals, [])
+    assert _connection(wrapper, rst) == ".rst(~PRESETn)"
 
 
 def test_owned_resolution_parameterizes_top_and_preserves_numeric_consumers():

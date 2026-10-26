@@ -16,6 +16,7 @@ The two fixture blobs are REAL Yosys 0.66 output captured from spm:
                   cell with no SAT model -> honest SKIPPED-CONDITION
 """
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1026,6 +1027,131 @@ def _yosys(script_path):
            f"yosys -s {script_path} 2>&1")
     return _pr.run(["docker", "exec", _live_container(), "bash", "-lc", cmd],
                           capture_output=True, text=True).stdout or ""
+
+
+_STRUCTURAL_RTL = (
+    "module structural_dut(input [3:0] a, input [3:0] b, input sel, "
+    "output [3:0] y);\n"
+    "  assign y = sel ? b : a;\n"
+    "endmodule\n")
+_CHANGED_STRUCTURAL_RTL = _STRUCTURAL_RTL.replace(
+    "assign y = sel ? b : a;", "assign y = ~(sel ? b : a);")
+
+
+def _fresh_structural_tool(work, command):
+    """Run one bounded tool command without attaching to a fleet container."""
+    return _pr.run(
+        ["docker", "run", "--rm", "--read-only", "--network", "none",
+         "--cpus", "2", "--memory", "4g", "--pids-limit", "256",
+         "--tmpfs", "/tmp:rw,nosuid,size=256m",
+         "--mount", f"type=bind,src={work},dst={work}",
+         _pin.image_reference(), "--skip", "bash", "-lc", command],
+        capture_output=True, text=True)
+
+
+def _fresh_structural_yosys(work, script_path):
+    result = _fresh_structural_tool(
+        work, f"export PATH=/foss/tools/yosys/bin:$PATH && "
+              f"yosys -s {script_path} 2>&1")
+    return result.returncode, (result.stdout or "") + (result.stderr or "")
+
+
+def _mapped_structural_case(tmp_path):
+    """Create neutral mapped gold/gate inputs with the pinned official library."""
+    work, cleanup = tmp_path, (lambda: None)
+    (work / "same.v").write_text(_STRUCTURAL_RTL)
+    (work / "changed.v").write_text(_CHANGED_STRUCTURAL_RTL)
+    map_script = work / "map_structural.ys"
+    map_script.write_text(
+        f"read_verilog {work/'same.v'}\n"
+        "synth -top structural_dut\n"
+        f"dfflibmap -liberty {_SKY130_HD_LIB}\n"
+        f"abc -liberty {_SKY130_HD_LIB}\n"
+        f"write_verilog -noattr {work/'gold.v'}\n"
+        "design -reset\n"
+        f"read_verilog {work/'changed.v'}\n"
+        "synth -top structural_dut\n"
+        f"dfflibmap -liberty {_SKY130_HD_LIB}\n"
+        f"abc -liberty {_SKY130_HD_LIB}\n"
+        f"write_verilog -noattr {work/'changed_gate.v'}\n")
+    map_rc, map_log = _fresh_structural_yosys(work, map_script)
+    assert map_rc == 0, map_log[-1000:]
+    assert (work / "gold.v").is_file(), map_log[-1000:]
+    assert (work / "changed_gate.v").is_file(), map_log[-1000:]
+    assert re.search(r"(?m)^\s*[A-Za-z_\\][^\s(]*\s+\\?_[0-9]+_\s*\($",
+                     (work / "gold.v").read_text()), (
+        "control did not produce a structural standard-cell gold netlist")
+    return work, cleanup
+
+
+def _run_structural_recipe(work, gate, liberty):
+    script = lec_run.build_equiv_script(
+        [str(work / "gold.v")], str(gate), "structural_dut", liberty)
+    script_path = work / ("equiv_" + Path(gate).stem + ".ys")
+    script_path.write_text(script)
+    _, log = _fresh_structural_yosys(work, script_path)
+    return lec_run.parse_equiv_output(log), log
+
+
+def test_structural_gold_loads_the_same_official_cell_models_as_gate(tmp_path):
+    work, cleanup = _mapped_structural_case(tmp_path)
+    try:
+        parsed, log = _run_structural_recipe(
+            work, work / "gold.v", _SKY130_HD_LIB)
+        assert parsed["verdict"] == "PASS", (parsed, log[-1200:])
+        assert (parsed["proven"] or 0) > 0 and parsed["unproven"] == 0
+    finally:
+        cleanup()
+
+
+def test_structural_gold_still_refuses_a_changed_gate(tmp_path):
+    work, cleanup = _mapped_structural_case(tmp_path)
+    try:
+        parsed, log = _run_structural_recipe(
+            work, work / "changed_gate.v", _SKY130_HD_LIB)
+        assert parsed["verdict"] == "INCONCLUSIVE", (parsed, log[-1200:])
+        assert parsed["equivalent"] is False
+        assert parsed["parse_error"] is False
+        assert parsed["total"] == 4
+        assert parsed["proven"] == 0 and parsed["unproven"] == 4
+        assert parsed["induction_wall_kind"] == "miter_inconsistent"
+        assert "Circuit inherently diverges!" in parsed["verdict_explanation"]
+        assert "NO counterexample was recorded" in parsed["verdict_explanation"]
+    finally:
+        cleanup()
+
+
+@pytest.mark.parametrize("model_kind", ["missing", "wrong"])
+def test_structural_gold_missing_or_wrong_cell_models_fail_closed(
+        tmp_path, model_kind):
+    work, cleanup = _mapped_structural_case(tmp_path)
+    try:
+        if model_kind == "missing":
+            liberty = None
+        else:
+            wrong = work / "wrong.lib"
+            make_wrong = _fresh_structural_tool(
+                work, f"sed -E 's/^([[:space:]]*cell[[:space:]]*"
+                      f"\\([[:space:]]*\"?)/\\1wrong_/' "
+                      f"{_SKY130_HD_LIB} > {wrong}")
+            assert make_wrong.returncode == 0 and wrong.is_file(), make_wrong.stderr
+            liberty = str(wrong)
+        parsed, log = _run_structural_recipe(work, work / "gold.v", liberty)
+        assert parsed["verdict"] == "INCONCLUSIVE", (parsed, log[-1200:])
+        assert parsed["equivalent"] is False
+        assert not parsed["success_line"]
+        assert parsed["parse_error"] is True
+        assert parsed["proven"] is None and parsed["unproven"] is None
+        assert parsed["total"] is None
+        assert parsed["undefined_macro_modules"], parsed
+        assert "definition was not staged" in parsed["verdict_explanation"]
+        assert "0 points were compared" in parsed["verdict_explanation"]
+        if model_kind == "missing":
+            assert "Liberty frontend:" not in log
+        else:
+            assert "Liberty frontend:" in log
+    finally:
+        cleanup()
 
 
 # ---------------------------------------------------------------------------

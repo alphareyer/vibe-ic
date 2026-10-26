@@ -3855,21 +3855,28 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
     _observable_names = observable_matchpoint_names(top)
     gold_read = " ".join(gold_files)
     bb = "".join(f"read_verilog -lib {q}\n" for q in (blackbox_v or []))
-    # Empty except on the Liberty-expanded gate (see LIBERTY_PIN_ATTR).
+    # Empty except when BOTH halves consume the synthesis-bound functional
+    # Liberty (see LIBERTY_PIN_ATTR).  A structural gold can instantiate the
+    # same official cells as the mapped gate, so it needs these definitions
+    # before its own read and prep; loading them only after `design -stash gold`
+    # makes gold elaboration abort before a miter exists.
+    functional_liberty_read = ""
     hide_cell_pins = ""
     if gate_is_generic:
         # Pre-techmap `$_`-primitive gate: -icells re-binds the escaped names so
         # `hierarchy -check` resolves them (no Liberty; already satgen-modelable).
         gate_read = f"{bb}read_verilog -icells {gate_netlist}\n"
     elif liberty:
-        # Expand Liberty cells to $_ primitives (functions + ff/latch groups),
-        # skipping any cell with no function (stays blackbox → honest SAT gap).
-        # The gold is stashed at this point, so the design is EMPTY and every
-        # wire `w:*` selects belongs to a Liberty cell module; `flatten` copies
-        # the tag onto each wire it creates from one, and those wires are then
-        # hidden. See LIBERTY_PIN_ATTR for why.
-        gate_read = (f"read_liberty -ignore_miss_func {liberty}\n"
-                     f"setattr -set {LIBERTY_PIN_ATTR} 1 w:*\n"
+        # Expand the SAME synthesis-bound Liberty on each independently-stashed
+        # half to $_ primitives (functions + ff/latch groups), skipping cells
+        # with no function (they remain blackboxes → an honest SAT gap).  The
+        # design is EMPTY at both reads, so every selected `w:*` belongs to a
+        # Liberty module; `flatten` copies the tag onto created pin wires and
+        # the matching hide operation keeps them out of equivalence matching.
+        functional_liberty_read = (
+            f"read_liberty -ignore_miss_func {liberty}\n"
+            f"setattr -set {LIBERTY_PIN_ATTR} 1 w:*\n")
+        gate_read = (f"{functional_liberty_read}"
                      f"{bb}read_verilog {gate_netlist}\n")
         hide_cell_pins = f"rename -hide a:{LIBERTY_PIN_ATTR}\n"
     else:
@@ -3902,10 +3909,12 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
         # "unknown macro or compiler directive" — a read abort, hence 0
         # compared points. `_resolve_gold_files` guarantees the macro headers
         # are concatenated first, which single-unit reads REQUIRE.
-        gold_read_cmd = (f"{_plugin_line}read_slang --single-unit {gold_read} "
+        gold_read_cmd = (f"{functional_liberty_read}{_plugin_line}"
+                         f"read_slang --single-unit {gold_read} "
                          f"--top {top} {gold_defines}")
     else:
-        gold_read_cmd = f"read_verilog -sv {gold_read}"
+        gold_read_cmd = (f"{functional_liberty_read}"
+                         f"read_verilog -sv {gold_read}")
     # FUNCTIONAL-MODE WRAPPING (scan netlists only).  Both halves are emitted
     # together or not at all: a gold wrapper without a gate wrapper would
     # compare the RTL against nothing, and a gate wrapper without a gold one
@@ -4020,6 +4029,7 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
         # design has no memory. Plain stock-yosys command — no fork flag/probe.
         f"memory_map\n"
         f"flatten\n"
+        f"{hide_cell_pins}"
         # ASYNC-FF LEGALIZATION: an async-reset/-set FF (SV `always @(posedge clk
         # or negedge rst_n)`) maps to `$_DFF_PN0_`/`$_DFFSR_*`, which
         # equiv_induct's SAT engine cannot model — it aborts "No SAT model
