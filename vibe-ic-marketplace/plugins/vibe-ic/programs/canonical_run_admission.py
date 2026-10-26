@@ -123,6 +123,7 @@ def _strict_program_digest(
     rows: list[tuple[str, str]] = []
     unavailable: list[tuple[Path, str]] = []
     nofollow = getattr(os, "O_NOFOLLOW", 0)
+    nonblock = getattr(os, "O_NONBLOCK", 0)
     for path in paths:
         reason: Optional[str] = None
         digest: Optional[str] = None
@@ -131,7 +132,10 @@ def _strict_program_digest(
             reason = "symlink"
         else:
             try:
-                fd = os.open(path, os.O_RDONLY | nofollow)
+                # A FIFO opened read-only blocks before fstat() can reject it.
+                # Nonblocking acquisition lets the descriptor type decide;
+                # it has no effect on reads from an ordinary regular file.
+                fd = os.open(path, os.O_RDONLY | nofollow | nonblock)
                 if not stat.S_ISREG(os.fstat(fd).st_mode):
                     reason = "not-regular"
                 else:

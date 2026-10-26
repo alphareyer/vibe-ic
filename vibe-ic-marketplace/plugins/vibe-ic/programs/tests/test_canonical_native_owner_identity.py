@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import threading
 
 import pytest
 
@@ -152,6 +153,32 @@ def test_step13_owner_is_read_once_for_bound_program_identity(
 
     assert admitted.admitted and admitted.reason == 'ADMITTED'
     assert owner_opens == 1
+
+
+def test_step13_owner_fifo_refuses_without_blocking_or_ledger(admission_case):
+    module, project, programs = admission_case
+    owner = programs / 'lec_run.py'
+    owner.unlink()
+    os.mkfifo(owner)
+    observed = []
+
+    def invoke():
+        observed.append(module.admit_span(
+            project, 'phase2', programs, 'fixture-container',
+            {'pdk': 'fixture-pdk', 'entry_step': '14', 'exit_step': '14'}))
+
+    worker = threading.Thread(target=invoke, daemon=True)
+    worker.start()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive(), 'FIFO source blocked canonical admission'
+    assert len(observed) == 1
+    refused = observed[0]
+    assert not refused.admitted
+    assert refused.reason == 'CANONICAL_PROGRAM_SOURCE_UNAVAILABLE'
+    assert 'programs/lec_run.py (not-regular)' in refused.detail
+    ledger = module.ledger_path(project)
+    assert not ledger.exists() or not ledger.read_text().strip()
 
 
 def test_step13_owner_extends_existing_canonical_program_population(
