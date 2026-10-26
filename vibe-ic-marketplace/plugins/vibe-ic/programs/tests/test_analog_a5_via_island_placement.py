@@ -22,7 +22,12 @@ arm below fails against the code as it stood before its own fix.
 """
 from __future__ import annotations
 
+import hashlib
+import importlib
+import json
+
 import _plugin_tree  # noqa: F401  — puts programs/ on sys.path
+import pytest
 
 import analog_a5_layout_emit as A5E
 import analog_a5_pdk_device_limits as A5L
@@ -631,3 +636,144 @@ def test_j_a_clamped_device_is_blocking_and_a_short_still_is():
     assert got == [A5E.OVER_MAXIMUM_QUANTITY, A5E.SHORT_QUANTITY]
     # the older, narrower reader still answers about shorts only
     assert [d["quantity"] for d in A5E.blocking_shorts(devs)] == [A5E.SHORT_QUANTITY]
+
+
+# Public authority excerpts from IHP-Open-PDK main on 2026-10-26.
+# Full-file identities:
+#   sg13g2_tech_default.json 07930b016cdffe14c2cb82b47fbec193643347607db6d44aa1abfdece056cd2f
+#   beol/5_17_metaln.drc    0023b4dfc61eb71e14d2d4b3b003078d3f8121c732445ad80a9bca187279fb6e
+# The excerpts retain the complete declarations and executable predicates
+# consumed here; unrelated rules are deliberately not made into a test PDK.
+PUBLIC_WIDTH_PRL_CONFIG = json.dumps({"drc_rules": {
+    "Mn_e": 0.24, "Mn_e_w": 0.39, "Mn_e_cr": 1.0,
+    "Mn_f": 0.6, "Mn_f_w": 10.0, "Mn_f_cr": 10.0,
+}})
+PUBLIC_WIDTH_PRL_DECK = """
+mets_lay = [metal2_drw, metal3_drw, metal4_drw, metal5_drw]
+mn_e_value = drc_rules['Mn_e'].to_f
+mn_e_width = drc_rules['Mn_e_w'].to_f / 2
+mn_e_length = drc_rules['Mn_e_cr'].to_f
+mn_e_l1 = met_lay.sized(-1 * mn_e_width.um).sized(mn_e_width.um)
+mn_e_l = met_lay.sep(mn_e_l1, mn_e_value.um, projection_limits(mn_e_length.um + 0.001.um, nil))
+mn_f_value = drc_rules['Mn_f'].to_f
+mn_f_width = drc_rules['Mn_f_w'].to_f / 2
+mn_f_length = drc_rules['Mn_f_cr'].to_f
+mn_f_l1 = met_lay.sized(-1 * mn_f_width.um).sized(mn_f_width.um)
+mn_f_l = met_lay.sep(mn_f_l1, mn_f_value.um, projection_limits(mn_f_length.um + 0.001.um, nil))
+"""
+
+
+def _width_prl_geo():
+    rules = A5L.deck_rules(SURROUND_TECH)
+    rules["metal_width_spacing_um"] = {3: [
+        {"source_rule": "Mn_e", "spacing_um": 0.24,
+         "width_gt_um": 0.39, "parallel_gt_um": 1.0},
+        {"source_rule": "Mn_f", "spacing_um": 0.6,
+         "width_gt_um": 10.0, "parallel_gt_um": 10.0},
+    ]}
+    return A5E.Geo(rules, 0.21, 100, 0.30, 0.15)
+
+
+def test_k_width_prl_rules_reach_the_existing_site_clearance_consumer():
+    geo = _width_prl_geo()
+    # Wide, 2um-parallel rectangles with a 0.22um gap clear the ordinary
+    # 0.21um floor but violate Mn_e's source-declared 0.24um conditional.
+    sites = A5E.Sites([
+        {"net": "other", "layer": "metal3", "box": (82, 0, 142, 200)},
+    ], geo)
+    assert sites.clear((0, 0, 60, 200), ["metal3"], None, "mine") is False
+    # The conditional distance itself is legal: spacing is a strict floor.
+    boundary = A5E.Sites([
+        {"net": "other", "layer": "metal3", "box": (84, 0, 144, 200)},
+    ], geo)
+    assert boundary.clear((0, 0, 60, 200), ["metal3"], None, "mine") is True
+    # The public predicate says wider/more-than. Equality on either input
+    # keeps the old unconditional floor, as does a genuinely narrow wire.
+    width_equal = A5E.Sites([
+        {"net": "other", "layer": "metal3", "box": (61, 0, 100, 200)},
+    ], geo)
+    assert width_equal.clear((0, 0, 39, 200), ["metal3"], None, "mine") is True
+    prl_equal = A5E.Sites([
+        {"net": "other", "layer": "metal3", "box": (82, 0, 142, 100)},
+    ], geo)
+    assert prl_equal.clear((0, 0, 60, 100), ["metal3"], None, "mine") is True
+    assert geo.metal_space("metal3", (0, 0, 30, 2000),
+                           (51, 0, 81, 2000)) == 21
+
+
+def test_k_public_authority_is_parsed_and_changed_predicates_are_refused():
+    rules = A5E._parse_width_prl_rules(
+        PUBLIC_WIDTH_PRL_CONFIG, PUBLIC_WIDTH_PRL_DECK)
+    assert sorted(rules) == [2, 3, 4, 5]
+    assert rules[3][0] == {
+        "source_rule": "Mn_e", "spacing_um": 0.24,
+        "width_gt_um": 0.39, "parallel_gt_um": 1.0,
+    }
+    with pytest.raises(ValueError, match="unsupported native width/parallel predicate"):
+        A5E._parse_width_prl_rules(
+            PUBLIC_WIDTH_PRL_CONFIG,
+            PUBLIC_WIDTH_PRL_DECK.replace("projection_limits", "changed_predicate"))
+    with pytest.raises(ValueError, match="absent or invalid"):
+        A5E._parse_width_prl_rules(json.dumps({"drc_rules": {}}),
+                                  PUBLIC_WIDTH_PRL_DECK)
+
+
+def test_l_public_result_binding_is_single_definition():
+    rules = A5E._parse_width_prl_rules(
+        PUBLIC_WIDTH_PRL_CONFIG, PUBLIC_WIDTH_PRL_DECK)
+    assert rules[3][0] == {
+        "source_rule": "Mn_e", "spacing_um": 0.24,
+        "width_gt_um": 0.39, "parallel_gt_um": 1.0,
+    }
+    changed = PUBLIC_WIDTH_PRL_DECK + "\nmn_e_l = met_lay\n"
+    accepted, observed = True, None
+    try:
+        observed = A5E._parse_width_prl_rules(PUBLIC_WIDTH_PRL_CONFIG, changed)
+    except ValueError as exc:
+        accepted, observed = False, str(exc)
+    assert accepted is False, (
+        f"changed native authority was accepted with rules={observed}")
+    assert "reassigned: Mn_e" in observed
+
+
+def test_k_missing_or_stale_runtime_authority_refuses_instead_of_guessing():
+    config_path = "/pdk/libs.tech/klayout/tech/drc/rule_decks/sg13g2_tech_default.json"
+    deck_path = "/pdk/libs.tech/klayout/tech/drc/rule_decks/beol/5_17_metaln.drc"
+
+    class PayloadStage:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def sh(self, _command, timeout=120):
+            return 0, json.dumps(self.payload), ""
+
+    def item(text):
+        return {"text": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}
+
+    valid = {config_path: item(PUBLIC_WIDTH_PRL_CONFIG),
+             deck_path: item(PUBLIC_WIDTH_PRL_DECK)}
+    got = A5E._read_width_prl_rules(PayloadStage(valid), "/pdk/libs.tech/magic/pdk.tech")
+    assert got["status"] == "READ"
+    missing = A5E._read_width_prl_rules(
+        PayloadStage({config_path: item(PUBLIC_WIDTH_PRL_CONFIG)}),
+        "/pdk/libs.tech/magic/pdk.tech")
+    assert missing["status"] == "REFUSED" and "exactly one" in missing["detail"]
+    stale = json.loads(json.dumps(valid))
+    stale[deck_path]["sha256"] = "0" * 64
+    refused = A5E._read_width_prl_rules(
+        PayloadStage(stale), "/pdk/libs.tech/magic/pdk.tech")
+    assert refused["status"] == "REFUSED" and "hash" in refused["detail"]
+
+
+def test_k_read_pdk_propagates_conditional_authority_refusal(monkeypatch):
+    monkeypatch.setattr(A5E, "_read_width_prl_rules", lambda *_args: {
+        "status": "REFUSED", "rules": {}, "sources": {},
+        "detail": "changed public predicate",
+    })
+    fixtures = importlib.import_module("test_analog_a5_layout_emit")
+    facts, reason = A5E.read_pdk(
+        fixtures.FakeStage(), "/pdk", "x",
+        "/pdk/x-fet.tcl", "/pdk/x-drc.tech")
+    assert facts is None
+    assert "ENV_UNAVAILABLE" in reason
+    assert "changed public predicate" in reason
