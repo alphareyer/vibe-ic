@@ -58,7 +58,9 @@ import _path_layout as _pl  # noqa: E402
 import _sim_results_bridge as _srb  # noqa: E402
 import _l10_execution as _l10x  # R-0915-87(2): the ONE execution reader  # noqa: E402
 import l10_coverage_goal_classify as _cgc  # R-0915-113(4)  # noqa: E402
+import l22_coverage_goal_emit as _l22_cov  # canonical L22 owner  # noqa: E402
 import testbench_gen as _tbg  # who owns a case that did not run  # noqa: E402
+from l_doc_consumer_contract import input_doc_texts  # noqa: E402
 
 # The capability-gap token retained on a connectivity-PASS evidence record.
 # A chip-AGNOSTIC capability identifier, NOT a chip/vendor/SKU literal.
@@ -943,6 +945,43 @@ def _credit_isa_goals(project: Path, summary: dict) -> None:
             1 for r in rows if r["verdict"] == _cgc.NOT_MEASURED)
 
 
+_L22_NUMERIC_OWNERS = frozenset({
+    _l22_cov.TOOL,
+    f"{_l22_cov.TOOL}.acceptance_table",
+})
+
+
+def _l22_numeric_source_binding(goal: dict, source_texts: dict) -> "tuple[bool, str]":
+    """Whether one L22 numeric goal is bound to its producer's input line."""
+    strategy = goal.get("extraction_strategy")
+    if strategy not in _L22_NUMERIC_OWNERS:
+        return False, ("L22 source binding refused: extraction_strategy is "
+                       "absent or is not owned by l22_coverage_goal_emit")
+    source = goal.get("source")
+    if not isinstance(source, str) or not source.strip():
+        return False, "L22 source binding refused: source is absent"
+    source_path = Path(source)
+    if source_path.is_absolute() or source.startswith("<outside-project>"):
+        return False, "L22 source binding refused: source is not project-relative"
+    text = source_texts.get(source_path)
+    if text is None:
+        return False, ("L22 source binding refused: source is not one of the "
+                       "design's readable input documents")
+    line = goal.get("line")
+    if type(line) is not int or line <= 0:
+        return False, "L22 source binding refused: line is not a positive integer"
+    lines = text.splitlines()
+    if line > len(lines):
+        return False, "L22 source binding refused: line is outside the source document"
+    evidence = goal.get("evidence")
+    if not isinstance(evidence, str) or not evidence.strip():
+        return False, "L22 source binding refused: evidence is absent"
+    if evidence.strip() not in lines[line - 1]:
+        return False, ("L22 source binding refused: evidence is not present on "
+                       "the cited source line")
+    return True, "bound to canonical producer source, line, and evidence"
+
+
 def _coverage_goal_summary(project: Path) -> dict:
     """The COVERAGE-GOAL population and its OWN denominator.
 
@@ -963,12 +1002,22 @@ def _coverage_goal_summary(project: Path) -> dict:
     l22 = gd / "L22_VERIFICATION_PLAN.json"
     l22_rows = _declared_rows(
         l22, ("coverage_goals", "coverage_targets", "goals", "coverage_plan"))
-    l22_numeric = [
+    l22_candidates = [
         goal for goal in l22_rows
         if isinstance(goal, dict)
         and _cgc.stated_acceptance_percentage(goal)[0] is not None
         and _cgc.coverage_dimensions(goal)[0]
     ]
+    source_texts = {
+        path.relative_to(project): text
+        for path, text in input_doc_texts(project)
+        if path.is_relative_to(project)
+    }
+    l22_numeric, l22_unbound = [], []
+    for goal in l22_candidates:
+        bound, why = _l22_numeric_source_binding(goal, source_texts)
+        (l22_numeric if bound else l22_unbound).append(
+            goal if bound else (goal, why))
 
     # Older Phase1 producers may also have projected the same dimensional
     # predicate into L10. Prefer the canonical L22 row only for an exact
@@ -1062,6 +1111,39 @@ def _coverage_goal_summary(project: Path) -> dict:
         summary["not_measured_count"] = sum(
             1 for r in kept if r["verdict"] == _cgc.NOT_MEASURED)
     summary["input_not_supplied"] = gaps
+
+    # An unbound numeric row is still a declared L22 row. Keep it visible in
+    # the denominator as an explicit refusal, after all measurement/credit
+    # paths, so no coverage total or native evidence can upgrade it to PASS.
+    for goal, why in l22_unbound:
+        dimensions = _cgc.coverage_dimensions(goal)[0]
+        stated, stated_source = _cgc.stated_acceptance_percentage(goal)
+        enforcement, enforcement_source = _cgc.goal_enforcement(goal)
+        summary["rows"].append({
+            "case": str(goal.get("name") or goal.get("id") or ""),
+            "population": _cgc.COVERAGE_GOAL,
+            "scope": None,
+            "scope_source": "L22 numeric goal refused before measurement",
+            "stated_pct": stated,
+            "stated_source": stated_source,
+            "dimension": dimensions[0] if len(dimensions) == 1 else None,
+            "dimensions": dimensions,
+            "achieved_pct": None,
+            "achieved_source": None,
+            "enforcement": enforcement,
+            "enforcement_source": enforcement_source,
+            "verdict": _cgc.NOT_MEASURED,
+            "source_binding": "REFUSED",
+            "why": why,
+        })
+    if l22_unbound:
+        summary["declared_count"] = len(summary["rows"])
+        summary["passed_count"] = sum(
+            row["verdict"] == _cgc.PASS for row in summary["rows"])
+        summary["failed_count"] = sum(
+            row["verdict"] == _cgc.FAIL for row in summary["rows"])
+        summary["not_measured_count"] = sum(
+            row["verdict"] == _cgc.NOT_MEASURED for row in summary["rows"])
     return summary
 
 
