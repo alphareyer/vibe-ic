@@ -11,6 +11,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY = ROOT / "flow/flow109.json"
+TEST_IMAGE = "registry.example/vibeic-eda@sha256:" + "1" * 64
+OTHER_IMAGE = "registry.example/vibeic-eda@sha256:" + "2" * 64
 
 
 def _sha(path):
@@ -115,8 +117,26 @@ def _canonical_d65(project, geometry_def, *, damage=None):
 def _case(project, monkeypatch, *, producer="PASS", gate="PASS",
           automated_fail=False, omit_manual=None, d65_kind="wrapper", d65_damage=None,
           native_cvc=True, native_cvc_fail=False, cvc_damage=None,
-          real_consumer=False):
+          real_consumer=False, declared_image=None, runtime_authority="valid"):
     import flow109_final_perc as perc
+    import _eda_pin
+    import librelane_contract
+
+    def resolve_image(_project, *, record=False):
+        assert record is False
+        if runtime_authority == "missing":
+            raise librelane_contract.Refusal("LL_IMAGE_NOT_RESOLVABLE", "fixture authority absent")
+        return TEST_IMAGE
+
+    def inspected(_reference):
+        if runtime_authority == "uninspectable":
+            return (), "fixture image inspect unavailable"
+        if runtime_authority == "changed":
+            return (OTHER_IMAGE,), ""
+        return (TEST_IMAGE,), ""
+
+    monkeypatch.setattr(librelane_contract, "resolve_image", resolve_image)
+    monkeypatch.setattr(_eda_pin, "local_repo_digests", inspected)
 
     top = "tiny_perc"
     subjects = {
@@ -142,7 +162,7 @@ def _case(project, monkeypatch, *, producer="PASS", gate="PASS",
         d65_outputs = {}
     _put(project, perc.INPUT, {
         "schema": perc.SCHEMA, "d65_component": d65, "final_subjects": subjects,
-        "backend": {"image_id": perc.EDA_IMAGE, "pdk_root": "/foss/pdks",
+        "backend": {"image_id": declared_image or TEST_IMAGE, "pdk_root": "/foss/pdks",
                     "pdk_name": "gf180mcuD", "top": top}})
     summary = _summary(automated_fail=automated_fail, omit_manual=omit_manual)
     if native_cvc:
@@ -157,7 +177,7 @@ def _case(project, monkeypatch, *, producer="PASS", gate="PASS",
         receipt_payload = {
             "schema": "vibeic/native-cvc-result/1",
             "producer": "phase3_one_shot_runner._native_cvc_category",
-            "tool": "cvc_rv", "image": perc.EDA_IMAGE, "top": top,
+            "tool": "cvc_rv", "image": TEST_IMAGE, "top": top,
             "native_rc": 0,
             "inputs": {"extracted_netlist": subjects["extracted_netlist"],
                        "adopted_netlist": subjects["adopted_netlist"]},
@@ -170,6 +190,8 @@ def _case(project, monkeypatch, *, producer="PASS", gate="PASS",
                 **subjects["adopted_netlist"], "sha256": "f" * 64}
         elif cvc_damage == "failed_launch":
             receipt_payload["native_rc"] = 17
+        elif cvc_damage == "wrong_image":
+            receipt_payload["image"] = OTHER_IMAGE
         receipt = _put(project, "reports/phase3/cvc_native/result.json", receipt_payload)
         summary["categories"].append({
             "category": "Native CVC electrical rules", "status": "AUTOMATED",
@@ -237,6 +259,34 @@ def test_registry_uses_only_the_D66_existing_owner_adapter():
                     if item["name"] == "Small digital IC without DFT")
     resolved = flow109.resolve_step(flow109.resolve_plan(features), "D66")
     assert flow109.source_owned_native_dispatch(resolved) == dispatch
+
+
+def test_d66_binds_job_image_to_resolved_and_inspected_runtime(tmp_path, monkeypatch):
+    perc, context, _subjects, calls, _outputs = _case(tmp_path, monkeypatch)
+    result = perc.execute(tmp_path, context)
+    assert calls and calls[0]["image_id"] == TEST_IMAGE
+    assert result["runtime_image"] == {
+        "declared_reference": TEST_IMAGE,
+        "resolved_reference": TEST_IMAGE,
+        "digest": "sha256:" + "1" * 64,
+        "inspected_digests": ["sha256:" + "1" * 64],
+    }
+
+
+@pytest.mark.parametrize("mode,declared,reason", [
+    ("valid", OTHER_IMAGE, "D66_RUNTIME_IMAGE_MISMATCH"),
+    ("missing", TEST_IMAGE, "D66_RUNTIME_IMAGE_AUTHORITY_ABSENT"),
+    ("uninspectable", TEST_IMAGE, "D66_RUNTIME_IMAGE_UNINSPECTABLE"),
+    ("changed", TEST_IMAGE, "D66_RUNTIME_IMAGE_MISMATCH"),
+])
+def test_d66_runtime_identity_refuses_before_native(
+        tmp_path, monkeypatch, mode, declared, reason):
+    perc, context, _subjects, calls, _outputs = _case(
+        tmp_path, monkeypatch, declared_image=declared, runtime_authority=mode)
+    result = perc.execute(tmp_path, context)
+    assert result["component_status"] == "NOT_MEASURED"
+    assert result["reason"] == reason
+    assert result["native_started"] is False and calls == []
 
 
 def test_automated_pass_binds_final_subjects_but_preserves_manual_and_unsupported(tmp_path,
@@ -437,6 +487,7 @@ def test_d66_refuses_when_existing_owner_did_not_publish_native_cvc(tmp_path, mo
     ("failed_launch", "D66_NATIVE_CVC_PRODUCER_INVALID"),
     ("forged_input", "D66_NATIVE_CVC_EVIDENCE_MISMATCH"),
     ("mismatched", "D66_NATIVE_CVC_EVIDENCE_MISMATCH"),
+    ("wrong_image", "D66_NATIVE_CVC_PRODUCER_INVALID"),
 ])
 def test_d66_refuses_forged_or_mismatched_native_cvc(
         tmp_path, monkeypatch, damage, reason):

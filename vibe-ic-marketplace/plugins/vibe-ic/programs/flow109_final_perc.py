@@ -23,12 +23,12 @@ from _atomic_artefact import write_json
 from flow109_admission import AdmissionRefusal, require_launch_admission
 import execution_backend_gates as backend_gates
 import execution_backend_producers as backend_producers
+import _eda_pin as eda_pin
+import librelane_contract
 import phase3_one_shot_runner as phase3_runner
 
 SCHEMA = "vibeic.flow109.final-perc.v1"
 INPUT = "input/flow109/D66.json"
-EDA_IMAGE = ("ghcr.io/vibeic/vibeic-eda@sha256:"
-             "0fc30ecd1307a11bd7757d1c5710127cd88e245059f29eab8b52e38ba4d60406")
 OUTPUTS = (
     "reports/phase3/perc_equivalent.json",
     "reports/phase3/perc_equivalent.rpt",
@@ -85,8 +85,43 @@ def operation_sources():
     names = ("flow109_final_perc.py", "execution_backend_producers.py",
              "execution_backend_gates.py", "phase3_one_shot_runner.py",
              "perc_signoff_check.py", "perc_corpus_sweep.py",
-             "latchup_esd_spacing_check.py", "librelane_postroute.py")
+             "latchup_esd_spacing_check.py", "librelane_postroute.py",
+             "_eda_pin.py", "librelane_contract.py")
     return {"programs/" + name: _sha(HERE / name) for name in names}
+
+
+def _runtime_image_binding(project, declared):
+    """Bind the job's image to the resolved and locally inspected identity."""
+    declared_digest = eda_pin.reference_digest(declared)
+    if declared_digest is None:
+        raise AdmissionRefusal("D66_RUNTIME_IMAGE_AUTHORITY_ABSENT",
+                               "backend.image_id must be an immutable reference")
+    try:
+        expected = str(librelane_contract.resolve_image(
+            Path(project), record=False))
+    except Exception as exc:
+        raise AdmissionRefusal("D66_RUNTIME_IMAGE_AUTHORITY_ABSENT", str(exc)) from exc
+    expected_digest = eda_pin.reference_digest(expected)
+    if expected_digest is None:
+        raise AdmissionRefusal("D66_RUNTIME_IMAGE_AUTHORITY_ABSENT",
+                               "resolved runtime is not an immutable reference")
+    if declared_digest != expected_digest:
+        raise AdmissionRefusal(
+            "D66_RUNTIME_IMAGE_MISMATCH",
+            f"job declared {declared_digest}; runtime requires {expected_digest}")
+    inspected, why = eda_pin.local_repo_digests(expected)
+    inspected_digests = sorted({digest for digest in
+                                (eda_pin.reference_digest(ref) for ref in inspected)
+                                if digest is not None})
+    if not inspected_digests:
+        raise AdmissionRefusal("D66_RUNTIME_IMAGE_UNINSPECTABLE",
+                               why or f"no inspected RepoDigest for {expected}")
+    if expected_digest not in inspected_digests:
+        raise AdmissionRefusal(
+            "D66_RUNTIME_IMAGE_MISMATCH",
+            f"runtime requires {expected_digest}; inspected {inspected_digests}")
+    return {"declared_reference": declared, "resolved_reference": expected,
+            "digest": expected_digest, "inspected_digests": inspected_digests}
 
 
 def _canonical_step31_bindings(receipt, geometry_def_sha):
@@ -275,11 +310,11 @@ def _prepare(project, context):
     backend = manifest.get("backend")
     if (not isinstance(backend, dict) or set(backend) != {
             "image_id", "pdk_root", "pdk_name", "top"}
-            or backend.get("image_id") != EDA_IMAGE
             or not all(isinstance(backend.get(name), str) and backend[name]
-                       for name in ("pdk_root", "pdk_name", "top"))):
+                       for name in ("image_id", "pdk_root", "pdk_name", "top"))):
         raise AdmissionRefusal("D66_NATIVE_CONFIGURATION_ABSENT",
-                               "pinned image/pdk_root/pdk_name/top required")
+                               "runtime image/pdk_root/pdk_name/top required")
+    runtime_image = _runtime_image_binding(project, backend["image_id"])
     top = backend["top"]
     expected = {
         "geometry_def": project / f"phase3/stage3/pnr/{top}.def",
@@ -300,11 +335,13 @@ def _prepare(project, context):
     inputs[str(project / INPUT)] = _sha(project / INPUT)
     resolved_files = {str(Path(path).relative_to(project)): digest
                       for path, digest in inputs.items()}
-    params = {**backend, "step_id": "28", "execution_mode": "default",
+    params = {**backend, "image_id": runtime_image["resolved_reference"],
+              "step_id": "28", "execution_mode": "default",
               "stop_on_producer_failure": True, "timeout_s": 1800,
               "resolved_input_manifest": {"files": resolved_files}}
-    return {"manifest": manifest, "subjects": subjects, "paths": paths,
+    return {"project": project, "manifest": manifest, "subjects": subjects, "paths": paths,
             "inputs": inputs, "params": params, "sources": operation_sources(),
+            "runtime_image": runtime_image,
             "d65": d65["evidence"], "d65_receipt": d65["receipt"],
             "d65_evidence_kind": d65["kind"]}
 
@@ -315,6 +352,11 @@ def _assert_current(prepared):
     for path, digest in prepared["inputs"].items():
         if Path(path).is_symlink() or not Path(path).is_file() or _sha(path) != digest:
             raise AdmissionRefusal("D66_REQUIRED_INPUT_CHANGED", path)
+    current_runtime = _runtime_image_binding(
+        prepared["project"], prepared["runtime_image"]["declared_reference"])
+    if current_runtime != prepared["runtime_image"]:
+        raise AdmissionRefusal("D66_RUNTIME_IMAGE_CHANGED",
+                               "runtime image identity changed during D66")
 
 
 def _d65_geometry_current(project, prepared):
@@ -386,11 +428,12 @@ def _native_cvc_current(project, prepared, summary):
         raise AdmissionRefusal("D66_NATIVE_CVC_EVIDENCE_MISMATCH", str(exc)) from exc
     receipt = _read(receipt_path, "D66_NATIVE_CVC_EVIDENCE_MISMATCH")
     backend = prepared["manifest"]["backend"]
+    receipt_image_digest = eda_pin.reference_digest(receipt.get("image"))
     if (receipt.get("schema") != "vibeic/native-cvc-result/1"
             or receipt.get("producer") !=
             "phase3_one_shot_runner._native_cvc_category"
             or receipt.get("tool") != "cvc_rv"
-            or receipt.get("image") != backend["image_id"]
+            or receipt_image_digest != prepared["runtime_image"]["digest"]
             or receipt.get("top") != backend["top"]
             or receipt.get("native_rc") != row["native_rc"]):
         raise AdmissionRefusal("D66_NATIVE_CVC_PRODUCER_INVALID",
@@ -485,6 +528,7 @@ def execute(project, context):
                 final_subjects=prepared["subjects"], inputs=prepared["inputs"],
                 d65_component=prepared["manifest"]["d65_component"],
                 d65_evidence_kind=prepared["d65_evidence_kind"],
+                runtime_image=prepared["runtime_image"],
                 operation_sources=prepared["sources"], execution_context=context)
         else:
             canonical = backend_gates.canonical_family_row("28")
@@ -507,6 +551,7 @@ def execute(project, context):
                           final_subjects=prepared["subjects"], inputs=prepared["inputs"],
                           d65_component=prepared["manifest"]["d65_component"],
                           d65_evidence_kind=prepared["d65_evidence_kind"],
+                          runtime_image=prepared["runtime_image"],
                           outputs=outputs, io_library_sources=io_sources,
                           operation_sources=prepared["sources"], execution_context=context)
     except AdmissionRefusal as exc:
@@ -536,6 +581,7 @@ def validate_final_perc(project, receipt_ref):
             or record.get("final_subjects") != prepared["subjects"]
             or record.get("d65_component") != prepared["manifest"]["d65_component"]
             or record.get("d65_evidence_kind") != prepared["d65_evidence_kind"]
+            or record.get("runtime_image") != prepared["runtime_image"]
             or record.get("outputs") != _output_records(project)):
         raise AdmissionRefusal("D66_COMPONENT_SUBJECT_CHANGED", "final subject/output binding")
     summary = _read(project / OUTPUTS[0], "D66_PERC_RESULT_INVALID")
