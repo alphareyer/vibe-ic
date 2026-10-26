@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1497
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1497)
+- **Total programs (excluding helpers / shims):** 1498
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1498)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1488 |
+| `any` | 1489 |
 
 ## Alphabetical listing
 
@@ -108,6 +108,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `analog_macro_rtl_interface_check` | any | — | the digital side of an analog macro's interface, which nothing compared. |
 | `analog_mc_yield_run` | any | — | REAL Monte-Carlo yield execution for the analog track (flow-completeness review P1-1). |
 | `analog_meas_from_spec_gen` | any | — | deterministic `.meas` statement generator from an analog block spec.json. |
+| `analog_mos_geometry` | any | — | Source-bound calibrated MOS geometry and declared wrapper finger counts. |
 | `analog_native_erc` | any | — | Native well/tap electrical connectivity checks using the IHP LVS extractor. |
 | `analog_native_flow` | any | — | Run the A01-A19 analog track with existing native producers. |
 | `analog_native_front` | any | — | A01--A05 Default execution using the existing analog producers and consumers. |
@@ -278,7 +279,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `corner_yield_vs_spec_check` | any | — | independent yield-vs-spec.json gate + worst-corner identification (analog-sizing-loop rules 2 & 4). |
 | `corpus_cardinality_pin_scan` | any | — | find assertions pinned to a CORPUS CENSUS. |
 | `counter_advanced_synth` | any | — | deterministic SOLVER for the SUBTLE counter / timer / clock family (bucket-② spec -> bucket-① RTL, blind). |
-| `counter_decode_lookahead_phase_check` | any | — | a level decoded from the NEXT counter value, registered on the same edge that advances the counter. |
+| `counter_decode_lookahead_phase_check` | any | — | Report a registered decode of the value used to advance a counter. |
 | `counter_popcount_synth` | any | — | deterministic SOLVER for the counter / popcount / parity-reduction family (bucket-② spec -> bucket-① RTL, blind). |
 | `coverage_closure` | any | — | coverage GAP ANALYSIS over the MEASURED artefact. |
 | `coverage_metric_check` | any | — | coverage_metric_check.py -- Deterministic coverage report metric checker. |
@@ -733,7 +734,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `l19_constraint_token_emit` | any | — | lift the constraints a design states in its OWN PROSE into L19, the layer that carries them. |
 | `l19_pdk_floorplan_contract_check` | any | — | L19 SEMANTIC completeness gate. |
 | `l1_electrical_specs_typed_depth_check` | any | Wave 38 | Audit-driven typed sub-field depth gate. Closes the residual ~70 |
-| `l1_pin_bus_width_actionable_check` | any | — | VERDICT SEMANTICS: **BLOCKS** (exit 1 on FAIL). |
+| `l1_pin_bus_width_actionable_check` | any | — | An input-owned declaration with no numeric default can qualify only as a |
 | `l1_pin_table_aliases_typed_check` | any | Wave 38 | Audit-driven typed sub-field depth gate. Vendor docs commonly use |
 | `l20_dft_intent_emit` | any | — | Project explicit planned/unmeasured DFT intent into L20. |
 | `l20_dft_scan_topology_actionable_check` | any | — | SEMANTIC gate for L20_DFT_SCAN_TOPOLOGY (batch layergate-7). |
@@ -1569,7 +1570,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1488 programs)
+### `any` (1489 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1653,6 +1654,7 @@ _(no programs in this group)_
 - `analog_macro_rtl_interface_check` — the digital side of an analog macro's interface, which nothing compared.
 - `analog_mc_yield_run` — REAL Monte-Carlo yield execution for the analog track (flow-completeness review P1-1).
 - `analog_meas_from_spec_gen` — deterministic `.meas` statement generator from an analog block spec.json.
+- `analog_mos_geometry` — Source-bound calibrated MOS geometry and declared wrapper finger counts.
 - `analog_native_erc` — Native well/tap electrical connectivity checks using the IHP LVS extractor.
 - `analog_native_flow` — Run the A01-A19 analog track with existing native producers.
 - `analog_native_front` — A01--A05 Default execution using the existing analog producers and consumers.
@@ -1821,7 +1823,7 @@ _(no programs in this group)_
 - `corner_yield_vs_spec_check` — independent yield-vs-spec.json gate + worst-corner identification (analog-sizing-loop rules 2 & 4).
 - `corpus_cardinality_pin_scan` — find assertions pinned to a CORPUS CENSUS.
 - `counter_advanced_synth` — deterministic SOLVER for the SUBTLE counter / timer / clock family (bucket-② spec -> bucket-① RTL, blind).
-- `counter_decode_lookahead_phase_check` — a level decoded from the NEXT counter value, registered on the same edge that advances the counter.
+- `counter_decode_lookahead_phase_check` — Report a registered decode of the value used to advance a counter.
 - `counter_popcount_synth` — deterministic SOLVER for the counter / popcount / parity-reduction family (bucket-② spec -> bucket-① RTL, blind).
 - `coverage_closure` — coverage GAP ANALYSIS over the MEASURED artefact.
 - `coverage_metric_check` — coverage_metric_check.py -- Deterministic coverage report metric checker.
@@ -2274,7 +2276,7 @@ _(no programs in this group)_
 - `l19_constraint_token_emit` — lift the constraints a design states in its OWN PROSE into L19, the layer that carries them.
 - `l19_pdk_floorplan_contract_check` — L19 SEMANTIC completeness gate.
 - `l1_electrical_specs_typed_depth_check` — Audit-driven typed sub-field depth gate. Closes the residual ~70  _[Wave 38]_
-- `l1_pin_bus_width_actionable_check` — VERDICT SEMANTICS: **BLOCKS** (exit 1 on FAIL).
+- `l1_pin_bus_width_actionable_check` — An input-owned declaration with no numeric default can qualify only as a
 - `l1_pin_table_aliases_typed_check` — Audit-driven typed sub-field depth gate. Vendor docs commonly use  _[Wave 38]_
 - `l20_dft_intent_emit` — Project explicit planned/unmeasured DFT intent into L20.
 - `l20_dft_scan_topology_actionable_check` — SEMANTIC gate for L20_DFT_SCAN_TOPOLOGY (batch layergate-7).
