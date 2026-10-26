@@ -501,7 +501,12 @@ def build_report(project: Path, log_path: Path,
         # and a REFUSAL says which artefact it could not reach.
         "chip_area_unit_evidence": _unit_record[1],
         "sequential_area": block.seq_area,
-        "cell_count": block.row_cell_sum,
+        # `cell_count` is the mapped-instance census consumed by the native
+        # Yosys/LibreLane binding, not an area-priced subtotal.  R0 above has
+        # already proved that priced + explicitly unpriced rows equal the
+        # tool's own cells summary; unpriced rows still contribute no invented
+        # area and remain disclosed separately in that corroboration record.
+        "cell_count": block.tabulated_cell_sum,
         "cell_types": len(block.rows),
         "includes_submodules": block.area_is_rollup,
         "selection": {
