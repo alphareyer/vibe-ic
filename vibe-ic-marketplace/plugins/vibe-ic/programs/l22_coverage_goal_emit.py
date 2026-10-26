@@ -162,6 +162,17 @@ _VOCAB = (
     "toggle coverage", "statement coverage", "assertion coverage",
     "fault coverage", "coverage", "covered",
 )
+# Keep this deliberately narrower than the general vocabulary above: these
+# are the dimensions the existing coverage consumer measures independently.
+# A source may put one percentage over more than one of them (for example,
+# ``toggle / branch coverage``); reducing that clause to the first matching
+# phrase silently drops part of the requirement.
+_MEASURED_DIMENSION_WORDS = (
+    ("line", ("line", "lines", "statement", "statements", "code")),
+    ("toggle", ("toggle", "toggles")),
+    ("branch", ("branch", "branches", "decision", "decisions",
+                "condition", "conditions")),
+)
 _RE_PCT = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
 
 # The phrases by which a design marks a stated target as NOT a sign-off
@@ -175,6 +186,16 @@ _GOAL_KEY = "coverage_goals"
 
 def _metric_name(match_text: str) -> Optional[str]:
     low = match_text.lower()
+    if re.search(r"(?<![a-z0-9])coverage(?![a-z0-9])", low):
+        dimensions = [
+            dimension
+            for dimension, words in _MEASURED_DIMENSION_WORDS
+            if any(re.search(r"(?<![a-z0-9])" + re.escape(word)
+                             + r"(?![a-z0-9])", low)
+                   for word in words)
+        ]
+        if len(dimensions) > 1:
+            return " / ".join(dimensions) + " coverage"
     for term in _VOCAB:
         if term in low:
             return term
@@ -317,7 +338,12 @@ def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
     for h in hits:
         text = h.get("match") or ""
         ctx = h.get("context") or ""
-        name = _metric_name(text) or _metric_name(ctx)
+        # The regex match may begin at the final word of a shared suffix
+        # (``toggle / branch coverage`` -> ``branch coverage``).  Prefer the
+        # hit's own line, which is still row-local, before falling back to the
+        # match or its wider diagnostic context.
+        name = (_metric_name(h.get("line_text") or "")
+                or _metric_name(text) or _metric_name(ctx))
         pct = _pct(text)
         if pct is None:
             pct = _pct(ctx)

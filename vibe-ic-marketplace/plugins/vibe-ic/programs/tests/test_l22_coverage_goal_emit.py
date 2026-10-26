@@ -147,6 +147,32 @@ def test_emits_comparable_numeric_target_and_name(tmp_path):
     assert g["evidence"]
 
 
+def test_preserves_every_dimension_in_a_combined_coverage_target(tmp_path):
+    """One percentage over two named dimensions must bind to both.
+
+    This is the ordinary document shape used by the source finding.  Losing
+    ``toggle`` here lets a branch-only measurement satisfy a requirement the
+    document explicitly states over toggle *and* branch coverage.
+    """
+    _mk(tmp_path, "# Verification\nThe block must reach at least 95% "
+                  "toggle / branch coverage (informational only).\n")
+    g = mod.run(tmp_path)["emitted"][0]
+    assert "toggle" in g["name"].lower(), g
+    assert "branch" in g["name"].lower(), g
+
+    import l10_coverage_goal_classify as consumer
+    assert consumer.coverage_dimensions(g)[0] == ["toggle", "branch"], g
+
+
+def test_does_not_add_a_dimension_the_source_did_not_state(tmp_path):
+    """Mutation-negative: a branch-only target remains branch-only."""
+    _mk(tmp_path, "# Verification\nThe block must reach at least 95% "
+                  "branch coverage (informational only).\n")
+    g = mod.run(tmp_path)["emitted"][0]
+    assert g["name"] == "branch coverage", g
+    assert "toggle" not in g["name"].lower(), g
+
+
 def test_signoff_qualifier_is_preserved(tmp_path):
     """A target the design marks informational must NOT become blocking."""
     _mk(tmp_path, _DOC_WITH_TARGET_INFORMATIONAL)
