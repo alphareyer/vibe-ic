@@ -55,6 +55,36 @@ def _checkpoint_tree(project: Path):
     return records
 
 
+def _collector_checkpoint_tree(project: Path, monkeypatch,
+                               *, bind_downstream_inputs=True):
+    """Build neutral checkpoints through the real retained-attempt producer."""
+    manifests = {}
+    declared = []
+    for sid in ORDER:
+        inp = project / f"inputs/{sid}.txt"
+        out = project / f"outputs/{sid}.txt"
+        inp.parent.mkdir(parents=True, exist_ok=True)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        inp.write_bytes(f"input-{sid}".encode())
+        out.write_bytes(f"output-{sid}".encode())
+        source = (({"16": "outputs/15.txt", "17": "outputs/16.txt",
+                    "18": "outputs/17.txt", "32": "outputs/18.txt"}
+                   .get(sid, f"inputs/{sid}.txt"))
+                  if bind_downstream_inputs else f"inputs/{sid}.txt")
+        manifests[sid] = {source: {"sha256": _sha((project / source).read_bytes())}}
+        declared.append((sid, f"neutral step {sid}", "ready", "phase", "stage", [{
+            "rel": f"outputs/{sid}.txt", "abs": str(out), "exists": True,
+        }]))
+    monkeypatch.setattr(collector, "_iter_step_records", lambda *_: iter(declared))
+    receipts = {}
+    for sid in ORDER:
+        attempt = collector.begin_step(project, sid, manifests[sid])
+        receipts[sid] = collector.finish_step(
+            project, attempt, verdict="PASS", canonical_pass=True,
+            result={"canonical_consumer": {"verdict": "PASS"}})
+    return receipts
+
+
 def _request(consumer="32", **extra):
     return {"schema": "vibeic/minimal-resume-request/1",
             "consumer_step": consumer, **extra}
@@ -130,6 +160,76 @@ def test_missing_output_selects_owner_and_defers_dependents(tmp_path, monkeypatc
     assert plan["execution_steps"] == ["17"]
     assert "32" in plan["deferred_for_replanning"]
     assert "15" in plan["reused_checkpoints"]
+
+
+def test_corrupt_registered_checkpoint_selects_owner_and_defers_proven_consumers(
+        tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    receipts = _collector_checkpoint_tree(tmp_path, monkeypatch)
+    expected = receipts["17"]["outputs"][0]["sha256"]
+    (tmp_path / "outputs/17.txt").write_bytes(b"corrupt-retained-checkpoint")
+
+    plan = front._minimal_resume_plan(tmp_path, _request())
+
+    assert plan["status"] == "READY"
+    assert plan["execution_steps"] == ["17"]
+    assert front._minimal_resume_entry(plan) == ("17", "17")
+    assert f"output outputs/17.txt changed" in plan["reason"]
+    assert expected != _sha((tmp_path / "outputs/17.txt").read_bytes())
+    assert "18" in plan["deferred_for_replanning"]
+    assert "32" in plan["deferred_for_replanning"]
+    assert "18" not in plan["reused_checkpoints"]
+    assert "15" in plan["reused_checkpoints"]
+
+
+def test_registered_unchanged_checkpoint_launches_nothing(tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _collector_checkpoint_tree(tmp_path, monkeypatch)
+    plan = front._minimal_resume_plan(tmp_path, _request())
+    assert plan["status"] == "NO_ACTION"
+    assert plan["execution_steps"] == []
+
+
+def test_missing_registered_checkpoint_selects_same_owner(tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _collector_checkpoint_tree(
+        tmp_path, monkeypatch, bind_downstream_inputs=False)
+    (tmp_path / "outputs/17.txt").unlink()
+    plan = front._minimal_resume_plan(tmp_path, _request())
+    assert plan["status"] == "READY"
+    assert plan["execution_steps"] == ["17"]
+    assert front._minimal_resume_entry(plan) == ("17", "17")
+    assert "32" in plan["deferred_for_replanning"]
+    assert "18" in plan["reused_checkpoints"]
+
+
+def test_corrupt_checkpoint_with_forged_index_authority_is_unresolved(
+        tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    _collector_checkpoint_tree(tmp_path, monkeypatch)
+    (tmp_path / "outputs/17.txt").write_bytes(b"corrupt-retained-checkpoint")
+    index_path = tmp_path / "steps/index.json"
+    index = json.loads(index_path.read_text())
+    row = next(row for row in index["steps"] if row["id"] == "17")
+    row["folder"] = "phase/stage/17_forged_not_registered"
+    index_path.write_text(json.dumps(index))
+    plan = front._minimal_resume_plan(tmp_path, _request())
+    assert plan["status"] == "UNRESOLVED"
+    assert plan["execution_steps"] == []
+
+
+def test_corrupt_checkpoint_with_unsealed_snapshot_is_unresolved(
+        tmp_path, monkeypatch):
+    _install_graph(monkeypatch)
+    receipts = _collector_checkpoint_tree(tmp_path, monkeypatch)
+    (tmp_path / "outputs/17.txt").write_bytes(b"corrupt-retained-checkpoint")
+    record = receipts["17"]
+    snapshot = (tmp_path / record["storage_root"] / record["folder"] /
+                record["outputs"][0]["snapshot"])
+    snapshot.write_bytes(b"forged-retained-snapshot")
+    plan = front._minimal_resume_plan(tmp_path, _request())
+    assert plan["status"] == "UNRESOLVED"
+    assert plan["execution_steps"] == []
 
 
 def test_free_form_disproval_cannot_schedule_producer(tmp_path, monkeypatch):

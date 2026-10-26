@@ -2764,8 +2764,14 @@ def _minimal_resume_plan(project: Path, request: Mapping[str, Any]) -> Dict[str,
             continue
         diffs = row.get("differences") or []
         actionable = [d for d in diffs
-                      if (d.get("kind"), d.get("state")) in {
-                          ("input", "changed"), ("output", "missing")}]
+                      if ((d.get("kind"), d.get("state")) in {
+                              ("input", "changed"), ("output", "missing")}
+                          or ((d.get("kind"), d.get("state")) ==
+                              ("output", "changed")
+                              and versions.registered_output_mismatch(
+                                  project, sid, d.get("path"),
+                                  d.get("retained_sha256"),
+                                  d.get("current_sha256"))))]
         ambiguous = [d for d in diffs if d not in actionable]
         if ambiguous:
             unresolved.extend(
