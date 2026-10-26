@@ -394,9 +394,10 @@ def derive(project: Path, doc: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(hint, dict) and hint.get("kind") == "die_area"
         and isinstance(hint.get("source"), str)
     }
+    typed_die_sources = set(floorplan_inputs)
     if fixed:
         floorplan_inputs.add(fixed[1])
-    if fixed and Path(fixed[1]).suffix.lower() in _PROSE_SUFFIXES:
+    if fixed and fixed[1] not in typed_die_sources:
         conflicts = sorted(
             (hint["value"], hint["source"])
             for hint in floorplan.get("floorplan_hints", [])

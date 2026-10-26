@@ -5,6 +5,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 if str(PROGRAMS) not in sys.path:
@@ -97,15 +99,16 @@ def test_malformed_config_fails_closed_as_not_determined(tmp_path):
     assert "budget" not in got
 
 
-def test_typed_config_conflicting_with_prose_refuses(tmp_path):
+@pytest.mark.parametrize("name", ["floorplan.md", "floorplan"])
+def test_typed_config_conflicting_with_prose_refuses(tmp_path, name):
     _config(tmp_path, 100, 100)
-    prose = tmp_path / "input/docs/floorplan.md"
+    prose = tmp_path / "input/docs" / name
     prose.parent.mkdir(parents=True)
     prose.write_text("The die dimensions are fixed at 120 x 100 um.\n")
     got = AB.derive(tmp_path, _answers())
     assert got["status"] == "REFUSED", got
     assert "input/config.json" in got["reason"]
-    assert "input/docs/floorplan.md" in got["reason"]
+    assert f"input/docs/{name}" in got["reason"]
 
 
 def test_typed_config_conflicting_with_operator_slot_refuses(tmp_path):
@@ -115,6 +118,18 @@ def test_typed_config_conflicting_with_operator_slot_refuses(tmp_path):
     got = AB.derive(tmp_path, answers)
     assert got["status"] == "REFUSED", got
     assert "operator slot" in got["reason"]
+
+
+def test_unsupported_prose_extension_is_not_admitted(tmp_path):
+    _config(tmp_path, 100, 100)
+    prose = tmp_path / "input/docs/floorplan.unsupported"
+    prose.parent.mkdir(parents=True)
+    prose.write_text("The die dimensions are fixed at 120 x 100 um.\n")
+    got = AB.derive(tmp_path, _answers())
+    assert got["status"] == "WRITE", got
+    assert got["budget"]["max_die_dimensions_um"] == [100.0, 100.0]
+    assert got["budget"]["basis"]["die_fixed_by_the_input"] == {
+        "wxh_um": "100x100", "source": "input/config.json"}
 
 
 def test_valid_prose_path_is_unchanged(tmp_path):
