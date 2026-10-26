@@ -57,6 +57,7 @@ There is no vendor, SKU, IC or PDK literal anywhere.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -3002,6 +3003,107 @@ def check(rtl_files: List[Path], top: str, claims: List[dict],
     return record
 
 
+def _contract_inputs(path: Path) -> Tuple[List[str], str, List[dict], str, dict, str]:
+    """Load the ordinary consumer's structural call without weakening it.
+
+    Returns ``(rtl_files, top, claims, simdef, klass, sha256)``.  The contract
+    is authoritative: callers may repeat these values on the command line for
+    readability, but may not substitute a different subject or claim set.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"property contract is unreadable: {exc}") from exc
+    try:
+        contract = json.loads(raw)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(f"property contract is not valid JSON: {exc}") from exc
+    if not isinstance(contract, dict):
+        raise ValueError("property contract must be a JSON object")
+    subject = contract.get("structural_subject")
+    if not isinstance(subject, dict):
+        raise ValueError("property contract has no object structural_subject")
+    top = subject.get("top")
+    clock = subject.get("clock")
+    resets = subject.get("resets")
+    rtl_files = subject.get("rtl_files")
+    simdef = subject.get("simdef")
+    if not isinstance(top, str) or not top:
+        raise ValueError("structural_subject.top must be a non-empty string")
+    if not isinstance(clock, str):
+        raise ValueError("structural_subject.clock must be a string")
+    if (not isinstance(resets, list) or
+            any(not isinstance(r, str) or not r for r in resets) or
+            len(resets) != len(set(resets))):
+        raise ValueError("structural_subject.resets must be unique non-empty strings")
+    if (not isinstance(rtl_files, list) or not rtl_files or
+            any(not isinstance(f, str) or not f for f in rtl_files)):
+        raise ValueError("structural_subject.rtl_files must be non-empty strings")
+    # This value is emitted by _chip_synth_read.chip_sim_define.  Accepting a
+    # free-form fragment here would turn a data file into a Yosys command
+    # injection surface.
+    if simdef not in ("", "-DSIMULATION "):
+        raise ValueError("structural_subject.simdef is not an approved chip-read define")
+
+    claims: List[dict] = []
+    rows = contract.get("unresolved_obligations")
+    if not isinstance(rows, list):
+        raise ValueError("property contract unresolved_obligations must be a list")
+    for row in rows:
+        if not isinstance(row, dict) or row.get("program_refused"):
+            continue
+        rule = row.get("program_rule")
+        if not isinstance(rule, dict) or rule.get("kind") not in ("STRUCTURAL", "MIXED"):
+            continue
+        raw_claims = rule.get("claims")
+        if not isinstance(raw_claims, list):
+            raise ValueError("program_rule.claims must be a list")
+        for claim in raw_claims:
+            if not isinstance(claim, dict):
+                raise ValueError("every structural claim must be an object")
+            name = claim.get("rule")
+            signal = claim.get("signal", "")
+            value = claim.get("value", "")
+            if name not in STRUCTURAL_RULES:
+                continue
+            if not isinstance(signal, str) or not isinstance(value, str):
+                raise ValueError("structural claim signal and value must be strings")
+            normalized = {"rule": name, "signal": signal, "value": value}
+            if normalized not in claims:
+                claims.append(normalized)
+    if not claims:
+        raise ValueError("property contract routes no supported structural claims")
+
+    for claim in claims:
+        if claim["rule"] == "clock_edge" and (
+                not clock or claim["signal"] != clock):
+            raise ValueError("clock_edge claim is not bound to structural_subject.clock")
+        if claim["rule"].startswith("reset_") and claim["signal"] not in resets:
+            raise ValueError(
+                f"{claim['rule']} claim is not bound to structural_subject.resets")
+    return (rtl_files, top, claims, simdef,
+            {"clock": clock, "resets": resets}, hashlib.sha256(raw).hexdigest())
+
+
+def _parse_claims(specs: List[str]) -> List[dict]:
+    claims = []
+    for spec in specs:
+        parts = spec.split(":")
+        claims.append({"rule": parts[0], "signal": parts[1] if len(parts) > 1
+                       else "", "value": parts[2] if len(parts) > 2 else ""})
+    return claims
+
+
+def _cli_refusal(args, reason: str) -> int:
+    rec = {"program": "formal_structural_check", "version": VERSION,
+           "verdict": "NOT_MEASURED", "error": reason, "claims": []}
+    out = json.dumps(rec, indent=2, ensure_ascii=False)
+    if args.json:
+        _aa.write_text(Path(args.json), out + "\n")
+    print(out)
+    return 2
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--rtl", type=Path, nargs="+", required=True)
@@ -3010,14 +3112,46 @@ def main(argv=None) -> int:
                     help="rule:signal[:value], e.g. clock_edge:clk:posedge")
     ap.add_argument("--work-dir", type=Path, default=Path("."))
     ap.add_argument("--container", default=None)
+    ap.add_argument("--property-contract", type=Path, default=None,
+                    help="authoritative property_contract.json; supplies the "
+                         "ordinary consumer's claims, simdef and applicability class")
     ap.add_argument("--json", default=None)
     args = ap.parse_args(argv)
-    claims = []
-    for spec in args.claim:
-        parts = spec.split(":")
-        claims.append({"rule": parts[0], "signal": parts[1] if len(parts) > 1
-                       else "", "value": parts[2] if len(parts) > 2 else ""})
-    rec = check(args.rtl, args.top, claims, args.work_dir, args.container)
+    claims = _parse_claims(args.claim)
+    simdef = ""
+    klass = None
+    contract_provenance = None
+    if args.property_contract is not None:
+        try:
+            rtl, top, contract_claims, simdef, klass, digest = _contract_inputs(
+                args.property_contract)
+        except ValueError as exc:
+            return _cli_refusal(args, str(exc))
+        if [str(p) for p in args.rtl] != rtl:
+            return _cli_refusal(args, "--rtl does not exactly match structural_subject.rtl_files")
+        if args.top != top:
+            return _cli_refusal(args, "--top does not exactly match structural_subject.top")
+        if claims and claims != contract_claims:
+            return _cli_refusal(args, "--claim does not exactly match property-contract claims")
+        claims = contract_claims
+        contract_provenance = {
+            "path": str(args.property_contract), "sha256": digest,
+            "structural_subject": {"rtl_files": rtl, "top": top,
+                                   "simdef": simdef, **klass},
+            "claims": claims,
+        }
+    rec = check(args.rtl, args.top, claims, args.work_dir, args.container,
+                simdef=simdef, klass=klass)
+    if contract_provenance is not None:
+        try:
+            after = hashlib.sha256(args.property_contract.read_bytes()).hexdigest()
+        except OSError:
+            after = "unreadable"
+        contract_provenance["sha256_after"] = after
+        rec["public_entry_contract"] = contract_provenance
+        if after != contract_provenance["sha256"]:
+            rec["verdict"] = NOT_DISCHARGED
+            rec["contract_changed_during_run"] = True
     out = json.dumps(rec, indent=2, ensure_ascii=False)
     if args.json:
         _aa.write_text(Path(args.json), out + "\n")
