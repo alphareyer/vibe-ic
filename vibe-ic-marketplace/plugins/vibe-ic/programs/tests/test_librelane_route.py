@@ -204,6 +204,17 @@ def test_a_ppa_candidate_sets_only_the_declared_route_knobs(tmp_path):
         route.seed_arms(tmp_path)
 
 
+def test_a_conflicting_ppa_timing_knob_refuses_without_weakening(tmp_path,
+                                                                 monkeypatch):
+    put(tmp_path / 'phase3/librelane_switch.json', {
+        'route_knobs': {'RUN_POST_GRT_RESIZER_TIMING': False}})
+    sdc = tmp_path / 'constraint.sdc'
+    sdc.write_text('create_clock -period 10 clk\n')
+    monkeypatch.setattr(cts, 'signoff_scene_sdc', lambda *args: sdc)
+    with pytest.raises(ValueError, match='LL_STRICT_TIMING_OVERRIDE_FORBIDDEN'):
+        route.overlay(runner, tmp_path, sdc, tmp_path / 'scratch')
+
+
 def test_the_route_knobs_never_trip_the_19_20_knob_allow_list(tmp_path):
     put(tmp_path / 'phase3/librelane_switch.json',
         {'steps': {'19': 'librelane', '20': 'librelane', '21': 'librelane'},
@@ -525,14 +536,18 @@ def test_the_route_declares_the_post_grt_design_repair_the_drv_standard_requires
         tmp_path, monkeypatch):
     """R-0929-POSTGRT: LibreLane gates RepairDesignPostGRT off by default; the
     step-21 overlay switches the design (DRV) repair on, with its source, and
-    leaves the post-GRT timing repair to the flow."""
+    also enables the strict native timing repair required by the ordinary
+    backend."""
     from _stated_eda_image import mock_docker_route
     mock_docker_route(monkeypatch)
     run = _run(tmp_path, monkeypatch)
     ov = run.seen['overlay']
     assert ov['RUN_POST_GRT_DESIGN_REPAIR'][0] is True
     assert 'R-0929-POSTGRT' in ov['RUN_POST_GRT_DESIGN_REPAIR'][1]
-    assert 'RUN_POST_GRT_RESIZER_TIMING' not in ov
+    assert ov['RUN_POST_GRT_RESIZER_TIMING'][0] is True
+    for key in ('TIMING_VIOLATION_CORNERS', 'SETUP_VIOLATION_CORNERS',
+                'HOLD_VIOLATION_CORNERS'):
+        assert ov[key][0] == ['*'] and ov[key][1]
 
 
 def test_a_missing_pdk_root_refuses_and_never_resumes(tmp_path, monkeypatch):
