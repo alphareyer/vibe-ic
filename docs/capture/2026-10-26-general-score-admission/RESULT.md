@@ -8,18 +8,18 @@ The general failure class is a mismatch between input contracts and consumers, c
 
 ## Evidence and limits
 
-Published benchmark-data was inspected at commit `6aec3c2ceaff9cc54963215427e7711f15c03dc2`. Its historical Human scorer artifact has SHA-256 `60d7b1dc2cdc9fd82ea2f7b4daffc51af411ce36d47a3c6becbac0f30eccaeb3`; twelve published result cells show three currently questioned tasks previously passed the functional harness. A fourth structural case failed in every published cell. These observations motivate diagnosis, not candidate acceptance or source clarification.
+Published benchmark-data was inspected at commit `6aec3c2ceaff9cc54963215427e7711f15c03dc2`. Its historical Human scorer artifact, `evaluation/verilogeval_human/v1.10.45_gpt_5.6_sol/pass_at_1.json`, has SHA-256 `60d7b1dc2cdc9fd82ea2f7b4daffc51af411ce36d47a3c6becbac0f30eccaeb3`. The artifact contains 156 unique entries keyed by `problem`; its exact `Prob093_ece241_2014_q3` entry is `FAIL` with reason `functional_mismatch (Mismatches: 11 in 60)`. No durable input to this capture identifies the three other questioned tasks or a twelve-cell aggregation, so no such aggregate claim is made. This historical cell motivates diagnosis only; it is not candidate acceptance or source clarification.
 
 The historical manifests explicitly omit generated samples, complete authoring transcripts and input snapshots. Dataset commit equality does not prove byte-identical rendered prompts. Consequently this capture cannot establish that current rendered-source contradictions existed unchanged in old runs, or reconstruct the old reasoning. A previous PASS proves compatibility with that harness; it cannot prove unique source semantics, full test coverage or structural conformance.
 
-Current local reports are frozen at:
+The following two reports were previously referenced as current local evidence, but independent review found neither file at its stated path and could not verify either advertised hash:
 
 - `/mnt/ssd2/codex_tasks/out/verilogeval-human-20261026-v1.32.5-full/RESULT.md`, SHA-256 `526a89eeaf941d5ecbd50908f0276ba0452625918094f9f8b7d8f5e71f9628f8`.
 - `/mnt/ssd2/codex_tasks/out/verilogeval-v2-20261026-v1.32.5-full/RESULT.md`, SHA-256 `e19dca3466894ef5af5df5d4a60bf8e93c3c598797981a6b778a6e102a675a53`.
 
-Both reports say official scoring was not measured. Their review acceptance tallies must never be presented as functional scores. Existing gate evidence remains bound to its original producer and candidate hashes.
+They are therefore unavailable and not independently reviewable. No polarity, tally, score or acceptance is derived from them, and this capture measures no current official score. Existing gate evidence remains bound to its original producer and candidate hashes.
 
-The original-input lint defect has a concrete merged implementation in [PR 3654](https://github.com/vibeic/vibe-ic/pull/3654), merged at `d49e29e39dc75f3965f944d74c4b463419a46c56`. It removes the nonexistent generated-L9 dependency for original input and emits the existing consumer's row name. Its prior control evidence is reused, not rerun or duplicated here.
+The original-input lint defect has a concrete merged implementation in [PR 3654](https://github.com/vibeic/vibe-ic/pull/3654), PR head `6421a53329d6328dd741b9531425fdd0a327827d`, merged at `d49e29e39dc75f3965f944d74c4b463419a46c56` as plugin version `1.32.14`. It removes the nonexistent generated-L9 dependency for original input and emits the existing consumer's row name. A root-accepted landing record (SHA-256 `2105050f3712e02236b667937a68ca3d7394ca1a25d1f9ffae67027cf9516e96`) records the accepted boundary as: recovered exact source, command, runtime and completed per-ID results were reused; missing historical shell exits are `NOT_RECORDED`. This capture reuses that landed identity and boundary without rerunning the valid controls, and makes no broader control-count, benchmark-score or whole-flow claim.
 
 The structural repair gap already has [issue 3655](https://github.com/vibeic/vibe-ic/issues/3655), observed CLOSED during this capture. Closure alone does not prove the current local run has the corresponding code or that its frozen candidate passed normal repair admission. Follow the existing work rather than creating a duplicate implementation.
 
