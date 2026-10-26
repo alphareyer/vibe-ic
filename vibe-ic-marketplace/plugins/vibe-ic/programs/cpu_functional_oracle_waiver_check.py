@@ -1035,15 +1035,27 @@ def _coverage_goal_summary(project: Path) -> dict:
     l22 = gd / "L22_VERIFICATION_PLAN.json"
     l22_rows = _declared_rows(
         l22, ("coverage_goals", "coverage_targets", "goals", "coverage_plan"))
-    l22_candidates = [
-        goal for goal in l22_rows
-        if isinstance(goal, dict)
-        and _cgc.stated_acceptance_percentage(goal)[0] is not None
-        and _cgc.coverage_dimensions(goal)[0]
-    ]
     reconstruction = _l22_cov.reconstruct_canonical_goals(project)
     canonical_goals = (reconstruction.get("goals") or []
                        if reconstruction.get("status") == "OK" else [])
+    canonical_provenance = {
+        (goal.get("source"), goal.get("line"), goal.get("evidence"))
+        for goal in canonical_goals if isinstance(goal, dict)
+    }
+
+    # Bind before trusting claimant-owned measurement fields.  A damaged name
+    # or target must not erase a source-owned obligation before reconstruction
+    # gets a chance to refuse it.  Keep the legacy numeric-shape arm so an
+    # unprovenanced numeric L22 row remains a visible refusal too.
+    l22_candidates = [
+        goal for goal in l22_rows
+        if isinstance(goal, dict) and (
+            goal.get("extraction_strategy") in _L22_NUMERIC_OWNERS
+            or (goal.get("source"), goal.get("line"), goal.get("evidence"))
+            in canonical_provenance
+            or (_cgc.stated_acceptance_percentage(goal)[0] is not None
+                and _cgc.coverage_dimensions(goal)[0]))
+    ]
     l22_numeric, l22_unbound = [], []
     for goal in l22_candidates:
         bound, why = _l22_numeric_source_binding(goal, canonical_goals)
@@ -1051,8 +1063,14 @@ def _coverage_goal_summary(project: Path) -> dict:
             why = ("L22 source binding refused: canonical reconstruction "
                    f"did not complete: {reconstruction.get('reason') or 'unknown'}")
             bound = False
-        (l22_numeric if bound else l22_unbound).append(
-            goal if bound else (goal, why))
+        if bound:
+            # Exact non-dimensional acceptance-table rows belong to their own
+            # consumer. Only measurable dimensions enter this instrument.
+            if (_cgc.stated_acceptance_percentage(goal)[0] is not None
+                    and _cgc.coverage_dimensions(goal)[0]):
+                l22_numeric.append(goal)
+        else:
+            l22_unbound.append((goal, why))
 
     # Older Phase1 producers may also have projected the same dimensional
     # predicate into L10. Prefer the canonical L22 row only for an exact

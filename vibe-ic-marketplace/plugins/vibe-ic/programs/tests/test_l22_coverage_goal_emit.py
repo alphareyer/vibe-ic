@@ -272,6 +272,55 @@ def test_owner_label_cannot_spoof_canonical_threshold(tmp_path):
     assert "target_pct" in row["why"], row
 
 
+def test_canonical_provenance_with_invalid_name_remains_visible(tmp_path):
+    """A claimant-controlled name cannot drop a source-owned obligation."""
+    _mk(tmp_path, "# Verification\nThe block must reach toggle coverage "
+                  ">= 95%.\n")
+    import phase1_doc_one_shot_runner as phase1
+    assert phase1._post_emit_l22_coverage_goals(tmp_path) == 1
+    doc_path = (tmp_path / "phase1" / "generated_docs"
+                / "L22_VERIFICATION_PLAN.json")
+    doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    doc["fields"]["coverage_goals"][0]["name"] = "coverage goal"
+    doc_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    summary = _step4_summary(tmp_path, {"toggle": {"pct": 99.0}})
+    assert summary["declared_count"] == 1, summary
+    row = summary["rows"][0]
+    assert row["verdict"] == "NOT_MEASURED", row
+    assert row["achieved_pct"] is None, row
+    assert row["source_binding"] == "REFUSED", row
+    assert "name" in row["why"] and "dimensions" in row["why"], row
+
+
+@pytest.mark.parametrize("invalid_target", [None, "ninety-five"],
+                         ids=["absent", "nonnumeric"])
+def test_canonical_provenance_with_invalid_target_remains_visible(
+        tmp_path, invalid_target):
+    """An invalid claimant target is a visible refusal, never an omission."""
+    _mk(tmp_path, "# Verification\nThe block must reach toggle coverage "
+                  ">= 95%.\n")
+    import phase1_doc_one_shot_runner as phase1
+    assert phase1._post_emit_l22_coverage_goals(tmp_path) == 1
+    doc_path = (tmp_path / "phase1" / "generated_docs"
+                / "L22_VERIFICATION_PLAN.json")
+    doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    goal = doc["fields"]["coverage_goals"][0]
+    if invalid_target is None:
+        goal.pop("target_pct")
+    else:
+        goal["target_pct"] = invalid_target
+    doc_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    summary = _step4_summary(tmp_path, {"toggle": {"pct": 99.0}})
+    assert summary["declared_count"] == 1, summary
+    row = summary["rows"][0]
+    assert row["verdict"] == "NOT_MEASURED", row
+    assert row["achieved_pct"] is None, row
+    assert row["source_binding"] == "REFUSED", row
+    assert "target_pct" in row["why"], row
+
+
 @pytest.mark.parametrize("missing", [
     "source", "line", "evidence", "extraction_strategy",
 ])
