@@ -101,6 +101,26 @@ def test_explicit_l17_width_disagreement_refuses_before_output_write(tmp_path):
     assert not target.exists()
 
 
+def test_owned_offset_range_keeps_default_separate_from_resolved_width():
+    doc = _document(symbolic="word_len:0", width=33)
+    l17 = {"channels": [{"name": "payload_i[32:0]",
+                          "direction": "input"}]}
+    signals = scaf.derive_signals(l17, doc)
+    payload = next(s for s in signals if s["name"] == "payload_i")
+    assert payload["width_declared"] == "word_len:0"
+    assert payload["width"] == 33
+    assert payload["width_parameter_binding"]["default"] == 32
+    assert payload["width_parameter_binding"]["resolved_width"] == 33
+    top = scaf.emit_top_v("vector_cell", signals, "vector cell",
+                          parameters=doc["parameters"])
+    assert "parameter word_len = 32" in top
+    assert "input  [word_len:0] payload_i" in top
+    assert "reg  [32:0] payload_i;" in scaf.emit_tb_v(
+        "vector_cell", signals)
+    assert "input  [32:0] payload_i," in scaf.emit_soc_wrap_v(
+        "vector_cell", signals, [])
+
+
 @pytest.mark.parametrize("mutate,reason", [
     (lambda d: d["top_ports"][2]["width_resolution"].update(
         parameter_default_int=16), "stale"),

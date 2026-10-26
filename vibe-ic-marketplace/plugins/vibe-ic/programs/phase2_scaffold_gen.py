@@ -372,7 +372,7 @@ def _consumer_parametric_width(entry: dict, parameters: object,
         return None, "published bounds do not describe the published width"
     return ({"range": packed, "symbolic": symbolic.strip(),
              "identifier": identifier, "parameter": dict(parameter),
-             "default": default}, None)
+             "default": default, "resolved_width": width}, None)
 
 
 def unresolved_width_ports(signals: list[dict]) -> list[dict]:
@@ -642,18 +642,18 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
         if binding is not None:
             explicit = explicit_numeric_widths.get(s["name"], set())
             incompatible = sorted(width for width in explicit
-                                  if width != binding["default"])
+                                  if width != binding["resolved_width"])
             if incompatible:
                 s["width"] = None
                 s["width_declared"] = (
                     "invalid width_resolution: explicit numeric width(s) "
                     f"{incompatible!r} disagree with resolved width "
-                    f"{binding['default']}")
+                    f"{binding['resolved_width']}")
                 continue
-            # Keep the producer's numeric default for consumers whose scope
-            # cannot see DUT parameters (TB and wrappers), while carrying the
-            # exact owned declaration to the top-module emitter.
-            s["width"] = binding["default"]
+            # Keep the producer's validated numeric bus width for consumers
+            # whose scope cannot see DUT parameters (TB and wrappers), while
+            # carrying the exact owned declaration to the top-module emitter.
+            s["width"] = binding["resolved_width"]
             s["width_declared"] = binding["symbolic"]
             s["width_parameter_binding"] = binding
             continue
