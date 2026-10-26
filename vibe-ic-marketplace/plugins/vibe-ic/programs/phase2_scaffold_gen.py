@@ -1444,7 +1444,7 @@ def emit_soc_wrap_v(top: str, signals: list[dict], regs: list[dict]) -> str:
     has_regs = bool(regs)
     # Native (non-clock/reset) ports we re-expose at the wrapper boundary.
     clk = _detect_clk_port(signals)
-    rst, _active_low = _detect_rst_port(signals)
+    rst, rst_active_low = _detect_rst_port(signals)
     native = [s for s in signals
               if s["name"] != clk and s["name"] != rst]
 
@@ -1549,9 +1549,11 @@ def emit_soc_wrap_v(top: str, signals: list[dict], regs: list[dict]) -> str:
         if s["name"] == clk:
             inst_ports.append(f"        .{s['name']}(PCLK)")
         elif s["name"] == rst:
-            # Connect block reset to PRESETn (best-effort; integrator confirms
-            # polarity). PRESETn is active-low, matching the common rst_n case.
-            inst_ports.append(f"        .{s['name']}(PRESETn)")
+            # PRESETn is active-low.  _detect_rst_port has already classified
+            # the selected native reset, so adapt only the known active-high
+            # form and preserve a known active-low form directly.
+            reset_expr = "PRESETn" if rst_active_low else "~PRESETn"
+            inst_ports.append(f"        .{s['name']}({reset_expr})")
         else:
             inst_ports.append(f"        .{s['name']}({s['name']})")
     for i, p in enumerate(inst_ports):

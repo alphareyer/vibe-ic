@@ -56,6 +56,48 @@ def _emit(doc):
                                     parameters=doc.get("parameters"))
 
 
+def _connection(wrapper: str, port: str) -> str:
+    prefix = f".{port}("
+    return next(line.strip().rstrip(",") for line in wrapper.splitlines()
+                if line.strip().startswith(prefix))
+
+
+@pytest.mark.parametrize(("reset_name", "expected"), [
+    ("rst", ".rst(~PRESETn)"),
+    ("rst_n", ".rst_n(PRESETn)"),
+])
+def test_soc_wrapper_adapts_only_known_reset_polarity(reset_name, expected):
+    doc = _document()
+    doc["top_ports"][1]["name"] = reset_name
+    signals = scaf.derive_signals({}, doc)
+    wrapper = scaf.emit_soc_wrap_v(doc["top_module"], signals, [])
+    assert _connection(wrapper, reset_name) == expected
+
+
+def test_soc_wrapper_without_reset_does_not_fabricate_native_reset():
+    doc = _document()
+    signals = [s for s in scaf.derive_signals({}, doc)
+               if not scaf._is_reset_name(s["name"])]
+    wrapper = scaf.emit_soc_wrap_v(doc["top_module"], signals, [])
+    assert ".reset(" not in wrapper
+    assert ".rst(" not in wrapper
+
+
+def test_real_producer_active_high_reset_is_adapted_to_apb_presetn():
+    raw = os.environ.get("ISSUE3473_PROJECT")
+    if not raw:
+        pytest.skip("set ISSUE3473_PROJECT to the fresh #3473 producer project")
+    docs = Path(raw) / "phase1/generated_docs"
+    l9 = json.loads((docs / "L9_INTEGRATION_SPEC.json").read_text())
+    l17 = json.loads((docs / "L17_CHANNEL_SIGNAL_CATALOG.json").read_text())
+    fields = l9.get("fields", l9)
+    signals = scaf.derive_signals(l17.get("fields", l17), fields)
+    rst, active_low = scaf._detect_rst_port(signals)
+    assert (rst, active_low) == ("rst", False)
+    wrapper = scaf.emit_soc_wrap_v(fields["top_module"], signals, [])
+    assert _connection(wrapper, rst) == ".rst(~PRESETn)"
+
+
 def test_owned_resolution_parameterizes_top_and_preserves_numeric_consumers():
     doc = _document()
     signals, text = _emit(doc)
