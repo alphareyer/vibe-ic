@@ -2500,7 +2500,8 @@ ENTRY_STEP_ENTERABLE_RUNNERS = ("phase1_one_shot_runner",
                                 "phase3_one_shot_runner")
 
 
-def _record_continuation_evidence(project: Path, entry: str, exit_: Optional[str]) -> None:
+def _record_continuation_evidence(project: Path, entry: str, exit_: Optional[str],
+                                  reason: Optional[str] = None) -> None:
     """Publish an advisory byte inventory before the existing bounded dispatch."""
     import _flow_yaml
     import step_output_collector as versions
@@ -2512,6 +2513,9 @@ def _record_continuation_evidence(project: Path, entry: str, exit_: Optional[str
         if lo > hi:
             return  # The existing owner reports invalid windows.
         evidence = versions.continuation_evidence(project, order[lo:hi + 1])
+        if reason:
+            evidence["reason"] = reason
+            evidence["selection"] = "evidence-based ordinary recovery"
         stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S_%fZ')
         path = project / 'reports/orchestrator' / f'continuation_plan-{stamp}.json'
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2524,6 +2528,200 @@ def _record_continuation_evidence(project: Path, entry: str, exit_: Optional[str
         # Evidence inspection is advisory; never convert a report failure
         # into a phase restart or a fabricated checkpoint acceptance.
         print(f'[continuation] evidence unavailable: {exc}; requested scope unchanged', flush=True)
+
+
+def _resume_dependency_graph() -> Tuple[List[str], Dict[str, set]]:
+    """Return canonical order and the flow's existing direct dependencies.
+
+    This deliberately reads the declared flow instead of introducing another
+    checkpoint/dependency registry.  ``required_inputs.from`` is the byte
+    dependency; ``blocks_on`` is the verdict dependency already consumed by
+    flow compliance.
+    """
+    import _flow_yaml
+    rows = _flow_yaml.load().get("steps") or []
+    order = [str(row["id"]) for row in rows if isinstance(row, dict) and "id" in row]
+    graph: Dict[str, set] = {sid: set() for sid in order}
+    for row in rows:
+        if not isinstance(row, dict) or "id" not in row:
+            continue
+        sid = str(row["id"])
+        for dep in row.get("blocks_on") or []:
+            graph[sid].add(str(dep))
+        for item in row.get("required_inputs") or []:
+            if isinstance(item, dict) and item.get("from") is not None:
+                graph[sid].add(str(item["from"]))
+    return order, graph
+
+
+def _minimal_resume_plan(project: Path, request: Mapping[str, Any]) -> Dict[str, Any]:
+    """Select the next *one* demonstrated recovery action from retained bytes.
+
+    Recovery is intentionally iterative.  A changed/missing producer is run,
+    then this planner is invoked again so its actual new output decides which
+    dependent (if any) is next.  Scheduling a whole descendant cone before
+    that observation is the broad-rerun defect tracked by #3480.
+    """
+    import step_output_collector as versions
+
+    if request.get("schema") != "vibeic/minimal-resume-request/1":
+        raise ValueError("resume request needs schema vibeic/minimal-resume-request/1")
+    consumer = str(request.get("consumer_step") or "").strip()
+    order, graph = _resume_dependency_graph()
+    if consumer not in graph:
+        raise ValueError(f"unknown consumer_step {consumer!r}")
+
+    ancestors = set()
+    pending = [consumer]
+    while pending:
+        sid = pending.pop()
+        if sid in ancestors:
+            continue
+        ancestors.add(sid)
+        pending.extend(graph.get(sid, ()))
+
+    evidence = versions.continuation_evidence(project, order)
+    rows = {str(row.get("step_id")): dict(row)
+            for row in evidence.get("checkpoints") or []
+            if isinstance(row, dict) and row.get("step_id") is not None}
+
+    # A path resolver repair can move bytes without changing them.  The
+    # request names both paths; the planner independently hashes the new path
+    # and only then cancels the old-path "missing" observation.
+    relocations = {}
+    for item in request.get("equivalent_relocations") or []:
+        if not isinstance(item, dict):
+            continue
+        old, new = item.get("retained_path"), item.get("current_path")
+        if isinstance(old, str) and isinstance(new, str):
+            relocations[old] = new
+    for row in rows.values():
+        kept = []
+        accepted = []
+        for diff in row.get("differences") or []:
+            new_rel = relocations.get(diff.get("path"))
+            new_path = (project / new_rel).resolve() if new_rel else None
+            if (diff.get("kind") == "input" and diff.get("state") == "missing"
+                    and new_path is not None
+                    and new_path.is_relative_to(project.resolve())
+                    and new_path.is_file() and not new_path.is_symlink()
+                    and hashlib.sha256(new_path.read_bytes()).hexdigest()
+                    == diff.get("retained_sha256")):
+                accepted.append({"retained_path": diff["path"],
+                                 "current_path": new_rel,
+                                 "sha256": diff["retained_sha256"]})
+            else:
+                kept.append(diff)
+        row["differences"] = kept
+        if accepted:
+            row["equivalent_relocations"] = accepted
+            if row.get("observation") == "differences" and not kept:
+                row["observation"] = "unchanged"
+
+    explicit = request.get("explicit_rerun_steps") or []
+    if explicit:
+        explicit = [str(s) for s in explicit]
+        bad = [s for s in explicit if s not in graph]
+        if bad:
+            raise ValueError("unknown explicit_rerun_steps: " + ", ".join(bad))
+        return {
+            "schema": "vibeic/minimal-resume-plan/1", "status": "READY",
+            "reason": "explicit rerun request: " + str(request.get("reason") or "operator request"),
+            "consumer_step": consumer, "execution_steps": explicit,
+            "next_step": explicit[0], "remaining_explicit_steps": explicit[1:],
+            "reused_checkpoints": [], "unknown_impact": [],
+            "historical_records_mutated": False,
+        }
+
+    disproven = {}
+    unresolved = []
+    for item in request.get("disproven_outputs") or []:
+        if not isinstance(item, dict) or str(item.get("step_id")) not in ancestors:
+            continue
+        sid = str(item.get("step_id"))
+        proof = str(item.get("evidence") or "").strip()
+        if not proof:
+            unresolved.append(f"step {sid} was declared wrong without evidence")
+        else:
+            disproven[sid] = proof
+
+    invalid = {}
+    reused = []
+    for sid in ancestors:
+        row = rows.get(sid)
+        if sid in disproven:
+            invalid[sid] = "prior output disproven: " + disproven[sid]
+            continue
+        if row is None or row.get("observation") == "unknown":
+            unresolved.append(f"step {sid} has insufficient retained provenance")
+            continue
+        diffs = row.get("differences") or []
+        actionable = [d for d in diffs
+                      if (d.get("kind"), d.get("state")) in {
+                          ("input", "changed"), ("output", "missing")}]
+        ambiguous = [d for d in diffs if d not in actionable]
+        if ambiguous:
+            unresolved.extend(
+                f"step {sid} {d.get('kind')} {d.get('path')} is "
+                f"{d.get('state')}; owner evidence is needed"
+                for d in ambiguous)
+        if actionable:
+            invalid[sid] = "; ".join(
+                f"{d.get('kind')} {d.get('path')} {d.get('state')}"
+                for d in actionable)
+        elif not ambiguous:
+            reused.append(sid)
+
+    base = {
+        "schema": "vibeic/minimal-resume-plan/1", "consumer_step": consumer,
+        "historical_records_mutated": False, "unknown_impact": [],
+        "reused_checkpoints": [s for s in order if s in reused],
+        "checkpoint_observations": [rows[s] for s in order if s in rows and s in ancestors],
+    }
+    if unresolved:
+        return {**base, "status": "UNRESOLVED", "execution_steps": [],
+                "unknown_impact": sorted(set(unresolved)),
+                "reason": "insufficient provenance; inspect before scheduling producers"}
+
+    # The first invalid row in canonical order is the earliest demonstrated
+    # producer.  Dependents are deliberately deferred until its new receipt is
+    # visible, preventing a speculative phase restart.
+    invalid_ordered = [s for s in order if s in invalid]
+    if invalid_ordered:
+        step = invalid_ordered[0]
+        deferred = [s for s in invalid_ordered[1:] if s != step and s != consumer]
+        if consumer != step:
+            deferred.append(consumer)
+        return {**base, "status": "READY", "execution_steps": [step],
+                "next_step": step, "reason": invalid[step],
+                "deferred_for_replanning": deferred}
+    if bool(request.get("revalidate_consumer")):
+        return {**base, "status": "READY", "execution_steps": [consumer],
+                "next_step": consumer,
+                "reason": str(request.get("reason") or "revalidate affected consumer"),
+                "deferred_for_replanning": []}
+    return {**base, "status": "NO_ACTION", "execution_steps": [],
+            "unknown_impact": [],
+            "reason": "no retained input/output invalidation was demonstrated"}
+
+
+def _write_minimal_resume_plan(project: Path, plan: Mapping[str, Any]) -> Path:
+    """Append a timestamped decision; never rewrite historical step records."""
+    import datetime
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S_%fZ')
+    path = project / "reports/orchestrator" / f"minimal_resume_plan-{stamp}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(plan), indent=2, sort_keys=True) + "\n")
+    return path
+
+
+def _minimal_resume_entry(plan: Mapping[str, Any]) -> Optional[Tuple[str, str]]:
+    """Translate one READY action to the existing exact bounded entry."""
+    steps = list(plan.get("execution_steps") or [])
+    if plan.get("status") != "READY" or len(steps) != 1:
+        return None
+    step = str(steps[0])
+    return step, step
 
 
 def main() -> int:
@@ -2593,6 +2791,11 @@ def _main() -> int:
                         "unbounded behavior. With a window, rc reflects the "
                         "DISPATCHED STEPS ONLY; whole-flow verdicts come from "
                         "--refresh-only or an unbounded run.")
+    p.add_argument("--resume-request", type=Path,
+                   help="JSON ordinary-recovery request. Retained per-step "
+                        "input/output hashes select at most the next "
+                        "demonstrated step; this is distinct from an explicit "
+                        "--entry-step rerun.")
     p.add_argument("--skip-phase1", action="store_true")
     p.add_argument("--route", choices=("ic", "ip"),
                    help="Owner-stated delivery route: ic=DIE, ip=HARDMACRO. "
@@ -2662,6 +2865,8 @@ def _main() -> int:
     p.add_argument('--receipt-channel-fd', type=int, help=argparse.SUPPRESS)
     _execution.add_arguments(p)
     args = p.parse_args()
+    if args.resume_request and (args.entry_step or args.exit_step):
+        p.error("--resume-request cannot be combined with explicit --entry-step/--exit-step")
     if bool(args.area_receipt) != bool(args.area_run_manifest):
         p.error("--area-receipt and --area-run-manifest must be supplied together")
     # The owner answer is recorded/validated before checking execution authority.
@@ -2727,6 +2932,29 @@ def _main() -> int:
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
 
+    _resume_plan = None
+    if args.resume_request:
+        try:
+            _resume_request = json.loads(args.resume_request.read_text())
+            if not isinstance(_resume_request, dict):
+                raise ValueError("request root is not an object")
+            _resume_plan = _minimal_resume_plan(project, _resume_request)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            print(f"REFUSED: minimal resume request: {exc}", file=sys.stderr)
+            return 2
+        _selected = list(_resume_plan.get("execution_steps") or [])
+        if len(_selected) > 1:
+            # Sparse explicit operations remain expressible through the
+            # existing explicit window interface.  Never widen min..max here.
+            _resume_plan["status"] = "UNRESOLVED"
+            _resume_plan["unknown_impact"] = [
+                "multiple explicit steps require separate declared windows"]
+            _resume_plan["execution_steps"] = []
+            _selected = []
+        _resume_entry = _minimal_resume_entry(_resume_plan)
+        if _resume_entry:
+            args.entry_step, args.exit_step = _resume_entry
+
     try:
         _pl.select_rtl_input(project, args.rtl_input, args.entry_step, args.exit_step)
         _activate_runtime_program_tree(project)
@@ -2742,6 +2970,14 @@ def _main() -> int:
     lock = _runner_lock.acquire_or_reenter(project, "vibe_ic_one_shot_runner")
     if lock is None:
         return 3
+    if _resume_plan is not None:
+        _resume_path = _write_minimal_resume_plan(project, _resume_plan)
+        print(f"[resume] status={_resume_plan['status']}; "
+              f"execute={','.join(_resume_plan.get('execution_steps') or []) or '-'}; "
+              f"reason={_resume_plan.get('reason')}; plan={_resume_path}", flush=True)
+        if _resume_plan["status"] != "READY":
+            lock.release()
+            return 0 if _resume_plan["status"] == "NO_ACTION" else 2
     # The route is an owner decision. Refuse before image capture, dashboard,
     # Phase 1, or any other producer can create a misleading partial run.
     route_refusal = _delivery_route.admit(project, args.route)
@@ -2935,7 +3171,9 @@ def _main() -> int:
                   f"1/2 step.", file=sys.stderr)
             return 2
         print(f"[entry] step {args.entry_step} -> {_entry_runner}")
-        _record_continuation_evidence(project, str(args.entry_step), args.exit_step)
+        _record_continuation_evidence(
+            project, str(args.entry_step), args.exit_step,
+            (str(_resume_plan.get("reason")) if _resume_plan is not None else None))
         if _sdc_postcheck_entry and str(args.exit_step) != '8':
             print('REFUSED: Default Step8 postcheck needs --exit-step 8', file=sys.stderr)
             lock.release()
