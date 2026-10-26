@@ -540,19 +540,39 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
         return "input"
 
     def _add(name: str, direction: str, width: int = 1,
-             comment: str = "") -> None:
+             comment: str = "", source: dict | None = None) -> None:
         if not name:
             return
         clean = _sanitize_id(name)
         if clean in seen:
+            existing = next(s for s in signals if s["name"] == clean)
+            for key in ("active_low", "polarity", "reset_polarity"):
+                if not isinstance(source, dict) or key not in source:
+                    continue
+                value = source[key]
+                if key not in existing:
+                    existing[key] = value
+                elif existing[key] != value:
+                    # Preserve a contradiction so source order cannot choose
+                    # a polarity; the authority reader rejects non-scalars.
+                    existing[key] = [existing[key], value]
+            if (_is_reset_name(clean) and comment.strip()
+                    and comment.strip() not in existing["comment"]):
+                existing["comment"] = "; ".join(filter(None, (
+                    existing["comment"], comment.strip())))
             return
         seen.add(clean)
-        signals.append({
+        projected = {
             "name": clean,
             "direction": direction,
             "width": width,
             "comment": comment.strip(),
-        })
+        }
+        if isinstance(source, dict):
+            for key in ("active_low", "polarity", "reset_polarity"):
+                if key in source:
+                    projected[key] = source[key]
+        signals.append(projected)
 
     # L17 channels
     for ch in _list_or_empty(l17.get("channels")):
@@ -572,7 +592,7 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
             resolved_from_layer.add(clean_name)
             explicit_numeric_widths.setdefault(clean_name, set()).add(width)
         _record_declared_width(ch, name, declared_unresolved)
-        _add(name, direction, width, comment=purpose)
+        _add(name, direction, width, comment=purpose, source=ch)
 
     # L17 global_signals (clock, reset, power, etc.)
     for sig in _list_or_empty(l17.get("global_signals")):
@@ -581,7 +601,7 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
         name = sig.get("name") or ""
         purpose = sig.get("purpose") or sig.get("description") or ""
         direction = _normalize_dir(sig.get("direction") or "input")
-        _add(name, direction, 1, comment=purpose)
+        _add(name, direction, 1, comment=purpose, source=sig)
 
     # L9 top_ports / ports fallback
     for src_key in ("top_ports", "ports"):
@@ -627,7 +647,7 @@ def derive_signals(l17: dict, l9: dict, *, project: Path | None = None,
                 width = 1
             _record_declared_width(port, name, declared_unresolved)
             comment = port.get("description") or port.get("purpose") or ""
-            _add(name, direction, width, comment=comment)
+            _add(name, direction, width, comment=comment, source=port)
 
     # Ensure we have at least a clock + reset stub. Use the SAME predicate as
     # _detect_clk_port / _detect_rst_port (single source of truth) so a real
@@ -1092,6 +1112,8 @@ def emit_fsm_v(top: str, states: list[str]) -> str:
 
 def emit_tb_v(top: str, signals: list[dict]) -> str:
     require_resolved_widths(signals, f"{top}_tb.v")
+    rst_name, rst_active_low = require_reset_authority(
+        signals, f"{top}_tb.v")
     inputs = [s for s in signals if s["direction"] == "input"]
     outputs = [s for s in signals if s["direction"] == "output"]
     inouts = [s for s in signals if s["direction"] == "inout"]
@@ -1150,13 +1172,9 @@ def emit_tb_v(top: str, signals: list[dict]) -> str:
             continue
         zero = "1'b0" if s["width"] == 1 else f"{s['width']}'b0"
         lines.append(f"        {s['name']} = {zero};")
-    # Release reset after 30 ns if a reset-like input is present
-    rst_name = next((s["name"] for s in inputs
-                     if "rst" in s["name"].lower() or "reset" in s["name"].lower()),
-                    None)
+    # Release reset after 30 ns only from canonical reset authority.
     if rst_name:
-        active_low = "n" in rst_name.lower()
-        if active_low:
+        if rst_active_low:
             lines.append(f"        {rst_name} = 1'b0;")
             lines.append("        #30;")
             lines.append(f"        {rst_name} = 1'b1;")
@@ -1364,6 +1382,15 @@ def _detect_rst_port(signals: list[dict]) -> tuple[str | None, bool | None]:
     return None, None
 
 
+def require_reset_authority(signals: list[dict], artefact: str
+                            ) -> tuple[str | None, bool | None]:
+    """Return canonical reset authority or block before artifact emission."""
+    rst, active_low = _detect_rst_port(signals)
+    if rst is not None and active_low is None:
+        raise UnknownResetPolarity(artefact, rst)
+    return rst, active_low
+
+
 # ---------------------------------------------------------------------------
 # Output: <top>_cocotb_test.py + Makefile
 # ---------------------------------------------------------------------------
@@ -1380,9 +1407,8 @@ def emit_cocotb_test(top: str, signals: list[dict], l8: dict,
     require_resolved_widths(signals, f"{top}_cocotb_test.py")
     period_ns, period_note = derive_clock_period_ns(l8)
     clk = _detect_clk_port(signals)
-    rst, active_low = _detect_rst_port(signals)
-    if rst is not None and active_low is None:
-        raise UnknownResetPolarity(f"{top}_cocotb_test.py", rst)
+    rst, active_low = require_reset_authority(
+        signals, f"{top}_cocotb_test.py")
 
     lines: list[str] = [
         '"""Auto-generated cocotb test skeleton for ' + top + '.',
@@ -1512,9 +1538,8 @@ def emit_soc_wrap_v(top: str, signals: list[dict], regs: list[dict]) -> str:
     has_regs = bool(regs)
     # Native (non-clock/reset) ports we re-expose at the wrapper boundary.
     clk = _detect_clk_port(signals)
-    rst, rst_active_low = _detect_rst_port(signals)
-    if rst is not None and rst_active_low is None:
-        raise UnknownResetPolarity(f"{top}_soc_wrap.v", rst)
+    rst, rst_active_low = require_reset_authority(
+        signals, f"{top}_soc_wrap.v")
     native = [s for s in signals
               if s["name"] != clk and s["name"] != rst]
 
@@ -1675,9 +1700,6 @@ def emit_scaffold(project: Path,
     if not gd.is_dir():
         return {"project": str(project), "status": "skipped",
                 "reason": "phase1/generated_docs missing"}
-    out_dir = project / "phase2" / "stage1" / "scaffold"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     # Load the relevant L docs (unwrap fields where applicable)
     l1 = _unwrap_fields(_load(gd / "L1_DATASHEET.json"))
     l4 = _unwrap_fields(_load(gd / "L4_REGMAP.json"))
@@ -1692,6 +1714,11 @@ def emit_scaffold(project: Path,
     ic_name = l1.get("ic_name") or "unknown"
     top = derive_top_module_name(l1, l9, ic_name)
     signals = derive_signals(l17, l9, project=project)
+    # BLOCKING preflight: every skip combination shares this authority check,
+    # and it runs before even the scaffold directory can be created.
+    require_reset_authority(signals, f"{top} scaffold")
+    out_dir = project / "phase2" / "stage1" / "scaffold"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # BLOCKING, and BEFORE the first write (ORGANIC #404). The individual
     # emitters refuse too, but a refusal discovered on the fourth `_write`

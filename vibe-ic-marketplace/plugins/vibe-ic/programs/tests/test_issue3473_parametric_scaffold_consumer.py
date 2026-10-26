@@ -63,6 +63,79 @@ def _connection(wrapper: str, port: str) -> str:
                 if line.strip().startswith(prefix))
 
 
+def _scaffold_project(root: Path, reset_port: dict) -> Path:
+    gd = root / "phase1/generated_docs"
+    gd.mkdir(parents=True)
+    (gd / "L1_DATASHEET.json").write_text(json.dumps({
+        "ic_name": "reset_probe",
+    }))
+    (gd / "L9_INTEGRATION_SPEC.json").write_text(json.dumps({
+        "top_module": "reset_probe",
+        "top_ports": [
+            {"name": "clk", "direction": "input", "width": 1},
+            dict(reset_port, direction="input", width=1),
+            {"name": "done", "direction": "output", "width": 1},
+        ],
+    }))
+    return root
+
+
+def _scaffold_files(project: Path) -> list[str]:
+    out = project / "phase2/stage1/scaffold"
+    return sorted(p.name for p in out.iterdir()) if out.is_dir() else []
+
+
+def test_emit_scaffold_refuses_unknown_before_any_output(tmp_path):
+    project = _scaffold_project(tmp_path / "unknown", {
+        "name": "reset_x",
+        "description": "polarity unspecified",
+        "reset_polarity": "unknown",
+    })
+    with pytest.raises(scaf.UnknownResetPolarity):
+        scaf.emit_scaffold(project)
+    files = _scaffold_files(project)
+    tb = project / "phase2/stage1/scaffold/reset_probe_tb.v"
+    guessed_tb = ([line.strip() for line in tb.read_text().splitlines()
+                   if "reset_x =" in line] if tb.is_file() else [])
+    observed = "files=%s;guessed_tb=%s" % (
+        ",".join(files), "|".join(guessed_tb))
+    assert observed == "files=;guessed_tb="
+
+
+def test_emit_scaffold_skips_cannot_bypass_unknown_preflight(tmp_path):
+    project = _scaffold_project(tmp_path / "unknown_skip", {
+        "name": "reset_x",
+        "description": "polarity unspecified",
+        "reset_polarity": "unknown",
+    })
+    with pytest.raises(scaf.UnknownResetPolarity):
+        scaf.emit_scaffold(project, skip_cocotb=True, skip_soc=True)
+    assert _scaffold_files(project) == []
+
+
+@pytest.mark.parametrize(("metadata", "active_low", "wrapper_connection",
+                          "asserted", "released"), [
+    ({"polarity": "active_high"}, False, ".reset_x(~PRESETn)", "1", "0"),
+    ({"active_low": True}, True, ".reset_x(PRESETn)", "0", "1"),
+])
+def test_emit_scaffold_tb_and_wrapper_share_structured_reset_authority(
+        tmp_path, metadata, active_low, wrapper_connection, asserted, released):
+    project = _scaffold_project(tmp_path / ("low" if active_low else "high"),
+                                {"name": "reset_x", **metadata})
+    report = scaf.emit_scaffold(project)
+    out = Path(report["out_dir"])
+    tb = (out / "reset_probe_tb.v").read_text()
+    wrapper = (out / "reset_probe_soc_wrap.v").read_text()
+    signals = scaf.derive_signals({}, json.loads(
+        (project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").read_text()))
+    assert scaf._detect_rst_port(signals) == ("reset_x", active_low)
+    assert _connection(wrapper, "reset_x") == wrapper_connection
+    reset_lines = [line.strip() for line in tb.splitlines()
+                   if line.strip().startswith("reset_x =")]
+    assert reset_lines[-2:] == [
+        f"reset_x = 1'b{asserted};", f"reset_x = 1'b{released};"]
+
+
 @pytest.mark.parametrize(("reset_name", "expected"), [
     ("rst", ".rst(~PRESETn)"),
     ("rst_n", ".rst_n(PRESETn)"),
