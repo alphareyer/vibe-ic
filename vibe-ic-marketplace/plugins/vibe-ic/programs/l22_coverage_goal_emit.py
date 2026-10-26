@@ -162,6 +162,17 @@ _VOCAB = (
     "toggle coverage", "statement coverage", "assertion coverage",
     "fault coverage", "coverage", "covered",
 )
+# Keep this deliberately narrower than the general vocabulary above: these
+# are the dimensions the existing coverage consumer measures independently.
+# A source may put one percentage over more than one of them (for example,
+# ``toggle / branch coverage``); reducing that clause to the first matching
+# phrase silently drops part of the requirement.
+_MEASURED_DIMENSION_WORDS = (
+    ("line", ("line", "lines", "statement", "statements", "code")),
+    ("toggle", ("toggle", "toggles")),
+    ("branch", ("branch", "branches", "decision", "decisions",
+                "condition", "conditions")),
+)
 _RE_PCT = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
 
 # The phrases by which a design marks a stated target as NOT a sign-off
@@ -175,6 +186,16 @@ _GOAL_KEY = "coverage_goals"
 
 def _metric_name(match_text: str) -> Optional[str]:
     low = match_text.lower()
+    if re.search(r"(?<![a-z0-9])coverage(?![a-z0-9])", low):
+        dimensions = [
+            dimension
+            for dimension, words in _MEASURED_DIMENSION_WORDS
+            if any(re.search(r"(?<![a-z0-9])" + re.escape(word)
+                             + r"(?![a-z0-9])", low)
+                   for word in words)
+        ]
+        if len(dimensions) > 1:
+            return " / ".join(dimensions) + " coverage"
     for term in _VOCAB:
         if term in low:
             return term
@@ -190,6 +211,50 @@ def _pct(match_text: str) -> Optional[float]:
     except ValueError:
         return None
     return v if 0.0 <= v <= 100.0 else None
+
+
+def _hit_targets(hit: Dict[str, Any]) -> tuple[List[tuple[str, float, str]], str]:
+    """Return clause-bound ``(name, percentage, evidence)`` targets.
+
+    ``framed_hits`` correctly establishes that a requirement exists, but its
+    diagnostic context is a whole sentence.  One sentence may contain two
+    independently thresholded clauses; collecting every dimension from that
+    sentence and the first percentage would fabricate a shared predicate.
+    Semicolon-separated clauses are representable and stay separate.  Any
+    other multi-percentage shape refuses rather than guessing the binding.
+    """
+    line = str(hit.get("line_text") or "").strip()
+    percentages = list(_RE_PCT.finditer(line))
+    if len(percentages) > 1:
+        clauses = [part.strip() for part in re.split(r"[;；]", line)
+                   if part.strip()]
+        targets: List[tuple[str, float, str]] = []
+        for clause in clauses:
+            clause_percentages = list(_RE_PCT.finditer(clause))
+            if not clause_percentages:
+                continue
+            if len(clause_percentages) != 1:
+                return [], "multiple percentages cannot be bound to clauses"
+            name = _metric_name(clause)
+            pct = _pct(clause)
+            if name is None or pct is None:
+                return [], "a percentage clause has no unambiguous coverage metric"
+            targets.append((name, pct, clause))
+        if len(targets) != len(percentages):
+            return [], "distinct percentages are not independently representable"
+        return targets, ""
+
+    text = str(hit.get("match") or "")
+    ctx = str(hit.get("context") or "")
+    name = (_metric_name(line) or _metric_name(text) or _metric_name(ctx))
+    pct = _pct(text)
+    if pct is None:
+        pct = _pct(line)
+    if pct is None:
+        pct = _pct(ctx)
+    if name is None or pct is None:
+        return [], "no parseable metric/percentage"
+    return [(name, pct, line or text[:200])], ""
 
 
 def _generated_docs(project: Path) -> Path:
@@ -265,13 +330,61 @@ def _acceptance_table_goals(project: Path) -> List[Dict[str, Any]]:
     return result
 
 
-def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
+def reconstruct_canonical_goals(project: Path) -> Dict[str, Any]:
+    """Rebuild producer-owned goals from design inputs, without reading L22.
+
+    Consumers use this result to distinguish an emitter row from a row that
+    merely copies the emitter's label.  Keeping reconstruction here ensures
+    admission and emission use the same parser, qualifier, and provenance
+    rules; the stored claimant row is never an input to this decision.
+    """
     gate = _gate_module()
     if gate is None or not hasattr(gate, "_COVERAGE_TARGET_RE"):
         return {"tool": TOOL, "status": "SKIPPED",
                 "reason": "consumer gate absent — refusing to emit against "
                           "a predicate it cannot check",
-                "emitted_count": 0, "emitted": [], "skipped": []}
+                "framed_hits": 0, "goals": [], "skipped": []}
+
+    # include_non_normative=True — an EMITTER must not inherit a GATE's
+    # discard policy. A target the design declares and marks informational
+    # is still declared and must be reconstructed with its advisory role.
+    hits = framed_hits(input_doc_texts(project), gate._COVERAGE_TARGET_RE,
+                       include_non_normative=True)
+    goals: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    for h in hits:
+        targets, refusal = _hit_targets(h)
+        if not targets:
+            skipped.append({"reason": refusal,
+                            "match": str(h.get("match") or "")[:160]})
+            continue
+        src, src_outside = project_relative_source(h.get("source"), project)
+        for name, pct, evidence in targets:
+            qualifier_text = (evidence if len(targets) > 1
+                              else h.get("line_text") or evidence)
+            qualifier = signoff_qualifier(qualifier_text)
+            goal = {
+                "name": name,
+                "target_pct": pct,
+                "signoff_gate": qualifier is None,
+                "signoff_qualifier": qualifier,
+                "source": src,
+                "line": h.get("line"),
+                "evidence": evidence[:200],
+                "extraction_strategy": TOOL,
+            }
+            if src_outside:
+                goal["source_outside_project"] = True
+            goals.append(goal)
+    goals.extend(_acceptance_table_goals(project))
+    return {"tool": TOOL, "status": "OK", "framed_hits": len(hits),
+            "goals": goals, "skipped": skipped}
+
+
+def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
+    reconstructed = reconstruct_canonical_goals(project)
+    if reconstructed.get("status") != "OK":
+        return dict(reconstructed, emitted_count=0, emitted=[])
 
     l22_path = _generated_docs(project) / _L22_NAME
     if not l22_path.is_file():
@@ -288,13 +401,6 @@ def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
         return {"tool": TOOL, "status": "ERROR",
                 "reason": f"{_L22_NAME} is not an object",
                 "emitted_count": 0, "emitted": [], "skipped": []}
-
-    # include_non_normative=True — an EMITTER must not inherit a GATE's
-    # discard policy. A target the design declares and marks informational
-    # is still declared; dropping it makes this layer read as having no
-    # coverage goal at all.
-    hits = framed_hits(input_doc_texts(project), gate._COVERAGE_TARGET_RE,
-                       include_non_normative=True)
 
     # WHERE the goals must land. `l_doc_consumer_contract.l_doc_fields()`
     # merges the nested `fields` payload OVER the top level
@@ -313,59 +419,23 @@ def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
     }
 
     emitted: List[Dict[str, Any]] = []
-    skipped: List[Dict[str, Any]] = []
-    for h in hits:
-        text = h.get("match") or ""
-        ctx = h.get("context") or ""
-        name = _metric_name(text) or _metric_name(ctx)
-        pct = _pct(text)
-        if pct is None:
-            pct = _pct(ctx)
-        if name is None or pct is None:
-            skipped.append({"reason": "no parseable metric/percentage",
-                            "match": text[:160]})
+    skipped = reconstructed["skipped"]
+    for goal in reconstructed["goals"]:
+        if goal.get("extraction_strategy") != TOOL:
             continue
-        key = (name.lower(), pct)
+        key = (str(goal.get("name") or "").lower(), goal.get("target_pct"))
         if key in have:
             continue
         have.add(key)
-        # OWN LINE, never the ±160-char context: a document disclaims the
-        # row it is written on. `line_text` is present because this call
-        # opted into include_non_normative.
-        qualifier = signoff_qualifier(h.get("line_text") or "")
-        # PROJECT-RELATIVE, never absolute. `framed_hits` hands back
-        # `str(path)` — right for a gate REPORT (a run record says where the
-        # run happened), wrong here: this value is written INTO an L
-        # document, a design artefact the flow reads back and diffs. An
-        # absolute path makes the same design emit a different L22 from
-        # every checkout. `line` is untouched — it is a property of the
-        # file's contents, not of the machine. See
-        # `l_doc_consumer_contract.project_relative_source`.
-        src, src_outside = project_relative_source(h.get("source"), project)
-        goal = {
-            "name": name,
-            "target_pct": pct,
-            "signoff_gate": qualifier is None,
-            "signoff_qualifier": qualifier,
-            "source": src,
-            "line": h.get("line"),
-            "evidence": text[:200],
-            "extraction_strategy": TOOL,
-        }
-        if src_outside:
-            # Present ONLY when it fires. An always-present `false` would
-            # change the shape of every goal ever emitted to say nothing;
-            # this key exists to be conspicuous on the rare run whose input
-            # lives outside the project, and `source` already carries the
-            # `<outside-project>/` marker for a human reader.
-            goal["source_outside_project"] = True
         goals.append(goal)
         emitted.append(goal)
 
     # Source-row identity retains separate populations and makes replay stable.
     table_have = {(g.get("source"), g.get("line"), g.get("extraction_strategy"))
                   for g in goals if isinstance(g, dict)}
-    for goal in _acceptance_table_goals(project):
+    for goal in reconstructed["goals"]:
+        if goal.get("extraction_strategy") != f"{TOOL}.acceptance_table":
+            continue
         key = (goal["source"], goal["line"], goal["extraction_strategy"])
         if key not in table_have:
             goals.append(goal)
@@ -387,7 +457,7 @@ def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
         "tool": TOOL,
         "status": "OK",
         "dry_run": dry_run,
-        "framed_hits": len(hits),
+        "framed_hits": reconstructed["framed_hits"],
         "pre_existing_goals": len(existing) if isinstance(existing, list) else 0,
         "emitted_count": len(emitted),
         "emitted": emitted,

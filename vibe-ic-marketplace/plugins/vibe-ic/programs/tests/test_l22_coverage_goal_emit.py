@@ -147,6 +147,215 @@ def test_emits_comparable_numeric_target_and_name(tmp_path):
     assert g["evidence"]
 
 
+def test_preserves_every_dimension_in_a_combined_coverage_target(tmp_path):
+    """One percentage over two named dimensions must bind to both.
+
+    This is the ordinary document shape used by the source finding.  Losing
+    ``toggle`` here lets a branch-only measurement satisfy a requirement the
+    document explicitly states over toggle *and* branch coverage.
+    """
+    _mk(tmp_path, "# Verification\nThe block must reach at least 95% "
+                  "toggle / branch coverage (informational only).\n")
+    g = mod.run(tmp_path)["emitted"][0]
+    assert "toggle" in g["name"].lower(), g
+    assert "branch" in g["name"].lower(), g
+
+    import l10_coverage_goal_classify as consumer
+    assert consumer.coverage_dimensions(g)[0] == ["toggle", "branch"], g
+
+
+def test_does_not_add_a_dimension_the_source_did_not_state(tmp_path):
+    """Mutation-negative: a branch-only target remains branch-only."""
+    _mk(tmp_path, "# Verification\nThe block must reach at least 95% "
+                  "branch coverage (informational only).\n")
+    g = mod.run(tmp_path)["emitted"][0]
+    assert g["name"] == "branch coverage", g
+    assert "toggle" not in g["name"].lower(), g
+
+
+def _ordinary_wrapper_summary(project: Path, totals):
+    """Run the shipping Phase1 wrapper, then its numeric Step-4 consumer."""
+    import phase1_doc_one_shot_runner as phase1
+    emitted = phase1._post_emit_l22_coverage_goals(project)
+    return emitted, _effective_goals(project), _step4_summary(project, totals)
+
+
+def _step4_summary(project: Path, totals):
+    """Run only the ordinary numeric consumer over the project's L docs."""
+    gd = project / "phase1" / "generated_docs"
+    (gd / "L10_TEST_CASES.json").write_text(json.dumps({
+        "schema_version": 2, "doc_class": "test_cases", "test_cases": []
+    }), encoding="utf-8")
+    cov = project / "reports" / "phase2" / "coverage"
+    cov.mkdir(parents=True, exist_ok=True)
+    (cov / "coverage_verilator.json").write_text(
+        json.dumps({"totals": totals}), encoding="utf-8")
+
+    import cpu_functional_oracle_waiver_check as consumer
+    return consumer._coverage_goal_summary(project)
+
+
+def test_ordinary_l22_goal_reaches_numeric_consumer_as_advisory(tmp_path):
+    """The ordinary wrapper must carry value and role, not just tokens."""
+    _mk(tmp_path, "# Verification\nThe block must reach toggle / branch "
+                  "coverage >= 95% (informational only).\n")
+    emitted, goals, summary = _ordinary_wrapper_summary(
+        tmp_path, {"toggle": {"pct": 97.0}, "branch": {"pct": 96.0}})
+
+    assert emitted == 1 and len(goals) == 1, goals
+    row = summary["rows"][0]
+    assert row["stated_pct"] == 95.0, row
+    assert row["enforcement"] == "ADVISORY", row
+    assert [(m["dimension"], m["achieved_pct"], m["verdict"])
+            for m in row["measurements"]] == [
+                ("toggle", 97.0, "PASS"), ("branch", 96.0, "PASS")]
+    assert row["verdict"] == "PASS", row
+
+
+def test_same_line_distinct_thresholds_remain_independent_predicates(tmp_path):
+    """Source-bound reverse for rejected a8e69d: never combine these."""
+    _mk(tmp_path, "# Verification\nToggle coverage must reach 80%; branch "
+                  "coverage must reach 95%.\n")
+    emitted, goals, summary = _ordinary_wrapper_summary(
+        tmp_path, {"toggle": {"pct": 85.0}, "branch": {"pct": 94.0}})
+
+    assert emitted == 2, goals
+    assert {(g["name"], g["target_pct"]) for g in goals} == {
+        ("toggle coverage", 80.0), ("branch coverage", 95.0)}
+    rows = {r["case"]: r for r in summary["rows"]}
+    assert (rows["toggle coverage"]["stated_pct"],
+            rows["toggle coverage"]["verdict"]) == (80.0, "PASS")
+    assert (rows["branch coverage"]["stated_pct"],
+            rows["branch coverage"]["verdict"]) == (95.0, "FAIL")
+    assert all(r["enforcement"] == "BLOCKING" for r in rows.values())
+
+
+def test_ordinary_wrapper_refuses_when_source_states_no_target(tmp_path):
+    _mk(tmp_path, _DOC_NO_TARGET)
+    emitted, goals, summary = _ordinary_wrapper_summary(tmp_path, {})
+    assert emitted == 0
+    assert goals == []
+    assert summary["declared_count"] == 0
+
+
+def test_unbound_preexisting_l22_goal_is_not_admitted_as_pass(tmp_path):
+    """Exact second-review counterexample: numeric shape is not provenance."""
+    _mk(tmp_path, _DOC_NO_TARGET, goals=[{
+        "name": "toggle coverage", "target_pct": 95.0,
+        "signoff_gate": True,
+    }])
+    row = _step4_summary(tmp_path, {"toggle": {"pct": 99.0}})["rows"][0]
+    assert row["verdict"] == "NOT_MEASURED", row
+    assert row["achieved_pct"] is None, row
+    assert row["source_binding"] == "REFUSED", row
+    assert "source" in row["why"], row
+
+
+def test_owner_label_cannot_spoof_canonical_threshold(tmp_path):
+    """A copied producer label cannot weaken the requirement it cites."""
+    _mk(tmp_path, "# Verification\nThe block must reach toggle coverage "
+                  ">= 95%.\n")
+    import phase1_doc_one_shot_runner as phase1
+    assert phase1._post_emit_l22_coverage_goals(tmp_path) == 1
+    doc_path = (tmp_path / "phase1" / "generated_docs"
+                / "L22_VERIFICATION_PLAN.json")
+    doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    forged = doc["fields"]["coverage_goals"][0]
+    assert forged["target_pct"] == 95.0
+    forged["target_pct"] = 5.0
+    doc_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    row = _step4_summary(tmp_path, {"toggle": {"pct": 10.0}})["rows"][0]
+    assert row["verdict"] == "NOT_MEASURED", row
+    assert row["achieved_pct"] is None, row
+    assert row["source_binding"] == "REFUSED", row
+    assert "target_pct" in row["why"], row
+
+
+def test_canonical_provenance_with_invalid_name_remains_visible(tmp_path):
+    """A claimant-controlled name cannot drop a source-owned obligation."""
+    _mk(tmp_path, "# Verification\nThe block must reach toggle coverage "
+                  ">= 95%.\n")
+    import phase1_doc_one_shot_runner as phase1
+    assert phase1._post_emit_l22_coverage_goals(tmp_path) == 1
+    doc_path = (tmp_path / "phase1" / "generated_docs"
+                / "L22_VERIFICATION_PLAN.json")
+    doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    doc["fields"]["coverage_goals"][0]["name"] = "coverage goal"
+    doc_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    summary = _step4_summary(tmp_path, {"toggle": {"pct": 99.0}})
+    assert summary["declared_count"] == 1, summary
+    row = summary["rows"][0]
+    assert row["verdict"] == "NOT_MEASURED", row
+    assert row["achieved_pct"] is None, row
+    assert row["source_binding"] == "REFUSED", row
+    assert "name" in row["why"] and "dimensions" in row["why"], row
+
+
+@pytest.mark.parametrize("invalid_target", [None, "ninety-five"],
+                         ids=["absent", "nonnumeric"])
+def test_canonical_provenance_with_invalid_target_remains_visible(
+        tmp_path, invalid_target):
+    """An invalid claimant target is a visible refusal, never an omission."""
+    _mk(tmp_path, "# Verification\nThe block must reach toggle coverage "
+                  ">= 95%.\n")
+    import phase1_doc_one_shot_runner as phase1
+    assert phase1._post_emit_l22_coverage_goals(tmp_path) == 1
+    doc_path = (tmp_path / "phase1" / "generated_docs"
+                / "L22_VERIFICATION_PLAN.json")
+    doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    goal = doc["fields"]["coverage_goals"][0]
+    if invalid_target is None:
+        goal.pop("target_pct")
+    else:
+        goal["target_pct"] = invalid_target
+    doc_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    summary = _step4_summary(tmp_path, {"toggle": {"pct": 99.0}})
+    assert summary["declared_count"] == 1, summary
+    row = summary["rows"][0]
+    assert row["verdict"] == "NOT_MEASURED", row
+    assert row["achieved_pct"] is None, row
+    assert row["source_binding"] == "REFUSED", row
+    assert "target_pct" in row["why"], row
+
+
+@pytest.mark.parametrize("missing", [
+    "source", "line", "evidence", "extraction_strategy",
+])
+def test_each_canonical_provenance_field_is_required(tmp_path, missing):
+    """A partly copied producer row is still unbound and remains visible."""
+    _mk(tmp_path, "# Verification\nThe block must reach toggle coverage "
+                  ">= 95%.\n")
+    import phase1_doc_one_shot_runner as phase1
+    assert phase1._post_emit_l22_coverage_goals(tmp_path) == 1
+    doc_path = (tmp_path / "phase1" / "generated_docs"
+                / "L22_VERIFICATION_PLAN.json")
+    doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    doc["fields"]["coverage_goals"][0].pop(missing)
+    doc_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    row = _step4_summary(tmp_path, {"toggle": {"pct": 99.0}})["rows"][0]
+    assert row["verdict"] == "NOT_MEASURED", row
+    assert row["source_binding"] == "REFUSED", row
+    assert missing in row["why"], row
+
+
+def test_source_bound_informational_shortfall_stays_advisory(tmp_path):
+    """Provenance admission must not promote informational intent."""
+    _mk(tmp_path, "# Verification\nThe block must reach toggle / branch "
+                  "coverage >= 95% (informational only).\n")
+    emitted, _goals, summary = _ordinary_wrapper_summary(
+        tmp_path, {"toggle": {"pct": 90.0}, "branch": {"pct": 96.0}})
+    assert emitted == 1
+    row = summary["rows"][0]
+    assert row["verdict"] == "FAIL", row
+    assert row["enforcement"] == "ADVISORY", row
+    import cpu_functional_oracle_waiver_check as consumer
+    assert consumer._cgc.coverage_goal_refusal(summary) is None
+
+
 def test_signoff_qualifier_is_preserved(tmp_path):
     """A target the design marks informational must NOT become blocking."""
     _mk(tmp_path, _DOC_WITH_TARGET_INFORMATIONAL)

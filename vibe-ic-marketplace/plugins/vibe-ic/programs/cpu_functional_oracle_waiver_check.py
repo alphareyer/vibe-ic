@@ -58,6 +58,7 @@ import _path_layout as _pl  # noqa: E402
 import _sim_results_bridge as _srb  # noqa: E402
 import _l10_execution as _l10x  # R-0915-87(2): the ONE execution reader  # noqa: E402
 import l10_coverage_goal_classify as _cgc  # R-0915-113(4)  # noqa: E402
+import l22_coverage_goal_emit as _l22_cov  # canonical L22 owner  # noqa: E402
 import testbench_gen as _tbg  # who owns a case that did not run  # noqa: E402
 
 # The capability-gap token retained on a connectivity-PASS evidence record.
@@ -943,6 +944,77 @@ def _credit_isa_goals(project: Path, summary: dict) -> None:
             1 for r in rows if r["verdict"] == _cgc.NOT_MEASURED)
 
 
+_L22_NUMERIC_OWNERS = frozenset({
+    _l22_cov.TOOL,
+    f"{_l22_cov.TOOL}.acceptance_table",
+})
+
+
+def _l22_numeric_source_binding(
+        goal: dict, canonical_goals: "list[dict]") -> "tuple[bool, str]":
+    """Whether an L22 numeric row exactly matches producer reconstruction."""
+    strategy = goal.get("extraction_strategy")
+    if strategy not in _L22_NUMERIC_OWNERS:
+        return False, ("L22 source binding refused: extraction_strategy is "
+                       "absent or is not owned by l22_coverage_goal_emit")
+    source = goal.get("source")
+    if not isinstance(source, str) or not source.strip():
+        return False, "L22 source binding refused: source is absent"
+    source_path = Path(source)
+    if source_path.is_absolute() or source.startswith("<outside-project>"):
+        return False, "L22 source binding refused: source is not project-relative"
+    line = goal.get("line")
+    if type(line) is not int or line <= 0:
+        return False, "L22 source binding refused: line is not a positive integer"
+    evidence = goal.get("evidence")
+    if not isinstance(evidence, str) or not evidence.strip():
+        return False, "L22 source binding refused: evidence is absent"
+    name = goal.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return False, "L22 source binding refused: name is absent"
+    target = goal.get("target_pct")
+    if type(target) not in (int, float):
+        return False, "L22 source binding refused: target_pct is not numeric"
+    if "signoff_gate" not in goal:
+        return False, "L22 source binding refused: signoff role is absent"
+
+    # Provenance selects the producer reconstruction; every consumed semantic
+    # field must then agree.  The claimant-controlled strategy is retained as
+    # a required field, but never establishes ownership on its own.
+    candidates = [
+        canonical for canonical in canonical_goals
+        if canonical.get("extraction_strategy") == strategy
+        and canonical.get("source") == source
+        and canonical.get("line") == line
+        and canonical.get("evidence") == evidence
+    ]
+    if not candidates:
+        return False, ("L22 source binding refused: source, line, evidence, "
+                       "and extraction_strategy do not match a reconstructed "
+                       "canonical goal")
+
+    dimensions = tuple(_cgc.coverage_dimensions(goal)[0])
+    mismatches = []
+    for canonical in candidates:
+        current = []
+        if canonical.get("name") != name:
+            current.append("name")
+        if tuple(_cgc.coverage_dimensions(canonical)[0]) != dimensions:
+            current.append("dimensions")
+        if canonical.get("target_pct") != target:
+            current.append("target_pct")
+        if (canonical.get("signoff_gate") != goal.get("signoff_gate")
+                or canonical.get("signoff_qualifier")
+                != goal.get("signoff_qualifier")):
+            current.append("signoff role")
+        if not current:
+            return True, "exact match to reconstructed canonical producer goal"
+        mismatches.append(current)
+    fields = sorted(set(field for mismatch in mismatches for field in mismatch))
+    return False, ("L22 source binding refused: reconstructed canonical goal "
+                   f"mismatch in {', '.join(fields)}")
+
+
 def _coverage_goal_summary(project: Path) -> dict:
     """The COVERAGE-GOAL population and its OWN denominator.
 
@@ -956,6 +1028,64 @@ def _coverage_goal_summary(project: Path) -> dict:
     rows, _design_na = split_design_declared_na(
         rows, design_selected_options(project))
     _vectors, goals = _cgc.partition(rows)
+
+    # L22 is the canonical owner of numeric coverage targets produced by
+    # Phase1.  Scenario pass-rate rows remain owned by L10; only L22 rows that
+    # name a measurable coverage dimension enter this numeric instrument.
+    l22 = gd / "L22_VERIFICATION_PLAN.json"
+    l22_rows = _declared_rows(
+        l22, ("coverage_goals", "coverage_targets", "goals", "coverage_plan"))
+    reconstruction = _l22_cov.reconstruct_canonical_goals(project)
+    canonical_goals = (reconstruction.get("goals") or []
+                       if reconstruction.get("status") == "OK" else [])
+    canonical_provenance = {
+        (goal.get("source"), goal.get("line"), goal.get("evidence"))
+        for goal in canonical_goals if isinstance(goal, dict)
+    }
+
+    # Bind before trusting claimant-owned measurement fields.  A damaged name
+    # or target must not erase a source-owned obligation before reconstruction
+    # gets a chance to refuse it.  Keep the legacy numeric-shape arm so an
+    # unprovenanced numeric L22 row remains a visible refusal too.
+    l22_candidates = [
+        goal for goal in l22_rows
+        if isinstance(goal, dict) and (
+            goal.get("extraction_strategy") in _L22_NUMERIC_OWNERS
+            or (goal.get("source"), goal.get("line"), goal.get("evidence"))
+            in canonical_provenance
+            or (_cgc.stated_acceptance_percentage(goal)[0] is not None
+                and _cgc.coverage_dimensions(goal)[0]))
+    ]
+    l22_numeric, l22_unbound = [], []
+    for goal in l22_candidates:
+        bound, why = _l22_numeric_source_binding(goal, canonical_goals)
+        if reconstruction.get("status") != "OK":
+            why = ("L22 source binding refused: canonical reconstruction "
+                   f"did not complete: {reconstruction.get('reason') or 'unknown'}")
+            bound = False
+        if bound:
+            # Exact non-dimensional acceptance-table rows belong to their own
+            # consumer. Only measurable dimensions enter this instrument.
+            if (_cgc.stated_acceptance_percentage(goal)[0] is not None
+                    and _cgc.coverage_dimensions(goal)[0]):
+                l22_numeric.append(goal)
+        else:
+            l22_unbound.append((goal, why))
+
+    # Older Phase1 producers may also have projected the same dimensional
+    # predicate into L10. Prefer the canonical L22 row only for an exact
+    # semantic duplicate: dimensions, threshold, and enforcement must all
+    # agree. A mandatory sibling can therefore never be hidden by an
+    # informational L22 row.
+    def _numeric_signature(goal: dict):
+        dimensions = tuple(_cgc.coverage_dimensions(goal)[0])
+        stated = _cgc.stated_acceptance_percentage(goal)[0]
+        enforcement = _cgc.goal_enforcement(goal)[0]
+        return (dimensions, stated, enforcement) if dimensions and stated is not None else None
+
+    canonical = {_numeric_signature(goal) for goal in l22_numeric}
+    goals = [goal for goal in goals
+             if _numeric_signature(goal) not in canonical] + l22_numeric
     totals, source = _coverage_totals(project)
     # The execution record arms the scenario pass-rate instrument (a goal
     # measured by the L10 cases bound to it that ran their own oracle).
@@ -1034,6 +1164,39 @@ def _coverage_goal_summary(project: Path) -> dict:
         summary["not_measured_count"] = sum(
             1 for r in kept if r["verdict"] == _cgc.NOT_MEASURED)
     summary["input_not_supplied"] = gaps
+
+    # An unbound numeric row is still a declared L22 row. Keep it visible in
+    # the denominator as an explicit refusal, after all measurement/credit
+    # paths, so no coverage total or native evidence can upgrade it to PASS.
+    for goal, why in l22_unbound:
+        dimensions = _cgc.coverage_dimensions(goal)[0]
+        stated, stated_source = _cgc.stated_acceptance_percentage(goal)
+        enforcement, enforcement_source = _cgc.goal_enforcement(goal)
+        summary["rows"].append({
+            "case": str(goal.get("name") or goal.get("id") or ""),
+            "population": _cgc.COVERAGE_GOAL,
+            "scope": None,
+            "scope_source": "L22 numeric goal refused before measurement",
+            "stated_pct": stated,
+            "stated_source": stated_source,
+            "dimension": dimensions[0] if len(dimensions) == 1 else None,
+            "dimensions": dimensions,
+            "achieved_pct": None,
+            "achieved_source": None,
+            "enforcement": enforcement,
+            "enforcement_source": enforcement_source,
+            "verdict": _cgc.NOT_MEASURED,
+            "source_binding": "REFUSED",
+            "why": why,
+        })
+    if l22_unbound:
+        summary["declared_count"] = len(summary["rows"])
+        summary["passed_count"] = sum(
+            row["verdict"] == _cgc.PASS for row in summary["rows"])
+        summary["failed_count"] = sum(
+            row["verdict"] == _cgc.FAIL for row in summary["rows"])
+        summary["not_measured_count"] = sum(
+            row["verdict"] == _cgc.NOT_MEASURED for row in summary["rows"])
     return summary
 
 
