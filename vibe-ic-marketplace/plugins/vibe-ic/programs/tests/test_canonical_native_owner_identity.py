@@ -107,6 +107,53 @@ def test_missing_or_renamed_step13_owner_refuses_before_admission(
     assert not ledger.exists() or not ledger.read_text().strip()
 
 
+def test_step13_owner_unreadable_at_snapshot_binding_refuses_without_ledger(
+        admission_case, monkeypatch):
+    module, project, programs = admission_case
+    owner = (programs / 'lec_run.py').resolve()
+    original_open = module.os.open
+
+    def refuse_owner(path, flags, *args, **kwargs):
+        if Path(path).resolve() == owner:
+            raise PermissionError('injected unreadable Step13 owner')
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, 'open', refuse_owner)
+    refused = module.admit_span(
+        project, 'phase2', programs, 'fixture-container',
+        {'pdk': 'fixture-pdk', 'entry_step': '14', 'exit_step': '14'})
+
+    assert not refused.admitted
+    assert refused.reason == 'CANONICAL_PROGRAM_SOURCE_UNAVAILABLE'
+    assert 'programs/lec_run.py (unreadable)' in refused.detail
+    ledger = module.ledger_path(project)
+    assert not ledger.exists() or not ledger.read_text().strip()
+
+
+def test_step13_owner_is_read_once_for_bound_program_identity(
+        admission_case, monkeypatch):
+    module, project, programs = admission_case
+    owner = (programs / 'lec_run.py').resolve()
+    original_open = module.os.open
+    owner_opens = 0
+
+    def count_owner(path, flags, *args, **kwargs):
+        nonlocal owner_opens
+        if Path(path).resolve() == owner:
+            owner_opens += 1
+            if owner_opens > 1:
+                raise PermissionError('second Step13-owner read is forbidden')
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, 'open', count_owner)
+    admitted = module.admit_span(
+        project, 'phase2', programs, 'fixture-container',
+        {'pdk': 'fixture-pdk', 'entry_step': '14', 'exit_step': '14'})
+
+    assert admitted.admitted and admitted.reason == 'ADMITTED'
+    assert owner_opens == 1
+
+
 def test_step13_owner_extends_existing_canonical_program_population(
         admission_case):
     module, _, programs = admission_case

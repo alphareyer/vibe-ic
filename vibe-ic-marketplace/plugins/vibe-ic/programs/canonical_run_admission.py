@@ -19,6 +19,7 @@ import fcntl
 import hashlib
 import json
 import os
+import stat
 import sys
 import time
 from dataclasses import dataclass
@@ -107,6 +108,52 @@ def _program_digest(paths: Iterable[Path]) -> str:
     return _sha256_bytes(json.dumps(rows, sort_keys=True).encode("utf-8"))
 
 
+def _strict_program_digest(
+        paths: Iterable[Path]) -> tuple[str, list[tuple[Path, str]]]:
+    """Bind canonical program bytes once and report unavailable members.
+
+    Opening with ``O_NOFOLLOW`` and hashing the opened regular file makes the
+    availability decision and admitted digest one snapshot.  A caller must not
+    preflight these paths and then ask :func:`build_identity` to read them a
+    second time: that check-to-use gap can admit an ``UNREADABLE`` placeholder.
+    """
+    paths = tuple(Path(os.path.abspath(path)) for path in paths)
+    source_root = (Path(os.path.commonpath([str(path.parent) for path in paths]))
+                   if paths else None)
+    rows: list[tuple[str, str]] = []
+    unavailable: list[tuple[Path, str]] = []
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    for path in paths:
+        reason: Optional[str] = None
+        digest: Optional[str] = None
+        fd: Optional[int] = None
+        if path.is_symlink():
+            reason = "symlink"
+        else:
+            try:
+                fd = os.open(path, os.O_RDONLY | nofollow)
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    reason = "not-regular"
+                else:
+                    with os.fdopen(fd, "rb") as handle:
+                        fd = None
+                        digest = _sha256_bytes(handle.read())
+            except FileNotFoundError:
+                reason = "missing"
+            except OSError:
+                reason = "unreadable"
+            finally:
+                if fd is not None:
+                    os.close(fd)
+        relative = path.relative_to(source_root).as_posix()
+        if reason is not None:
+            unavailable.append((path, reason))
+            digest = "UNAVAILABLE:" + reason
+        rows.append((relative, digest))
+    return (_sha256_bytes(json.dumps(rows, sort_keys=True).encode("utf-8")),
+            unavailable)
+
+
 def _phase3_input_digest(project: Path) -> str:
     # P3 must reopen when Phase-2's actual consumed netlist/constraints moved,
     # not merely because an old report was regenerated.
@@ -127,7 +174,8 @@ def _subject_id(project: Path) -> str:
 
 
 def build_identity(project: Path, span: str, *, container_image: str,
-                   config: Dict[str, Any], program_paths: Iterable[Path]) -> Dict[str, Any]:
+                   config: Dict[str, Any], program_paths: Iterable[Path],
+                   program_source_sha256: Optional[str] = None) -> Dict[str, Any]:
     """Return the complete value identity for one expensive span.
 
     An absent image/receipt is represented by a named value rather than guessed
@@ -154,7 +202,9 @@ def build_identity(project: Path, span: str, *, container_image: str,
         "phase1_receipt_sha256": phase1_receipt,
         "phase3_input_sha256": (_phase3_input_digest(project)
                                 if span == "phase3" else None),
-        "program_source_sha256": _program_digest(program_paths),
+        "program_source_sha256": (program_source_sha256
+                                  if program_source_sha256 is not None
+                                  else _program_digest(program_paths)),
         "container_image": container_image or "IMAGE_UNAVAILABLE",
         "dispatch_config": config,
     }
@@ -253,18 +303,12 @@ def admit_span(project: Path, span: str, programs_dir: Path,
                container: str, config: Dict[str, Any]) -> Admission:
     """Convenience entry point so all runners build the same identity."""
     paths = canonical_program_paths(programs_dir)
-    unavailable = []
-    for path in paths:
-        if path.is_symlink():
-            unavailable.append((path, "symlink"))
-        elif not path.is_file():
-            unavailable.append((path, "missing"))
-        elif _file_digest(path) is None:
-            unavailable.append((path, "unreadable"))
+    program_digest, unavailable = _strict_program_digest(paths)
     if unavailable:
         identity = build_identity(
             project, span, container_image=image_identity(container),
-            config=config, program_paths=paths)
+            config=config, program_paths=paths,
+            program_source_sha256=program_digest)
         root = Path(programs_dir).resolve().parent
         detail = ", ".join(
             f"{path.relative_to(root)} ({reason})"
@@ -274,7 +318,8 @@ def admit_span(project: Path, span: str, programs_dir: Path,
             identity_sha256(identity), identity,
             "expected canonical program source is unavailable: " + detail)
     return admit(project, span, container_image=image_identity(container),
-                 config=config, program_paths=paths)
+                 config=config, program_paths=paths,
+                 program_source_sha256=program_digest)
 
 
 def delegated(identity_hash: str) -> bool:
@@ -305,9 +350,11 @@ def _read_ledger(handle) -> list[Dict[str, Any]]:
 
 
 def admit(project: Path, span: str, *, container_image: str,
-          config: Dict[str, Any], program_paths: Iterable[Path]) -> Admission:
+          config: Dict[str, Any], program_paths: Iterable[Path],
+          program_source_sha256: Optional[str] = None) -> Admission:
     identity = build_identity(project, span, container_image=container_image,
-                              config=config, program_paths=program_paths)
+                              config=config, program_paths=program_paths,
+                              program_source_sha256=program_source_sha256)
     fingerprint = identity_sha256(identity)
     if delegated(fingerprint):
         return Admission(True, "DELEGATED_PARENT_ADMISSION", fingerprint, identity)
