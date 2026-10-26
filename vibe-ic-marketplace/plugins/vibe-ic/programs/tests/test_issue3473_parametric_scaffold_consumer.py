@@ -41,7 +41,8 @@ def _document(*, symbolic="word_len-1:0", identifier="word_len",
                          "source": "interface.md"}],
         "top_ports": [
             {"name": "clock_i", "direction": "input", "width": 1},
-            {"name": "reset_i", "direction": "input", "width": 1},
+            {"name": "reset_i", "direction": "input", "width": 1,
+             "description": "active-high reset"},
             {"name": "payload_i", "direction": "input", "width": width,
              "msb": width - 1, "lsb": 0,
              "width_resolution": resolution},
@@ -69,6 +70,8 @@ def _connection(wrapper: str, port: str) -> str:
 def test_soc_wrapper_adapts_only_known_reset_polarity(reset_name, expected):
     doc = _document()
     doc["top_ports"][1]["name"] = reset_name
+    doc["top_ports"][1]["description"] = (
+        "active-low reset" if reset_name == "rst_n" else "active-high reset")
     signals = scaf.derive_signals({}, doc)
     wrapper = scaf.emit_soc_wrap_v(doc["top_module"], signals, [])
     assert _connection(wrapper, reset_name) == expected
