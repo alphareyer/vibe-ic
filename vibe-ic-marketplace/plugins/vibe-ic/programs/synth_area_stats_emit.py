@@ -330,10 +330,13 @@ def corroborate(block: Block, netlist_path: Optional[Path]) -> Dict[str, Any]:
                 "block's counts include every instance — the two are not "
                 "comparable")
         else:
-            per, total = count_netlist_cells(ntext, [r[2] for r in block.rows])
+            expected = ([(n, cell) for n, _area, cell in block.rows]
+                        + block.unpriced)
+            per, total = count_netlist_cells(
+                ntext, [cell for _n, cell in expected])
             mism = {c: {"block": n, "netlist": per[c]}
-                    for n, _a, c in block.rows if per[c] != n}
-            r2["block_cell_count"] = block.row_cell_sum
+                    for n, c in expected if per[c] != n}
+            r2["block_cell_count"] = block.tabulated_cell_sum
             r2["netlist_instantiations"] = total
             r2["status"] = "AGREE" if not mism else "REFUTED"
             if mism:
@@ -501,7 +504,12 @@ def build_report(project: Path, log_path: Path,
         # and a REFUSAL says which artefact it could not reach.
         "chip_area_unit_evidence": _unit_record[1],
         "sequential_area": block.seq_area,
-        "cell_count": block.row_cell_sum,
+        # `cell_count` is the mapped-instance census consumed by the native
+        # Yosys/LibreLane binding, not an area-priced subtotal.  R0 above has
+        # already proved that priced + explicitly unpriced rows equal the
+        # tool's own cells summary; unpriced rows still contribute no invented
+        # area and remain disclosed separately in that corroboration record.
+        "cell_count": block.tabulated_cell_sum,
         "cell_types": len(block.rows),
         "includes_submodules": block.area_is_rollup,
         "selection": {

@@ -43,6 +43,19 @@ def _load():
 
 M = _load()
 
+CONTRACT_PROG = PROG.parent / "librelane_contract.py"
+
+
+def _load_contract():
+    spec = importlib.util.spec_from_file_location("librelane_contract_for_stats",
+                                                  CONTRACT_PROG)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+CONTRACT = _load_contract()
+
 
 # ---------------------------------------------------------------------------
 # Fixtures — verbatim yosys 0.67 output shapes
@@ -132,6 +145,27 @@ module top_dut(clk, d, o);
     f"  sky130_fd_sc_hd__xnor2_1 _x{i}_ (.A(d), .B(d), .Y(o));\n"
     for i in range(4)
 ) + "endmodule\n"
+
+UNPRICED_LOG = """\
+-- Running command `stat -liberty x.lib; write_verilog -noattr netlist.v' --
+
+=== counted_design ===
+
+        3   20.000 cells
+        2   20.000   generic_priced_cell
+        1        -   generic_unpriced_cell
+
+   Chip area for module '\\counted_design': 20.000000
+     of which used for sequential elements: 0.000000 (0.00%)
+"""
+
+UNPRICED_NETLIST = """\
+module counted_design(input a, output y);
+  generic_priced_cell p0 (.A(a), .Y(y));
+  generic_priced_cell p1 (.A(a), .Y(y));
+  generic_unpriced_cell u0 (.A(a), .Y(y));
+endmodule
+"""
 
 
 def _write(tmp_path, log_text, netlist_text=None, netlist_name="netlist.v"):
@@ -236,6 +270,98 @@ def test_emits_with_all_corroborations_agreeing(tmp_path):
     assert c["r1_internal"]["status"] == "AGREE"
     assert c["r2_external"]["status"] == "AGREE"
     assert c["r2_external"]["netlist_instantiations"] == 8
+
+
+def test_unpriced_cells_count_toward_mapped_total_and_consumer_accepts(tmp_path):
+    """``cell_count`` is the mapped-instance total, not the priced subtotal.
+
+    A missing library-area value remains explicitly recorded as unpriced and
+    contributes no invented area, while the unchanged Step-9 consumer sees
+    the same total as native Yosys and LibreLane state.
+    """
+    project, _log, netlist = _write(tmp_path, UNPRICED_LOG,
+                                    UNPRICED_NETLIST)
+    r = _run(project)
+    assert r.returncode == 0, r.stderr
+    stats = project / "phase2" / "stage2" / "synth" / "stats.json"
+    rep = json.loads(stats.read_text())
+    assert rep["cell_count"] == 3
+    assert rep["chip_area"] == 20.0
+    r0 = rep["corroboration"]["r0_completeness"]
+    assert (r0["parsed_priced"], r0["parsed_unpriced"],
+            r0["parsed_total"]) == (2, 1, 3)
+
+    stat = tmp_path / "native-stat.json"
+    stat.write_text(json.dumps({"modules": {"\\counted_design": {
+        "num_cells": 3, "area": 20.0}}}))
+    state = {"nl": str(netlist), "metrics": {
+        "design__instance__count": 3,
+        "design__instance__area": 20.0}}
+    accepted = CONTRACT.verify_synthesis_stat(
+        stat, state, stats, "counted_design", tmp_path / "binding.json")
+    assert accepted["status"] == "PASS"
+    assert accepted["cell_count"] == 3
+
+
+def test_missing_unpriced_netlist_instance_refutes_total_count(tmp_path):
+    """R2 must cover the unpriced portion promoted into ``cell_count``."""
+    missing_unpriced = UNPRICED_NETLIST.replace(
+        "  generic_unpriced_cell u0 (.A(a), .Y(y));\n", "")
+    project, _log, _ = _write(tmp_path, UNPRICED_LOG, missing_unpriced)
+    r = _run(project)
+    assert r.returncode == 2, (
+        "producer emitted a total of 3 after corroborating only the two "
+        f"priced instances: stdout={r.stdout!r} stderr={r.stderr!r}")
+    assert "REFUSED" in r.stderr
+    assert not (project / "phase2/stage2/synth/stats.json").exists()
+
+
+def test_zero_cell_area_block_remains_a_refusal(tmp_path):
+    log = ("=== empty_design ===\n\n"
+           "        0        - cells\n\n"
+           "   Chip area for module '\\empty_design': 0.000000\n")
+    project, _log, _ = _write(tmp_path, log, "module empty_design; endmodule\n")
+    r = _run(project)
+    assert r.returncode == 2
+    assert not (project / "phase2/stage2/synth/stats.json").exists()
+
+
+def test_missing_cell_summary_remains_a_refusal(tmp_path):
+    log = ("=== missing_summary ===\n\n"
+           "        2   20.000   generic_priced_cell\n\n"
+           "   Chip area for module '\\missing_summary': 20.000000\n")
+    project, _log, _ = _write(tmp_path, log)
+    r = _run(project)
+    assert r.returncode == 2
+    assert not (project / "phase2/stage2/synth/stats.json").exists()
+
+
+@pytest.mark.parametrize("bad_area", ["nan", "inf", "-inf"])
+def test_nonfinite_cell_area_cannot_disappear_from_total(tmp_path, bad_area):
+    """An unsafe area token must make completeness disagree and block emit."""
+    log = UNPRICED_LOG.replace(
+        "        1        -   generic_unpriced_cell",
+        f"        1 {bad_area:>8}   generic_unpriced_cell")
+    project, _log, _ = _write(tmp_path, log, UNPRICED_NETLIST)
+    r = _run(project)
+    assert r.returncode == 2
+    assert not (project / "phase2/stage2/synth/stats.json").exists()
+
+
+def test_checked_in_native_report_still_emits_its_full_cell_count(tmp_path):
+    """Real-artifact backing: exercise a checked-in native Yosys report."""
+    from _hostpaths import require_repo
+
+    run = require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
+        "fixtures", "librelane_import", "8HD-4", "runs", "cmp3",
+        "06-yosys-synthesis")
+    # This retained fixture intentionally truncates its netlist at 4096 bytes,
+    # so it can back the real parser/census arm but cannot honestly provide R2.
+    report, diag = M.build_report(tmp_path, run / "reports/stat.rpt", None)
+    assert report is not None, diag
+    assert report["cell_count"] == 253
+    assert report["corroboration"]["r0_completeness"]["parsed_total"] == 253
 
 
 def test_netlist_that_disagrees_refutes_the_figure(tmp_path):
