@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+from types import SimpleNamespace
 
 import _plugin_tree  # noqa: F401  — puts programs/ on sys.path
 import pytest
@@ -777,3 +778,148 @@ def test_k_read_pdk_propagates_conditional_authority_refusal(monkeypatch):
     assert facts is None
     assert "ENV_UNAVAILABLE" in reason
     assert "changed public predicate" in reason
+
+
+def _compact_geo():
+    rules = {
+        "metal_space_um": {n: .21 for n in range(1, 8)},
+        "metal_width_um": {n: .2 for n in range(1, 8)},
+        "metal_area_um2": {2: .144, 3: .144},
+        "via_width_um": {n: .2 for n in range(1, 7)},
+        "via_space_um": {n: .21 for n in range(1, 7)},
+        "via_surround_um": {},
+        "via_surround_dir_um": {(2, 2): .045, (2, 3): .045},
+        "metal_width_spacing_um": {},
+    }
+    return A5E.Geo(rules, .21, 100, .6, .35)
+
+
+def _compact_groups():
+    return [
+        {"net": "drain", "y": 0, "escape_y": 0, "strapped": False,
+         "labels": [{"x": -44, "y": 0, "level": 2}]},
+        {"net": "source", "y": 0, "escape_y": 0, "strapped": False,
+         "labels": [{"x": 44, "y": 0, "level": 2}]},
+        {"net": "gate", "y": 222, "escape_y": 222, "strapped": False,
+         "labels": [{"x": 0, "y": 222, "level": 2}]},
+    ]
+
+
+def test_l_compact_access_uses_source_width_and_records_external_flare():
+    geo = _compact_geo()
+    groups = _compact_groups()
+    assert A5E._terminal_access_width(groups[0], groups, geo) == 20
+    assert A5E._collect_close_plain_rows(groups, (-141, -305, 141, 305), geo)
+    plan = A5E.Plan()
+    dev = {"origin": (0, 0), "bbox": (-141, -305, 141, 305),
+           "dev": {"name": "unit"}}
+    group = dict(groups[0], access_width=20)
+    A5E._paint_terminal_stub(plan, group, dev, -44, 0, -600, geo)
+    record = plan.access_necks[0]
+    assert record["requested_width_um"] == pytest.approx(.6)
+    assert record["actual_width_um"] == pytest.approx(.2)
+    assert record["source_minimum_width_um"] == pytest.approx(.2)
+    assert plan.shapes[-1]["box"][3] <= -305 - geo.spacing_reach("metal3")
+
+
+def test_m_compact_access_refuses_missing_width_authority():
+    geo = _compact_geo()
+    del geo.rules["metal_width_um"][3]
+    groups = _compact_groups()
+    with pytest.raises(A5E.Refusal, match="declares no metal3 minimum width"):
+        A5E._terminal_access_width(groups[0], groups, geo)
+    geo = _compact_geo()
+    plan = A5E.Plan()
+    dev = {"origin": (0, 0), "bbox": (-141, -305, 141, 305),
+           "dev": {"name": "unit"}}
+    with pytest.raises(A5E.Refusal, match="unsafe metal3 terminal neck width"):
+        A5E._paint_terminal_stub(
+            plan, dict(groups[0], access_width=19), dev, -44, 0, -600, geo)
+
+
+def test_n_compact_access_refuses_a_colliding_fallback(monkeypatch):
+    geo = _compact_geo()
+    sites = A5E.Sites([], geo)
+    monkeypatch.setattr(sites, "clear", lambda *args, **kwargs: False)
+    monkeypatch.setattr(A5E, "_island_candidates", lambda span: iter([(0, 0)]))
+    with pytest.raises(A5E.Refusal, match="colliding fallback island"):
+        A5E._via_stack(A5E.Plan(), "drain", 0, 0, 2, geo, sites=sites,
+                      compact_terminal=True)
+
+
+def test_o_body_exit_selection_checks_the_emitted_jog(monkeypatch):
+    geo = _compact_geo()
+    sites = A5E.Sites([], geo)
+    sites.add({"net": "other", "layer": "metal3",
+               "box": (-150, -50, -130, 50)})
+    monkeypatch.setattr(A5E, "_island_candidates",
+                        lambda span: iter([(0, 0), (-240, 0)]))
+    plan = A5E.Plan()
+    assert A5E._via_stack(plan, "body", 0, 0, 2, geo, sites=sites,
+                         exit_path=(-500, 0, 30)) == (-240, 0)
+    assert not plan.deviations
+
+
+def test_p_build_plan_consumes_compact_access_without_short(monkeypatch):
+    dev = {"name": "unit", "model": "native_mos", "class": "mosfet",
+           "nets": ["drain", "gate", "source", "body"],
+           "pars": {"w": .5, "l": .5, "m": 1}}
+    cell = A5E.parse_cell("""magic
+magscale 1 1
+<< metal1 >>
+rect -120 -94 120 -74
+rect -120 74 120 94
+rect -120 -74 -100 74
+rect 100 -74 120 74
+<< metal2 >>
+rect -54 -22 -34 22
+rect 34 -22 54 22
+rect -14 32 14 62
+<< labels >>
+rlabel metal2 -44 0 -44 0 0 D
+rlabel metal2 44 0 44 0 0 S
+rlabel metal2 0 47 0 47 0 G
+rlabel metal1 0 -84 0 -84 0 B
+<< end >>
+""")
+    cell.update(bbox=(-141, -130, 141, 130), delta=(141, 130))
+    facts = SimpleNamespace(layers=None, gencells={"native_mos": {
+        "namespace": "provider", "params": ["w", "l", "m", "guard"]}})
+    monkeypatch.setattr(A5E, "ring_layer_of", lambda _cell: "metal1")
+    monkeypatch.setattr(A5E, "body_tap_direct_m1_layer", lambda *_args: "metal1")
+    monkeypatch.setattr(A5E, "choose_tap", lambda *_args: (-80, -84, 100, False))
+    plan = A5E.build_plan([dev], dev["nets"],
+                          {A5E.config_key(dev): cell}, facts,
+                          _compact_geo(), 0)
+    assert plan.access_necks
+    assert all(r["source_minimum_width_um"] == pytest.approx(.2)
+               for r in plan.access_necks)
+    shapes = [r for r in plan.shapes if r["layer"] in ("metal2", "metal3")]
+    violations = []
+    for i, left in enumerate(shapes):
+        for right in shapes[i + 1:]:
+            if left["net"] == right["net"] or left["layer"] != right["layer"]:
+                continue
+            a, b = left["box"], right["box"]
+            dx = max(a[0] - b[2], b[0] - a[2], 0)
+            dy = max(a[1] - b[3], b[1] - a[3], 0)
+            spacing = _compact_geo().metal_space(left["layer"], a, b)
+            if dx < spacing and dy < spacing:
+                violations.append((left, right, dx, dy))
+    assert not violations
+
+
+def test_q_compact_reduced_island_must_meet_joined_metal_area(monkeypatch):
+    geo = _compact_geo()
+    row = {"net": "<device unit>", "layer": "metal2",
+           "box": (-10, -22, 10, 22), "comp": ("unit", 1),
+           "lcomp": ("unit", "metal2", 1)}
+    sites = A5E.Sites([row], geo)
+    monkeypatch.setattr(
+        sites, "clear",
+        lambda box, *args: box[2] - box[0] == box[3] - box[1] == 22)
+    plan = A5E.Plan()
+    A5E._via_stack(plan, "signal", 0, 0, 2, geo, sites=sites,
+                  friendly=("unit", 1))
+    assert any(d["quantity"] == "via_island_clearance_lambda"
+               for d in plan.deviations)
