@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,80 @@ def test_pure_local_sink_is_removed_and_idempotent(tmp_path):
     assert (count, names) == (1, ["sink"])
     assert path.read_text() == source(declaration="", assignment="")
     assert H.autofix_unread_local_sink(path, native(path), "dut") == (0, [])
+
+
+def test_intervening_valid_edit_after_admission_is_preserved(tmp_path, monkeypatch):
+    """Exact independent-review interleaving: admit A, then a peer writes B."""
+    path = tmp_path / "dut.v"
+    original = source()
+    concurrent = original.replace(
+        "assign result = source[0];",
+        "assign result = source[1]; // concurrent valid edit",
+    )
+    path.write_text(original)
+    design = native(path)
+    real_pure = H._pure_unread_sink_rhs
+    injected = {"done": False}
+
+    def inject_after_admission(rhs):
+        answer = real_pure(rhs)
+        if not injected["done"]:
+            path.write_text(concurrent)
+            injected["done"] = True
+        return answer
+
+    monkeypatch.setattr(H, "_pure_unread_sink_rhs", inject_after_admission)
+    assert H.autofix_unread_local_sink(path, design, "dut") == (0, [])
+    assert injected["done"]
+    assert path.read_text() == concurrent
+
+
+def test_cooperating_source_transaction_refuses_a_second_writer(tmp_path):
+    path = tmp_path / "dut.v"
+    path.write_text(source())
+    design = native(path)
+    held = H._acquire_source_edit_lock(path)
+    assert held is not None
+    try:
+        assert H.autofix_unread_local_sink(path, design, "dut") == (0, [])
+        assert path.read_text() == source()
+    finally:
+        H._release_source_edit_lock(held)
+
+
+def test_failed_compile_never_rolls_back_over_intervening_bytes(
+        tmp_path, monkeypatch, capsys):
+    path = tmp_path / "dut.v"
+    original = ("module dut(input logic clk, output logic q);\n"
+                "  always_ff @(posedge clk) q <= ~q;\n"
+                "endmodule\n")
+    path.write_text(original)
+    monkeypatch.setattr(shutil, "which", lambda name: "/fake/iverilog")
+
+    def repair(p):
+        p.write_text(p.read_text() + "// candidate repair\n")
+        return 1, ["q"]
+
+    calls = {"count": 0}
+
+    def compile_then_peer_write(*_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return SimpleNamespace(returncode=0)
+        path.write_text(path.read_text() + "// concurrent valid edit\n")
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(H, "autofix_uninit_registered_output", repair)
+    monkeypatch.setattr(H._pr, "run", compile_then_peer_write)
+    argv = sys.argv
+    sys.argv = ["rtl_hygiene_lint.py", "--fix", str(path)]
+    try:
+        assert H.main() == 2
+    finally:
+        sys.argv = argv
+    assert path.read_text().endswith(
+        "// candidate repair\n// concurrent valid edit\n")
+    assert "fix-rollback-refused-source-changed" in capsys.readouterr().err
 
 
 def test_native_reader_mutation_refuses_byte_identically(tmp_path):
