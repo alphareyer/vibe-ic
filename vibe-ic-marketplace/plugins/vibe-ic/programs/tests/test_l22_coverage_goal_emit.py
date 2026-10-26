@@ -173,6 +173,66 @@ def test_does_not_add_a_dimension_the_source_did_not_state(tmp_path):
     assert "toggle" not in g["name"].lower(), g
 
 
+def _ordinary_wrapper_summary(project: Path, totals):
+    """Run the shipping Phase1 wrapper, then its numeric Step-4 consumer."""
+    gd = project / "phase1" / "generated_docs"
+    (gd / "L10_TEST_CASES.json").write_text(json.dumps({
+        "schema_version": 2, "doc_class": "test_cases", "test_cases": []
+    }), encoding="utf-8")
+    cov = project / "reports" / "phase2" / "coverage"
+    cov.mkdir(parents=True, exist_ok=True)
+    (cov / "coverage_verilator.json").write_text(
+        json.dumps({"totals": totals}), encoding="utf-8")
+
+    import phase1_doc_one_shot_runner as phase1
+    import cpu_functional_oracle_waiver_check as consumer
+    emitted = phase1._post_emit_l22_coverage_goals(project)
+    return emitted, _effective_goals(project), consumer._coverage_goal_summary(project)
+
+
+def test_ordinary_l22_goal_reaches_numeric_consumer_as_advisory(tmp_path):
+    """The ordinary wrapper must carry value and role, not just tokens."""
+    _mk(tmp_path, "# Verification\nThe block must reach toggle / branch "
+                  "coverage >= 95% (informational only).\n")
+    emitted, goals, summary = _ordinary_wrapper_summary(
+        tmp_path, {"toggle": {"pct": 97.0}, "branch": {"pct": 96.0}})
+
+    assert emitted == 1 and len(goals) == 1, goals
+    row = summary["rows"][0]
+    assert row["stated_pct"] == 95.0, row
+    assert row["enforcement"] == "ADVISORY", row
+    assert [(m["dimension"], m["achieved_pct"], m["verdict"])
+            for m in row["measurements"]] == [
+                ("toggle", 97.0, "PASS"), ("branch", 96.0, "PASS")]
+    assert row["verdict"] == "PASS", row
+
+
+def test_same_line_distinct_thresholds_remain_independent_predicates(tmp_path):
+    """Source-bound reverse for rejected a8e69d: never combine these."""
+    _mk(tmp_path, "# Verification\nToggle coverage must reach 80%; branch "
+                  "coverage must reach 95%.\n")
+    emitted, goals, summary = _ordinary_wrapper_summary(
+        tmp_path, {"toggle": {"pct": 85.0}, "branch": {"pct": 94.0}})
+
+    assert emitted == 2, goals
+    assert {(g["name"], g["target_pct"]) for g in goals} == {
+        ("toggle coverage", 80.0), ("branch coverage", 95.0)}
+    rows = {r["case"]: r for r in summary["rows"]}
+    assert (rows["toggle coverage"]["stated_pct"],
+            rows["toggle coverage"]["verdict"]) == (80.0, "PASS")
+    assert (rows["branch coverage"]["stated_pct"],
+            rows["branch coverage"]["verdict"]) == (95.0, "FAIL")
+    assert all(r["enforcement"] == "BLOCKING" for r in rows.values())
+
+
+def test_ordinary_wrapper_refuses_when_source_states_no_target(tmp_path):
+    _mk(tmp_path, _DOC_NO_TARGET)
+    emitted, goals, summary = _ordinary_wrapper_summary(tmp_path, {})
+    assert emitted == 0
+    assert goals == []
+    assert summary["declared_count"] == 0
+
+
 def test_signoff_qualifier_is_preserved(tmp_path):
     """A target the design marks informational must NOT become blocking."""
     _mk(tmp_path, _DOC_WITH_TARGET_INFORMATIONAL)

@@ -152,6 +152,12 @@ def stated_acceptance_percentage(case: dict
 
     A percentage found anywhere but the EXPECTED half decides nothing: a
     stimulus that says "0-2KB, 100 samples" is not an acceptance criterion."""
+    # L22 owns numeric coverage goals and emits the threshold as a number.
+    # Accept that canonical schema directly; forcing it through an English
+    # ``expected`` string disconnects the producer from this consumer.
+    target = case.get("target_pct")
+    if type(target) in (int, float) and 0.0 <= float(target) <= 100.0:
+        return float(target), f"target_pct={float(target):g}"
     text, key = _first(case, _EXPECTED_KEYS)
     if text is None:
         return None, "the row states no expected value"
@@ -175,6 +181,16 @@ def coverage_scope(case: dict) -> Tuple[Optional[str], str]:
 
 def goal_enforcement(case: dict) -> Tuple[str, str]:
     """Preserve explicit row-local non-sign-off intent; default stays blocking."""
+    # L22's typed role is authoritative.  In particular, an informational
+    # target must not become mandatory merely because its name carries no
+    # prose qualifier for this older L10 schema reader to rediscover.
+    signoff = case.get("signoff_gate")
+    if signoff is False:
+        qualifier = _text(case.get("signoff_qualifier"))
+        return "ADVISORY", ("signoff_gate=false"
+                            + (f" ({qualifier})" if qualifier else ""))
+    if signoff is True:
+        return "BLOCKING", "signoff_gate=true"
     qualified = [(key, _text(case.get(key))) for key in _SCOPE_KEYS if _text(case.get(key))]
     for key, text in qualified:
         # A negated obligation cannot become an affirmative admission gate.

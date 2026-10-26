@@ -956,6 +956,34 @@ def _coverage_goal_summary(project: Path) -> dict:
     rows, _design_na = split_design_declared_na(
         rows, design_selected_options(project))
     _vectors, goals = _cgc.partition(rows)
+
+    # L22 is the canonical owner of numeric coverage targets produced by
+    # Phase1.  Scenario pass-rate rows remain owned by L10; only L22 rows that
+    # name a measurable coverage dimension enter this numeric instrument.
+    l22 = gd / "L22_VERIFICATION_PLAN.json"
+    l22_rows = _declared_rows(
+        l22, ("coverage_goals", "coverage_targets", "goals", "coverage_plan"))
+    l22_numeric = [
+        goal for goal in l22_rows
+        if isinstance(goal, dict)
+        and _cgc.stated_acceptance_percentage(goal)[0] is not None
+        and _cgc.coverage_dimensions(goal)[0]
+    ]
+
+    # Older Phase1 producers may also have projected the same dimensional
+    # predicate into L10. Prefer the canonical L22 row only for an exact
+    # semantic duplicate: dimensions, threshold, and enforcement must all
+    # agree. A mandatory sibling can therefore never be hidden by an
+    # informational L22 row.
+    def _numeric_signature(goal: dict):
+        dimensions = tuple(_cgc.coverage_dimensions(goal)[0])
+        stated = _cgc.stated_acceptance_percentage(goal)[0]
+        enforcement = _cgc.goal_enforcement(goal)[0]
+        return (dimensions, stated, enforcement) if dimensions and stated is not None else None
+
+    canonical = {_numeric_signature(goal) for goal in l22_numeric}
+    goals = [goal for goal in goals
+             if _numeric_signature(goal) not in canonical] + l22_numeric
     totals, source = _coverage_totals(project)
     # The execution record arms the scenario pass-rate instrument (a goal
     # measured by the L10 cases bound to it that ran their own oracle).

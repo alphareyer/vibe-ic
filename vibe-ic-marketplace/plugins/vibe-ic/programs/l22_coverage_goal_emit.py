@@ -213,6 +213,50 @@ def _pct(match_text: str) -> Optional[float]:
     return v if 0.0 <= v <= 100.0 else None
 
 
+def _hit_targets(hit: Dict[str, Any]) -> tuple[List[tuple[str, float, str]], str]:
+    """Return clause-bound ``(name, percentage, evidence)`` targets.
+
+    ``framed_hits`` correctly establishes that a requirement exists, but its
+    diagnostic context is a whole sentence.  One sentence may contain two
+    independently thresholded clauses; collecting every dimension from that
+    sentence and the first percentage would fabricate a shared predicate.
+    Semicolon-separated clauses are representable and stay separate.  Any
+    other multi-percentage shape refuses rather than guessing the binding.
+    """
+    line = str(hit.get("line_text") or "").strip()
+    percentages = list(_RE_PCT.finditer(line))
+    if len(percentages) > 1:
+        clauses = [part.strip() for part in re.split(r"[;；]", line)
+                   if part.strip()]
+        targets: List[tuple[str, float, str]] = []
+        for clause in clauses:
+            clause_percentages = list(_RE_PCT.finditer(clause))
+            if not clause_percentages:
+                continue
+            if len(clause_percentages) != 1:
+                return [], "multiple percentages cannot be bound to clauses"
+            name = _metric_name(clause)
+            pct = _pct(clause)
+            if name is None or pct is None:
+                return [], "a percentage clause has no unambiguous coverage metric"
+            targets.append((name, pct, clause))
+        if len(targets) != len(percentages):
+            return [], "distinct percentages are not independently representable"
+        return targets, ""
+
+    text = str(hit.get("match") or "")
+    ctx = str(hit.get("context") or "")
+    name = (_metric_name(line) or _metric_name(text) or _metric_name(ctx))
+    pct = _pct(text)
+    if pct is None:
+        pct = _pct(line)
+    if pct is None:
+        pct = _pct(ctx)
+    if name is None or pct is None:
+        return [], "no parseable metric/percentage"
+    return [(name, pct, line or text[:200])], ""
+
+
 def _generated_docs(project: Path) -> Path:
     return project / "phase1" / "generated_docs"
 
@@ -336,57 +380,37 @@ def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
     emitted: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
     for h in hits:
-        text = h.get("match") or ""
-        ctx = h.get("context") or ""
-        # The regex match may begin at the final word of a shared suffix
-        # (``toggle / branch coverage`` -> ``branch coverage``).  Prefer the
-        # hit's own line, which is still row-local, before falling back to the
-        # match or its wider diagnostic context.
-        name = (_metric_name(h.get("line_text") or "")
-                or _metric_name(text) or _metric_name(ctx))
-        pct = _pct(text)
-        if pct is None:
-            pct = _pct(ctx)
-        if name is None or pct is None:
-            skipped.append({"reason": "no parseable metric/percentage",
-                            "match": text[:160]})
+        targets, refusal = _hit_targets(h)
+        if not targets:
+            skipped.append({"reason": refusal,
+                            "match": str(h.get("match") or "")[:160]})
             continue
-        key = (name.lower(), pct)
-        if key in have:
-            continue
-        have.add(key)
-        # OWN LINE, never the ±160-char context: a document disclaims the
-        # row it is written on. `line_text` is present because this call
-        # opted into include_non_normative.
-        qualifier = signoff_qualifier(h.get("line_text") or "")
-        # PROJECT-RELATIVE, never absolute. `framed_hits` hands back
-        # `str(path)` — right for a gate REPORT (a run record says where the
-        # run happened), wrong here: this value is written INTO an L
-        # document, a design artefact the flow reads back and diffs. An
-        # absolute path makes the same design emit a different L22 from
-        # every checkout. `line` is untouched — it is a property of the
-        # file's contents, not of the machine. See
-        # `l_doc_consumer_contract.project_relative_source`.
         src, src_outside = project_relative_source(h.get("source"), project)
-        goal = {
-            "name": name,
-            "target_pct": pct,
-            "signoff_gate": qualifier is None,
-            "signoff_qualifier": qualifier,
-            "source": src,
-            "line": h.get("line"),
-            "evidence": text[:200],
-            "extraction_strategy": TOOL,
-        }
-        if src_outside:
-            # Present ONLY when it fires. An always-present `false` would
-            # change the shape of every goal ever emitted to say nothing;
-            # this key exists to be conspicuous on the rare run whose input
-            # lives outside the project, and `source` already carries the
-            # `<outside-project>/` marker for a human reader.
-            goal["source_outside_project"] = True
-        goals.append(goal)
-        emitted.append(goal)
+        for name, pct, evidence in targets:
+            key = (name.lower(), pct)
+            if key in have:
+                continue
+            have.add(key)
+            # A single shared-threshold target inherits the row qualifier.
+            # Distinct semicolon clauses are bounded independently, so a
+            # qualifier in one clause cannot silently downgrade its sibling.
+            qualifier_text = (evidence if len(targets) > 1
+                              else h.get("line_text") or evidence)
+            qualifier = signoff_qualifier(qualifier_text)
+            goal = {
+                "name": name,
+                "target_pct": pct,
+                "signoff_gate": qualifier is None,
+                "signoff_qualifier": qualifier,
+                "source": src,
+                "line": h.get("line"),
+                "evidence": evidence[:200],
+                "extraction_strategy": TOOL,
+            }
+            if src_outside:
+                goal["source_outside_project"] = True
+            goals.append(goal)
+            emitted.append(goal)
 
     # Source-row identity retains separate populations and makes replay stable.
     table_have = {(g.get("source"), g.get("line"), g.get("extraction_strategy"))
