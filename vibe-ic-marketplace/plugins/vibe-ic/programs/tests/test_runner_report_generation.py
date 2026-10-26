@@ -238,7 +238,13 @@ if %r:
 raise SystemExit(compiled.returncode)
 ''' % (str(source), str(PROGRAMS), top_module, 'NOT_APPLICABLE' if supplied else 'PASS',
        change_during_execution, str(consumer)))
-    argv = [sys.executable, str(runner), str(project), "--entry-step", "2", "--exit-step", "2"]
+    # Use the ordinary dispatcher construction for the input contract this
+    # fixture already stages and its issued route later consumes.  A hand-made
+    # argv without --rtl-input original mislabeled this invocation as
+    # structured Phase-1 input even though public_original was the authority.
+    argv = bd._solver_argv(
+        runner, project, "2", "2", delivery_route="ip",
+        input_contract="original")
     process = bd._RunnerBudget(1, 1, 1).run(argv)
     got = bd._collect_runner_result(process, argv, "rtllm", "p1", project,
                                     supplied_rtl=supplied)
@@ -247,6 +253,9 @@ raise SystemExit(compiled.returncode)
     assert process.rc == 0 and process.error is None and got["ok"] is True, (process.stderr, got)
     task = bd._make_ai_review_task("p1", project, got, fixture.ROUTING, 0,
                                    tmp_path / "run", "PROGRAM", runner_invocation=process.invocation)
+    assert bd._invocation_rtl_input(process.invocation) == "original"
+    assert task["phase1_provenance"]["input_contract"] == "original"
+    assert task["phase1_provenance"]["ran"] is False
     return project, process, argv, task
 
 
