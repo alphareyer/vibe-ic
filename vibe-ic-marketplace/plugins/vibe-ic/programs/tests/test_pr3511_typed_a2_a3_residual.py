@@ -117,6 +117,25 @@ def test_selected_model_source_derives_fingers_without_a_design_literal(tmp_path
     assert "xsignal_device out in vss vss neutral_n w=16u l=1u ng=2" in text
 
 
+def test_a3_refuses_stale_cascode_finger_count_from_current_sizing(tmp_path):
+    """A model-legal carried count must still match current ordinary sizing."""
+    context = _context(tmp_path)
+    sizing = _sizing()
+    ir = _build(tmp_path, sizing)
+    cascode = next(device for device in ir["devices"]
+                   if device["name"] == "mn_cas_in1")
+    assert cascode["ng"] == 3
+
+    # 24/4 = 6um remains inside the selected model's 0.2..10um per-finger
+    # range.  Only its provenance is stale: current sizing still requests 3.
+    cascode["ng"] = 4
+    problems = a3._validate_ir(ir, context, tmp_path)
+    assert problems == [
+        "INPUT_DRAIN_CASCODE_INVALID: mn_cas_in1.ng: actual MOS sizing "
+        "disagrees with ordinary sizing"
+    ]
+
+
 @pytest.mark.parametrize("mutation", [
     "partial", "wrong_cascode_gate", "wrong_original_drain",
     "wrong_resistor_end", "wrong_resistor_size", "stale_record",

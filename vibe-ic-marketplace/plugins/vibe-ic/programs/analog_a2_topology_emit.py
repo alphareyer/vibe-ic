@@ -6217,9 +6217,18 @@ def input_drain_cascode_problems(ir: Dict[str, Any],
                 "enabled input-drain cascodes require current project sizing and specification")
         project = Path(project)
         values, _ = bound_spec_values(project, ir["block"])
-        expected, nets, _exprs, _stages = expand_stages(lib, values)
+        expected, nets, expected_exprs, _stages = expand_stages(lib, values)
         expected_record = expand_input_drain_cascodes(
             lib, values, knobs, expected, nets, sizing)
+        # Reapply the current ordinary device sizing to the reconstructed
+        # graph.  Selected-model geometry checks establish that a carried
+        # value is legal; this establishes that it is still the value the
+        # current design requested at the A2 -> A3 boundary.
+        apply_sizing_inputs(
+            {"knobs": {},
+             "device_parameters": sizing.get("device_parameters", {})},
+            {}, {}, [], expected, expected_exprs, {}, {},
+            lib.get("spec_knobs"))
         renames = (ir.get("port_binding") or {}).get("renamed") or {}
         ports = list(ir.get("ports") or [])
         mapped = {str(renames.get(port, port)).casefold()
@@ -6240,8 +6249,10 @@ def input_drain_cascode_problems(ir: Dict[str, Any],
         expected_by_name = {
             device["name"].casefold(): device for device in expected}
         checked: List[str] = []
+        mos_checked: List[str] = []
         for branch in expected_record["branches"]:
             checked.extend([branch["source"], branch["cascode"]])
+            mos_checked.extend([branch["source"], branch["cascode"]])
         bias = expected_record["bias"]
         checked.extend([bias["top_device"], bias["bottom_device"]])
         for name in checked:
@@ -6254,6 +6265,15 @@ def input_drain_cascode_problems(ir: Dict[str, Any],
                 raise SizingInputsInvalid(
                     name + ": actual device does not realise the declared "
                     "cascode/bias graph")
+        for name in mos_checked:
+            want = expected_by_name[name.casefold()]
+            device = actual[name.casefold()]
+            for parameter in ("w", "l", "m", "ng"):
+                if ((parameter in device) != (parameter in want)
+                        or device.get(parameter) != want.get(parameter)):
+                    raise SizingInputsInvalid(
+                        name + "." + parameter
+                        + ": actual MOS sizing disagrees with ordinary sizing")
         for name in (bias["top_device"], bias["bottom_device"]):
             device = actual[name.casefold()]
             requested = sizing["device_parameters"][name]
