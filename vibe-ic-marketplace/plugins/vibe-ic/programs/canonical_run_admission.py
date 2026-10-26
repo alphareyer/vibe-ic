@@ -218,6 +218,11 @@ def canonical_program_paths(programs_dir: Path) -> tuple[Path, ...]:
         programs_dir / "vibe_ic_one_shot_runner.py",
         programs_dir / "design_one_shot_runner.py",
         programs_dir / "phase3_one_shot_runner.py",
+        # Step 13 executes this producer directly.  Its source bytes must reopen
+        # a Phase-2 span just like the runner that dispatches it; otherwise a
+        # repaired LEC consumer is refused as duplicate work under the identity
+        # of the broken producer generation.
+        programs_dir / "lec_run.py",
         programs_dir / "librelane_contract.py",
         # The canonical runners delegate Default/Ultra dispatch and frontend
         # worker execution through these modules.  A change there must reopen
@@ -247,8 +252,29 @@ def image_identity(container: str) -> str:
 def admit_span(project: Path, span: str, programs_dir: Path,
                container: str, config: Dict[str, Any]) -> Admission:
     """Convenience entry point so all runners build the same identity."""
+    paths = canonical_program_paths(programs_dir)
+    unavailable = []
+    for path in paths:
+        if path.is_symlink():
+            unavailable.append((path, "symlink"))
+        elif not path.is_file():
+            unavailable.append((path, "missing"))
+        elif _file_digest(path) is None:
+            unavailable.append((path, "unreadable"))
+    if unavailable:
+        identity = build_identity(
+            project, span, container_image=image_identity(container),
+            config=config, program_paths=paths)
+        root = Path(programs_dir).resolve().parent
+        detail = ", ".join(
+            f"{path.relative_to(root)} ({reason})"
+            for path, reason in unavailable)
+        return Admission(
+            False, "CANONICAL_PROGRAM_SOURCE_UNAVAILABLE",
+            identity_sha256(identity), identity,
+            "expected canonical program source is unavailable: " + detail)
     return admit(project, span, container_image=image_identity(container),
-                 config=config, program_paths=canonical_program_paths(programs_dir))
+                 config=config, program_paths=paths)
 
 
 def delegated(identity_hash: str) -> bool:
