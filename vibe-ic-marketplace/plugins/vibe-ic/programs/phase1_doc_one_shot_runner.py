@@ -41228,6 +41228,67 @@ def gen_l7_test_debug(project: Path,
         (kw, re.compile(r"\b" + re.escape(kw) + r"\b", re.IGNORECASE))
         for kw in _VSUITE_INLINE_KEYWORDS
     ]
+
+    # #3473 — a suite name is evidence only when its own clause asserts a
+    # verification method.  The old token-only pass promoted names from
+    # explicit exclusions (including bullets below an out-of-scope heading)
+    # and from optional examples.  Mask only the denied token, preserving all
+    # offsets used by the sentence/evidence code below.
+    _vsuite_negative_heading_re = re.compile(
+        r"(?:\b(?:out(?:side)?\s+of\s+scope|not\s+(?:required|constrained)|"
+        r"excluded)\b|\u4e0d\u5728.{0,24}(?:\u7d04\u675f|\u7ea6\u675f|\u7bc4\u570d|\u8303\u56f4)|"
+        r"(?:\u4e0d|\u975e)(?:\u8981\u6c42|\u5fc5\u9808|\u5fc5\u987b))",
+        re.IGNORECASE,
+    )
+    _vsuite_clause_break_re = re.compile(
+        r"[,;\uff0c\uff1b]?\s+\b(?:but|however|whereas|while)\b\s*|"
+        r"(?:\u4f46\u662f|\u4f46|\u800c\u975e|\u7136\u800c)", re.IGNORECASE)
+    _vsuite_optional_re = re.compile(
+        r"\b(?:optional|example|illustrative|may\s+(?:use|choose))\b|"
+        r"(?:\u53ef\u9078|\u53ef\u9009|\u4efb\u9078|\u4efb\u9009|\u5efa\u8b70\u4f46\u975e\u5f37\u5236)",
+        re.IGNORECASE,
+    )
+    _vsuite_obligation_re = re.compile(
+        r"\b(?:must|shall|required\s+to|requires?|uses?|using|runs?|"
+        r"verif(?:y|ies)\s+with|tests?\s+with)\b|"
+        r"(?:\u5fc5\u9808|\u5fc5\u987b|\u61c9|\u5e94|\u63a1\u7528|\u91c7\u7528|\u4f7f\u7528)",
+        re.IGNORECASE,
+    )
+
+    def _positive_vsuite_text(source: str) -> str:
+        chars = list(source)
+        negative_list = False
+        offset = 0
+        for line in source.splitlines(keepends=True):
+            plain = re.sub(r"[*`_#]", "", line).strip()
+            bullet = bool(re.match(r"^\s*(?:[-+*]|\d+[.)])\s+", line))
+            heading = bool(re.match(
+                r"^\s*(?:#{1,6}\s+|\d+(?:\.\d+)+\s+)", line))
+            if heading:
+                negative_list = bool(_vsuite_negative_heading_re.search(plain))
+            for _, suite_re in _VSUITE_INLINE_PATTERNS:
+                for match in suite_re.finditer(line):
+                    denied = ("\u274c" in line or (bullet and negative_list))
+                    clause_start, clause_end = _prose_sentence_scope(
+                        line, match.start(), match.end())
+                    for boundary in _vsuite_clause_break_re.finditer(line):
+                        if boundary.end() <= match.start():
+                            clause_start = max(clause_start, boundary.end())
+                        elif boundary.start() >= match.end():
+                            clause_end = min(clause_end, boundary.start())
+                            break
+                    clause = line[clause_start:clause_end]
+                    if _prose_is_denied(clause, ignore_bracketed=False):
+                        denied = True
+                    optional = bool(_vsuite_optional_re.search(clause))
+                    obligated = bool(_vsuite_obligation_re.search(clause))
+                    if denied or (optional and not obligated):
+                        lo = offset + match.start()
+                        hi = offset + match.end()
+                        chars[lo:hi] = " " * (hi - lo)
+            offset += len(line)
+        return "".join(chars)
+
     # v1.6.373 — for #268 P3 ORGANIC. Per-keyword cap + methodology-verb
     # priority. Pre-v1.6.373 a single keyword could occupy the entire
     # 32-entry global cap if it was re-mentioned across many docs (the
@@ -41243,8 +41304,9 @@ def gen_l7_test_debug(project: Path,
     for fname, text in extracted.items():
         if not isinstance(text, str) or not text:
             continue
+        suite_text = _positive_vsuite_text(text)
         for kw, rx in _VSUITE_INLINE_PATTERNS:
-            for m in rx.finditer(text):
+            for m in rx.finditer(suite_text):
                 # Enclosing sentence — split on . / ? / !; cap 160 chars.
                 start = max(0, m.start() - 80)
                 end = min(len(text), m.end() + 80)
