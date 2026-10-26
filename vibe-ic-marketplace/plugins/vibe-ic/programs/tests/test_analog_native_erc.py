@@ -29,9 +29,10 @@ def test_derivative_preserves_source_and_native_checks():
 
 def test_floating_metal_ties_follow_only_declared_native_material_edges():
     deck = erc._derive(_source())
-    edges_line = next(line for line in deck.splitlines() if line.startswith("erc_soft_edges = "))
-    edges = json.loads(edges_line.split(" = ", 1)[1])
-    assert edges == [
+    edges = [json.loads(line.split(" = ", 1)[1])
+             for line in deck.splitlines()
+             if line.startswith("erc_soft_edges = ")]
+    assert edges == [[
         ["ERC_SOFT_pwell", "ERC_SOFT_ptap"],
         ["ERC_SOFT_nwell_drw", "ERC_SOFT_ntap"],
         ["ERC_SOFT_ntap", "ERC_SOFT_cont_drw"],
@@ -40,7 +41,7 @@ def test_floating_metal_ties_follow_only_declared_native_material_edges():
         ["ERC_SOFT_ptap1_tie", "ERC_SOFT_cont_drw"],
         ["ERC_SOFT_ntap1_well", "ERC_SOFT_ntap1_tie"],
         ["ERC_SOFT_ptap1_sub", "ERC_SOFT_ptap1_tie"],
-    ]
+    ]]
     assert "lower.interacting(upper).is_empty?" in deck
     assert "native_soft_tie_path" in deck
     assert "__ERC_SOFT_EDGES__" not in deck
